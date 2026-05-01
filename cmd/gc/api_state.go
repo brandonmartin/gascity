@@ -850,9 +850,10 @@ func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.UpdateRig(name, configedit.RigUpdate{
-			Path:      patch.Path,
-			Prefix:    patch.Prefix,
-			Suspended: patch.Suspended,
+			Path:          patch.Path,
+			Prefix:        patch.Prefix,
+			DefaultBranch: patch.DefaultBranch,
+			Suspended:     patch.Suspended,
 		})
 	})
 }

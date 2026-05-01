@@ -845,12 +845,49 @@ func SlingFormulaRepoDir(beadID string, deps SlingDeps, a config.Agent) string {
 }
 
 // SlingFormulaTargetBranch resolves the target branch for formula variables.
+// Resolution order:
+//  1. metadata.target on the work bead (per-bead override)
+//  2. DefaultBranch recorded on the bead's rig in city.toml (set by gc rig add)
+//  3. DefaultBranch recorded on the agent's rig in city.toml
+//  4. Live probe via deps.Branches.DefaultBranch (git symbolic-ref origin/HEAD)
 func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) string {
 	if target := BeadMetadataTarget(deps.Store, beadID); target != "" {
 		return target
 	}
+	if branch := rigStoredDefaultBranch(deps.Cfg, beadID, a); branch != "" {
+		return branch
+	}
 	if deps.Branches != nil {
 		return deps.Branches.DefaultBranch(SlingFormulaRepoDir(beadID, deps, a))
+	}
+	return ""
+}
+
+// rigStoredDefaultBranch returns the DefaultBranch recorded on the rig the
+// bead/agent belongs to, or empty string if no match has a stored value.
+// Bead lookup wins over agent lookup so cross-rig sling targets still pick
+// the right rig.
+func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) string {
+	if cfg == nil {
+		return ""
+	}
+	if beadID != "" {
+		if bp := BeadPrefix(beadID); bp != "" {
+			if rig, ok := FindRigByPrefix(cfg, bp); ok {
+				if branch := rig.EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+			}
+		}
+	}
+	if a.Dir != "" {
+		for _, r := range cfg.Rigs {
+			if r.Name == a.Dir {
+				if branch := r.EffectiveDefaultBranch(); branch != "" {
+					return branch
+				}
+			}
+		}
 	}
 	return ""
 }

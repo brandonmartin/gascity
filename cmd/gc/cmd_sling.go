@@ -995,9 +995,36 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 // slingFormulaSearchPaths returns the formula search paths for the current
 // sling context. Uses the target agent's rig to select rig-specific layers,
 // falling back to city-level layers via FormulaLayers.SearchPaths.
+//
+// slingFormulaTargetBranch resolves the branch used as base_branch /
+// target_branch in formula vars. Resolution order:
+//  1. metadata.target on the work bead (or convoy ancestor)
+//  2. DefaultBranch recorded on the bead's rig in city.toml
+//  3. DefaultBranch recorded on the agent's rig in city.toml
+//  4. Live probe of the rig repo (git symbolic-ref origin/HEAD)
 func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
 	if target := beadMetadataTarget(deps.Store, beadID); target != "" {
 		return target
+	}
+	if deps.Cfg != nil {
+		if beadID != "" {
+			if bp := sling.BeadPrefix(beadID); bp != "" {
+				if rig, ok := sling.FindRigByPrefix(deps.Cfg, bp); ok {
+					if branch := rig.EffectiveDefaultBranch(); branch != "" {
+						return branch
+					}
+				}
+			}
+		}
+		if a.Dir != "" {
+			for _, r := range deps.Cfg.Rigs {
+				if r.Name == a.Dir {
+					if branch := r.EffectiveDefaultBranch(); branch != "" {
+						return branch
+					}
+				}
+			}
+		}
 	}
 	return defaultBranchFor(slingFormulaRepoDir(beadID, deps, a))
 }

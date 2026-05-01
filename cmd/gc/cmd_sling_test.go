@@ -6643,6 +6643,49 @@ func TestDefaultFormulaDryRun(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForPolecatFormula(t *testing.T) {
+	// Storing default_branch in city.toml must override the live probe so
+	// rigs whose origin/HEAD is unset still get the right base_branch.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"SC-1": {ID: "SC-1"}, // no metadata.target — must fall through to rig default
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "SC-1", nil, config.Agent{Name: "polecat", Dir: "scamper"}, deps)
+
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "master" {
+		t.Fatalf("base_branch var = %q, %v; want master, true (from rig DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForRefineryFormula(t *testing.T) {
+	// The refinery's mol-refinery-patrol uses target_branch instead of
+	// base_branch, but the resolution path is identical.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-refinery-patrol", "", nil, config.Agent{Name: "refinery", Dir: "scamper"}, deps)
+
+	if got, ok := findVarValue(vars, "target_branch"); !ok || got != "master" {
+		t.Fatalf("target_branch var = %q, %v; want master, true (from rig DefaultBranch)", got, ok)
+	}
+}
+
 func TestBuildSlingFormulaVarsUsesBeadTargetForPolecatFormula(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	store := &recordingStore{

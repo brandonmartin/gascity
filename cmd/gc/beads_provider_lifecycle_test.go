@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -6166,8 +6167,15 @@ data_dir: "$data_dir"
 
 behavior:
   auto_gc_behavior:
-    enable: true
+    enable: false
     archive_level: 0
+
+system_variables:
+  dolt_auto_gc_enabled: "OFF"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
 EOF
     ;;
   "dolt-state allocate-port")
@@ -6421,8 +6429,15 @@ data_dir: "$data_dir"
 
 behavior:
   auto_gc_behavior:
-    enable: true
+    enable: false
     archive_level: 0
+
+system_variables:
+  dolt_auto_gc_enabled: "OFF"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
 EOF
     printf '12345\n' > "$pid_file"
     printf '{"running":true,"pid":12345,"port":%%s,"data_dir":"%%s","started_at":"2026-04-14T00:00:00Z"}\n' "$port" "$data_dir" > "$state_file"
@@ -7750,7 +7765,7 @@ esac
 	shellConfigPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
 	goConfig := readManagedDoltConfigForTest(t, goConfigPath)
 	shellConfig := readManagedDoltConfigForTest(t, shellConfigPath)
-	if goConfig != shellConfig {
+	if !reflect.DeepEqual(goConfig, shellConfig) {
 		t.Fatalf("managed config mismatch\nGo: %+v\nShell: %+v", goConfig, shellConfig)
 	}
 }
@@ -7773,6 +7788,7 @@ type managedDoltConfigForTest struct {
 			ArchiveLevel int  `yaml:"archive_level"`
 		} `yaml:"auto_gc_behavior"`
 	} `yaml:"behavior"`
+	SystemVariables map[string]string `yaml:"system_variables"`
 }
 
 func readManagedDoltConfigForTest(t *testing.T, path string) managedDoltConfigForTest {

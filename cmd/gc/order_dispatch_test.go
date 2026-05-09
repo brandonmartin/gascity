@@ -918,36 +918,39 @@ source = "`+doltDir+`"
 	}
 
 	wantExecDogOrders := map[string]string{
-		"mol-dog-backup":     "mol-dog-backup.sh",
-		"mol-dog-doctor":     "mol-dog-doctor.sh",
-		"mol-dog-phantom-db": "mol-dog-phantom-db.sh",
+		"mol-dog-backup":     "$PACK_DIR/assets/scripts/mol-dog-backup.sh",
+		"mol-dog-compactor":  "gc dolt compact",
+		"mol-dog-doctor":     "$PACK_DIR/assets/scripts/mol-dog-doctor.sh",
+		"mol-dog-phantom-db": "$PACK_DIR/assets/scripts/mol-dog-phantom-db.sh",
 	}
 	gotExecDogOrders := map[string]bool{}
-	const wantFormulaDogOrders = 2
+	const wantFormulaDogOrders = 1
 	var gotFormulaDogOrders int
 	for _, a := range aa {
 		if !strings.HasPrefix(a.Name, "mol-dog-") {
 			continue
 		}
 		if a.Exec != "" {
-			scriptName, ok := wantExecDogOrders[a.Name]
+			wantExec, ok := wantExecDogOrders[a.Name]
 			if !ok {
 				t.Fatalf("unexpected exec dog order %q", a.Name)
 			}
 			if a.Pool != "" {
 				t.Fatalf("%s exec order pool = %q, want empty", a.Name, a.Pool)
 			}
-			wantExec := "$PACK_DIR/assets/scripts/" + scriptName
 			if a.Exec != wantExec {
 				t.Fatalf("%s exec = %q, want %q", a.Name, a.Exec, wantExec)
 			}
-			scriptPath := filepath.Join(doltDir, "assets", "scripts", scriptName)
-			if _, err := os.Stat(scriptPath); err != nil {
-				t.Fatalf("%s exec script missing: %v", a.Name, err)
-			}
-			if _, err := exec.LookPath("bash"); err == nil {
-				if out, err := exec.Command("bash", "-n", scriptPath).CombinedOutput(); err != nil {
-					t.Fatalf("%s bash -n failed: %v\n%s", a.Name, err, out)
+			const packScriptPrefix = "$PACK_DIR/assets/scripts/"
+			if scriptName := strings.TrimPrefix(wantExec, packScriptPrefix); scriptName != wantExec {
+				scriptPath := filepath.Join(doltDir, "assets", "scripts", scriptName)
+				if _, err := os.Stat(scriptPath); err != nil {
+					t.Fatalf("%s exec script missing: %v", a.Name, err)
+				}
+				if _, err := exec.LookPath("bash"); err == nil {
+					if out, err := exec.Command("bash", "-n", scriptPath).CombinedOutput(); err != nil {
+						t.Fatalf("%s bash -n failed: %v\n%s", a.Name, err, out)
+					}
 				}
 			}
 			gotExecDogOrders[a.Name] = true

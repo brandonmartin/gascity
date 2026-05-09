@@ -18,10 +18,12 @@
 #   1. Pre-flight: record row counts for all user tables.
 #   2. Soft-reset to the root commit; all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
-#   4. Verify post-flatten row counts match pre-flight.
-#   5. Run CALL DOLT_GC() to reclaim chunks orphaned by the flatten.
+#   4. Re-check post-flatten row counts. Any mismatch fails the run before
+#      full GC unless the script can prove external-writer provenance.
+#   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
-# Concurrent writes are safe — merge base shifts but data is preserved.
+# Concurrent writes are not accepted as an explanation for row-count drift
+# or value-hash drift unless the script can prove that provenance.
 # Surgical mode (preserve recent N commits via interactive rebase) is
 # intentionally not implemented; flatten is sufficient for bloat recovery
 # and avoids the rebase-vs-concurrent-write hazards.
@@ -142,9 +144,24 @@ case "$lock_host" in
 esac
 lock_key=$(printf '%s-%s' "$lock_host" "$GC_DOLT_PORT" | tr -c 'A-Za-z0-9_.-' '-')
 lock_root="/tmp/gc-dolt-compact"
-mkdir -p "$lock_root"
-chmod 700 "$lock_root" 2>/dev/null || true
+old_umask=$(umask)
+umask 077
+mkdir -p "$lock_root" || {
+  umask "$old_umask"
+  printf 'compact: unable to create lock directory %s\n' "$lock_root" >&2
+  exit 1
+}
+umask "$old_umask"
+chmod 700 "$lock_root" 2>/dev/null || {
+  printf 'compact: unable to secure lock directory %s\n' "$lock_root" >&2
+  exit 1
+}
 lock_path="$lock_root/${lock_key}.lock"
+lock_dir="$lock_root/${lock_key}.dir"
+lock_pid_path="$lock_dir/pid"
+lock_cmd_path="$lock_dir/cmd"
+pending_gc_dir="$PACK_STATE_DIR/compact-pending-gc"
+quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
 
 # Same DB-discovery pattern as gc-nudge: rig metadata.json files first
 # (authoritative), with a filesystem-scan fallback when gc itself is
@@ -264,59 +281,124 @@ dolt_query() {
     sql -r tabular -q "$query"
 }
 
+emit_error_file() {
+  db="$1"
+  err_file="$2"
+  [ -s "$err_file" ] || return 0
+  while IFS= read -r err_line; do
+    printf 'compact: db=%s %s\n' "$db" "$err_line" >&2
+  done < "$err_file"
+}
+
+query_single_cell() {
+  db="$1"
+  failure_message="$2"
+  query="$3"
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" "$query" > "$out_tmp" 2>"$err_tmp"; then
+    printf 'compact: db=%s %s\n' "$db" "$failure_message" >&2
+    emit_error_file "$db" "$err_tmp"
+    rm -f "$out_tmp" "$err_tmp"
+    return 1
+  fi
+  awk 'NR==4 {gsub(/[| ]/, ""); print; exit}' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
+}
+
 # commit_count — count of commits reachable from main. Bounded scan
 # (LIMIT 200000) so a runaway DB doesn't tie up the connection.
 commit_count() {
   db="$1"
-  dolt_query "$db" "SELECT COUNT(*) FROM (SELECT 1 FROM dolt_log LIMIT 200000) AS t" 2>/dev/null \
-    | awk 'NR==4 {gsub(/[| ]/, ""); print; exit}'
+  query_single_cell "$db" "commit count probe failed" \
+    "SELECT COUNT(*) FROM (SELECT 1 FROM dolt_log LIMIT 200000) AS t"
 }
 
 # root_commit — earliest commit hash on the main branch.
 root_commit() {
   db="$1"
-  dolt_query "$db" "SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1" 2>/dev/null \
-    | awk 'NR==4 {gsub(/[| ]/, ""); print; exit}'
+  query_single_cell "$db" "root commit probe failed" \
+    "SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1"
+}
+
+# head_commit — current branch HEAD hash before flattening.
+head_commit() {
+  db="$1"
+  query_single_cell "$db" "HEAD commit probe failed" \
+    "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1"
 }
 
 # user_tables — emit one user-table name per line (excludes dolt_*
 # system tables and information_schema views).
 user_tables() {
   db="$1"
-  dolt_query "$db" \
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" \
     "SELECT table_name FROM information_schema.tables WHERE table_schema = '$db' AND table_name NOT LIKE 'dolt\\_%' ESCAPE '\\\\' ORDER BY table_name" \
-    2>/dev/null \
-    | awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}'
+    > "$out_tmp" 2>"$err_tmp"; then
+    printf 'compact: db=%s table list probe failed\n' "$db" >&2
+    emit_error_file "$db" "$err_tmp"
+    rm -f "$out_tmp" "$err_tmp"
+    return 1
+  fi
+  awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
 }
 
 # row_count — COUNT(*) for one table. Returns "" on error.
 row_count() {
   db="$1"
   table="$2"
-  dolt_query "$db" "SELECT COUNT(*) FROM \`$table\`" 2>/dev/null \
-    | awk 'NR==4 {gsub(/[| ]/, ""); print; exit}'
+  query_single_cell "$db" "row count probe failed for table=$table" \
+    "SELECT COUNT(*) FROM \`$table\`"
+}
+
+db_value_hash() {
+  db="$1"
+  query_single_cell "$db" "database value hash probe failed" \
+    "SELECT DOLT_HASHOF_DB()"
 }
 
 # preflight_counts — write "<table> <count>" lines for all user tables.
 preflight_counts() {
   db="$1"
   out="$2"
+  tables_tmp=$(mktemp)
   : > "$out"
-  user_tables "$db" | while IFS= read -r t; do
+  if ! user_tables "$db" > "$tables_tmp"; then
+    rm -f "$tables_tmp"
+    return 1
+  fi
+  preflight_failed=0
+  while IFS= read -r t; do
     [ -n "$t" ] || continue
-    cnt=$(row_count "$db" "$t")
+    if ! valid_database_name "$t"; then
+      printf 'compact: db=%s invalid table name from information_schema table=%s — fail\n' \
+        "$db" "$t" >&2
+      preflight_failed=1
+      break
+    fi
+    if ! cnt=$(row_count "$db" "$t"); then
+      printf 'compact: db=%s pre-flight row count failed for table=%s\n' "$db" "$t" >&2
+      preflight_failed=1
+      break
+    fi
     case "$cnt" in
       ''|*[!0-9]*)
         printf 'compact: db=%s pre-flight row count failed for table=%s\n' "$db" "$t" >&2
-        return 1
+        preflight_failed=1
+        break
         ;;
     esac
     printf '%s %s\n' "$t" "$cnt" >> "$out"
-  done
+  done < "$tables_tmp"
+  rm -f "$tables_tmp"
+  return "$preflight_failed"
 }
 
 # verify_counts — re-count and compare against the pre-flight file.
-# Returns nonzero on any mismatch.
+# Count divergence fails unless the script can prove an external writer caused it.
 verify_counts() {
   db="$1"
   preflight="$2"
@@ -325,7 +407,11 @@ verify_counts() {
     [ -n "$line" ] || continue
     t=${line%% *}
     expected=${line##* }
-    actual=$(row_count "$db" "$t")
+    if ! actual=$(row_count "$db" "$t"); then
+      printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
+      fail=1
+      continue
+    fi
     case "$actual" in
       ''|*[!0-9]*)
         printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
@@ -334,12 +420,140 @@ verify_counts() {
         ;;
     esac
     if [ "$actual" != "$expected" ]; then
-      printf 'compact: db=%s INTEGRITY FAILURE table=%s expected=%s actual=%s\n' \
+      printf 'compact: db=%s row count changed after flatten table=%s before=%s after=%s\n' \
         "$db" "$t" "$expected" "$actual" >&2
       fail=1
     fi
   done < "$preflight"
   return "$fail"
+}
+
+oldgen_has_files() {
+  db="$1"
+  oldgen_dir="$DOLT_DATA_DIR/$db/.dolt/noms/oldgen"
+  [ -d "$oldgen_dir" ] || return 1
+  [ -n "$(find "$oldgen_dir" -mindepth 1 -print -quit 2>/dev/null)" ]
+}
+
+compact_marker_path() {
+  dir="$1"
+  db="$2"
+  printf '%s/%s\n' "$dir" "$db"
+}
+
+has_compact_marker() {
+  dir="$1"
+  db="$2"
+  [ -f "$(compact_marker_path "$dir" "$db")" ]
+}
+
+write_compact_marker() {
+  dir="$1"
+  db="$2"
+  reason="$3"
+
+  old_umask=$(umask)
+  umask 077
+  if ! mkdir -p "$dir"; then
+    umask "$old_umask"
+    printf 'compact: db=%s unable to create marker directory %s\n' "$db" "$dir" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$dir/$db.tmp.XXXXXX") || {
+    umask "$old_umask"
+    printf 'compact: db=%s unable to create marker in %s\n' "$db" "$dir" >&2
+    return 1
+  }
+  umask "$old_umask"
+
+  {
+    printf 'db=%s\n' "$db"
+    printf 'reason=%s\n' "$reason"
+    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$tmp" || {
+    rm -f "$tmp"
+    printf 'compact: db=%s unable to write marker %s\n' "$db" "$tmp" >&2
+    return 1
+  }
+
+  if ! mv -f "$tmp" "$(compact_marker_path "$dir" "$db")"; then
+    rm -f "$tmp"
+    printf 'compact: db=%s unable to install marker in %s\n' "$db" "$dir" >&2
+    return 1
+  fi
+  return 0
+}
+
+clear_compact_marker() {
+  dir="$1"
+  db="$2"
+  rm -f "$(compact_marker_path "$dir" "$db")"
+}
+
+run_full_gc() {
+  db="$1"
+  failure_prefix="$2"
+  success_prefix="$3"
+  start="$4"
+
+  printf 'compact: db=%s — running DOLT_GC --full...\n' "$db"
+  gc_rc=0
+  gc_err_tmp=$(mktemp)
+  dolt_query "$db" "CALL DOLT_GC('--full')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+
+  elapsed=$(( $(date +%s) - start ))
+  if [ "$gc_rc" -ne 0 ]; then
+    printf 'compact: db=%s %s DOLT_GC failed rc=%s duration=%ss\n' \
+      "$db" "$failure_prefix" "$gc_rc" "$elapsed" >&2
+    emit_error_file "$db" "$gc_err_tmp"
+    rm -f "$gc_err_tmp"
+    return 1
+  fi
+  rm -f "$gc_err_tmp"
+
+  printf 'compact: db=%s %s duration=%ss — ok\n' \
+    "$db" "$success_prefix" "$elapsed"
+  return 0
+}
+
+restore_head_after_flatten_failure() {
+  db="$1"
+  head="$2"
+  root="$3"
+
+  current_head=$(head_commit "$db" || true)
+  if [ "$current_head" = "$head" ]; then
+    printf 'compact: db=%s already at pre-flatten HEAD=%s after flatten failure\n' \
+      "$db" "$head" >&2
+    return 0
+  fi
+  if [ "$current_head" != "$root" ]; then
+    printf 'compact: db=%s current HEAD=%s is neither pre-flatten HEAD=%s nor compactor reset root=%s — refusing hard reset; manual repair required\n' \
+      "$db" "${current_head:-<empty>}" "$head" "$root" >&2
+    return 1
+  fi
+
+  restore_rc=0
+  restore_err_tmp=$(mktemp)
+  dolt_query "$db" "CALL DOLT_RESET('--hard', '$head')" >/dev/null 2>"$restore_err_tmp" || restore_rc=$?
+  if [ "$restore_rc" -ne 0 ]; then
+    printf 'compact: db=%s restore to pre-flatten HEAD=%s failed rc=%s — manual repair required\n' \
+      "$db" "$head" "$restore_rc" >&2
+    emit_error_file "$db" "$restore_err_tmp"
+    rm -f "$restore_err_tmp"
+    return 1
+  fi
+  rm -f "$restore_err_tmp"
+
+  restored_head=$(head_commit "$db" || true)
+  if [ "$restored_head" != "$head" ]; then
+    printf 'compact: db=%s restore verification failed want_HEAD=%s got_HEAD=%s — manual repair required\n' \
+      "$db" "$head" "${restored_head:-<empty>}" >&2
+    return 1
+  fi
+  printf 'compact: db=%s restored pre-flatten HEAD=%s after flatten failure\n' \
+    "$db" "$head" >&2
+  return 0
 }
 
 flatten_database() {
@@ -355,23 +569,60 @@ flatten_database() {
     esac
   fi
 
-  count=$(commit_count "$db")
+  if has_compact_marker "$quarantine_dir" "$db"; then
+    printf 'compact: db=%s integrity quarantine marker exists — manual intervention required before compaction or GC\n' \
+      "$db" >&2
+    return 1
+  fi
+
+  if has_compact_marker "$pending_gc_dir" "$db"; then
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_gc=present — dry-run (would retry DOLT_GC --full)\n' "$db"
+      return 0
+    fi
+    printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full\n' "$db"
+    start=$(date +%s)
+    if run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+      clear_compact_marker "$pending_gc_dir" "$db"
+      return 0
+    fi
+    return 1
+  fi
+
+  if ! count=$(commit_count "$db"); then
+    return 1
+  fi
   case "$count" in
     ''|*[!0-9]*)
-      printf 'compact: db=%s commit count probe failed — skip\n' "$db" >&2
-      return 0
+      printf 'compact: db=%s commit count probe returned invalid value=%s\n' "$db" "$count" >&2
+      return 1
       ;;
   esac
 
   if [ "$count" -lt "$threshold_commits" ]; then
+    if oldgen_has_files "$db"; then
+      printf 'compact: db=%s commits=%s below_threshold=%s oldgen_archives=present pending_gc=absent — skip\n' \
+        "$db" "$count" "$threshold_commits"
+      return 0
+    fi
     printf 'compact: db=%s commits=%s below_threshold=%s — skip\n' \
       "$db" "$count" "$threshold_commits"
     return 0
   fi
 
-  root=$(root_commit "$db")
+  if ! root=$(root_commit "$db"); then
+    return 1
+  fi
   if [ -z "$root" ]; then
-    printf 'compact: db=%s root commit probe failed — skip\n' "$db" >&2
+    printf 'compact: db=%s root commit probe returned empty value — fail\n' "$db" >&2
+    return 1
+  fi
+
+  if ! head=$(head_commit "$db"); then
+    return 1
+  fi
+  if [ -z "$head" ]; then
+    printf 'compact: db=%s HEAD commit probe returned empty value — fail\n' "$db" >&2
     return 1
   fi
 
@@ -386,9 +637,26 @@ flatten_database() {
     rm -f "$preflight_tmp"
     return 1
   fi
+  if ! preflight_hash=$(db_value_hash "$db"); then
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+  if [ -z "$preflight_hash" ]; then
+    printf 'compact: db=%s database value hash probe returned empty value — fail\n' "$db" >&2
+    rm -f "$preflight_tmp"
+    return 1
+  fi
   table_count=$(wc -l < "$preflight_tmp")
   printf 'compact: db=%s commits=%s root=%s tables=%s — flattening...\n' \
     "$db" "$count" "$root" "$table_count"
+
+  current_head=$(head_commit "$db" || true)
+  if [ "$current_head" != "$head" ]; then
+    printf 'compact: db=%s HEAD changed before flatten want_HEAD=%s got_HEAD=%s — aborting before reset\n' \
+      "$db" "$head" "${current_head:-<empty>}" >&2
+    rm -f "$preflight_tmp"
+    return 1
+  fi
 
   start=$(date +%s)
 
@@ -396,50 +664,75 @@ flatten_database() {
   # Both run in a single dolt sql invocation so the session keeps the
   # USE selection across the two CALLs.
   reset_rc=0
+  reset_err_tmp=$(mktemp)
   dolt_query "$db" "
     CALL DOLT_RESET('--soft', '$root');
     CALL DOLT_COMMIT('-Am', 'compaction: flatten history');
-  " >/dev/null 2>&1 || reset_rc=$?
+  " >/dev/null 2>"$reset_err_tmp" || reset_rc=$?
 
   if [ "$reset_rc" -ne 0 ]; then
-    printf 'compact: db=%s flatten failed rc=%s — leaving database in pre-flatten state\n' \
-      "$db" "$reset_rc" >&2
+    printf 'compact: db=%s flatten failed rc=%s — restoring pre-flatten HEAD=%s\n' \
+      "$db" "$reset_rc" "$head" >&2
+    emit_error_file "$db" "$reset_err_tmp"
+    rm -f "$preflight_tmp"
+    rm -f "$reset_err_tmp"
+    restore_head_after_flatten_failure "$db" "$head" "$root" || true
+    return 1
+  fi
+  rm -f "$reset_err_tmp"
+
+  post_hash=$(db_value_hash "$db" || true)
+  if [ -z "$post_hash" ]; then
+    printf 'compact: db=%s post-flatten database value hash probe failed — quarantine and investigate before GC\n' \
+      "$db" >&2
+    write_compact_marker "$quarantine_dir" "$db" "post-flatten database value hash probe failed" || true
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+  if [ "$post_hash" != "$preflight_hash" ]; then
+    printf 'compact: db=%s value hash changed after flatten before_hash=%s after_hash=%s — quarantine and investigate before GC\n' \
+      "$db" "$preflight_hash" "$post_hash" >&2
+    write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed" || true
     rm -f "$preflight_tmp"
     return 1
   fi
 
   if ! verify_counts "$db" "$preflight_tmp"; then
-    printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (data preserved, but row counts diverge)\n' \
+    printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (row counts diverged; investigate before re-running)\n' \
       "$db" >&2
+    write_compact_marker "$quarantine_dir" "$db" "post-flatten row count changed" || true
     rm -f "$preflight_tmp"
     return 1
   fi
   rm -f "$preflight_tmp"
 
-  after_count=$(commit_count "$db")
+  after_count=$(commit_count "$db" || true)
 
   # CALL DOLT_GC() alone only reclaims working-set chunks — the bulk of
   # the orphaned history lives in noms/oldgen/ archives that require
   # --full to rewrite. Since flatten always orphans the entire prior
   # commit graph, --full is always appropriate here (unlike the hourly
   # gc-nudge which uses the cheaper default GC).
-  printf 'compact: db=%s — running DOLT_GC --full...\n' "$db"
-  gc_rc=0
-  dolt_query "$db" "CALL DOLT_GC('--full')" >/dev/null 2>&1 || gc_rc=$?
-
-  elapsed=$(( $(date +%s) - start ))
-  if [ "$gc_rc" -ne 0 ]; then
-    printf 'compact: db=%s flatten ok commits=%s->%s but DOLT_GC failed rc=%s duration=%ss\n' \
-      "$db" "$count" "${after_count:-?}" "$gc_rc" "$elapsed" >&2
-    return 1
+  if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
+    "commits=$count->${after_count:-?}" "$start"; then
+    clear_compact_marker "$pending_gc_dir" "$db"
+    return 0
   fi
-
-  printf 'compact: db=%s commits=%s->%s duration=%ss — ok\n' \
-    "$db" "$count" "${after_count:-?}" "$elapsed"
-  return 0
+  write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" || true
+  return 1
 }
 
+# shellcheck disable=SC2317
 cleanup() {
+  if [ "$flock_acquired" = "1" ]; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+    rm -f "$lock_path" 2>/dev/null || true
+  fi
+  if [ -n "$lock_cleanup" ]; then
+    rm -f "$lock_pid_path" "$lock_cmd_path" 2>/dev/null || true
+    rmdir "$lock_cleanup" 2>/dev/null || true
+  fi
   if [ -n "${_meta_tmp:-}" ]; then
     rm -f "$_meta_tmp"
   fi
@@ -451,27 +744,133 @@ cleanup() {
   fi
 }
 
-main() {
-  trap cleanup EXIT
+lock_process_command() {
+  pid="$1"
+  command -v ps >/dev/null 2>&1 || return 1
+  ps -p "$pid" -o command= 2>/dev/null | sed -n '1p'
+}
 
-  # Non-blocking flock — if another compactor is running for the same
-  # host:port, skip rather than queue up.
+lock_holder_alive() {
+  [ -f "$lock_pid_path" ] || return 1
+  pid=$(sed -n '1p' "$lock_pid_path" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+
+  current_cmd=$(lock_process_command "$pid" || true)
+  if [ -f "$lock_cmd_path" ]; then
+    expected_cmd=$(sed -n '1p' "$lock_cmd_path" 2>/dev/null || true)
+    if [ -n "$current_cmd" ] && [ "$current_cmd" = "$expected_cmd" ]; then
+      return 0
+    fi
+    if [ -n "$current_cmd" ]; then
+      return 1
+    fi
+  fi
+
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  [ -n "$current_cmd" ]
+}
+
+claim_lock_dir() {
+  old_umask=$(umask)
+  umask 077
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    umask "$old_umask"
+    return 1
+  fi
+  if ! printf '%s\n' "$$" > "$lock_pid_path"; then
+    umask "$old_umask"
+    rmdir "$lock_dir" 2>/dev/null || true
+    printf 'compact: unable to write lock metadata %s\n' "$lock_pid_path" >&2
+    exit 1
+  fi
+  lock_cmd=$(lock_process_command "$$" || true)
+  if [ -n "$lock_cmd" ]; then
+    printf '%s\n' "$lock_cmd" > "$lock_cmd_path" 2>/dev/null || true
+  fi
+  umask "$old_umask"
+  lock_cleanup="$lock_dir"
+  return 0
+}
+
+clear_stale_lock_dir() {
+  [ -d "$lock_dir" ] || return 0
+  if [ ! -f "$lock_pid_path" ]; then
+    sleep 1
+  fi
+  if lock_holder_alive; then
+    return 1
+  fi
+  rm -f "$lock_pid_path" "$lock_cmd_path" 2>/dev/null || true
+  rmdir "$lock_dir" 2>/dev/null
+}
+
+acquire_lock() {
   if command -v flock >/dev/null 2>&1; then
     old_umask=$(umask)
     umask 077
-    : >> "$lock_path" 2>/dev/null || {
+    if ! : >> "$lock_path" 2>/dev/null; then
       umask "$old_umask"
+      if [ -d "$lock_path" ]; then
+        return 1
+      fi
       printf 'compact: unable to create lock file %s\n' "$lock_path" >&2
       exit 1
-    }
-    exec 9<>"$lock_path"
+    fi
+    if ! exec 9<>"$lock_path"; then
+      umask "$old_umask"
+      if [ -d "$lock_path" ]; then
+        return 1
+      fi
+      printf 'compact: unable to open lock file %s\n' "$lock_path" >&2
+      exit 1
+    fi
     umask "$old_umask"
     chmod 600 "$lock_path" 2>/dev/null || true
     if ! flock -n 9; then
-      printf 'compact: another compaction already running for %s:%s — skipping\n' \
-        "$host" "$GC_DOLT_PORT"
-      exit 0
+      return 1
     fi
+    flock_acquired=1
+    if claim_lock_dir; then
+      return 0
+    fi
+    if [ -d "$lock_dir" ] && clear_stale_lock_dir && claim_lock_dir; then
+      return 0
+    fi
+    return 1
+  fi
+
+  if claim_lock_dir; then
+    return 0
+  fi
+  if [ -d "$lock_dir" ] && clear_stale_lock_dir && claim_lock_dir; then
+    return 0
+  fi
+  if [ -d "$lock_dir" ]; then
+    return 1
+  fi
+
+  printf 'compact: unable to create lock directory %s\n' "$lock_dir" >&2
+  exit 1
+}
+
+main() {
+  lock_cleanup=""
+  flock_acquired=""
+  _meta_tmp=""
+  _db_tmp=""
+  _unique_db_tmp=""
+  trap cleanup EXIT
+
+  # Non-blocking host:port lock. Skip rather than queue up; the other
+  # compactor is handling this Dolt server.
+  if ! acquire_lock; then
+    printf 'compact: another compaction already running for %s:%s — skipping\n' \
+      "$host" "$GC_DOLT_PORT"
+    exit 0
   fi
 
   _meta_tmp=$(mktemp)

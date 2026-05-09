@@ -33,9 +33,12 @@ while [ $# -gt 0 ]; do
       echo "Usage: gc dolt cleanup [--force] [--max N] [--server-down-ok]"
       echo ""
       echo "Find Dolt databases not referenced by any registered rig."
+      echo "Also reports (and with --force, prunes) the __gc_probe stats cache,"
+      echo "which can accumulate stale statistics data from past server runs."
       echo ""
       echo "Flags:"
-      echo "  --force            Actually remove orphaned databases"
+      echo "  --force            Actually remove orphaned databases and prune"
+      echo "                     the __gc_probe stats cache"
       echo "  --max N            Refuse if more than N orphans (default: 50)"
       echo "  --server-down-ok   Permit filesystem rm fallback when the dolt"
       echo "                     server is provably stopped. Without this flag"
@@ -117,8 +120,49 @@ for d in "$data_dir"/*/; do
   orphan_count=$((orphan_count + 1))
 done
 
+# Probe stats cleanup.
+# __gc_probe is excluded from the orphan scan above, but its stats/
+# subdirectory (a Dolt sub-database for table statistics) can grow large
+# from accumulated historical data. With dolt_stats_memory_only:ON (the
+# managed-server default) the stats/ dir is never opened by the running
+# server, so pruning it with rm -rf is safe without stopping dolt.
+# Show size in dry-run; remove under --force.
+probe_stats_dir="$data_dir/__gc_probe/.dolt/stats"
+probe_stats_cleaned=false
+if [ -d "$probe_stats_dir" ]; then
+  ps_bytes=$(du -sb "$probe_stats_dir" 2>/dev/null | cut -f1 || echo 0)
+  if [ "$ps_bytes" -gt 0 ]; then
+    if [ "$ps_bytes" -ge 1073741824 ]; then
+      ps_size=$(awk "BEGIN {printf \"%.1f GB\", $ps_bytes/1073741824}")
+    elif [ "$ps_bytes" -ge 1048576 ]; then
+      ps_size=$(awk "BEGIN {printf \"%.1f MB\", $ps_bytes/1048576}")
+    elif [ "$ps_bytes" -ge 1024 ]; then
+      ps_size=$(awk "BEGIN {printf \"%.1f KB\", $ps_bytes/1024}")
+    else
+      ps_size="${ps_bytes} B"
+    fi
+    if [ "$force" = true ]; then
+      if rm -rf "$probe_stats_dir"; then
+        probe_stats_cleaned=true
+      else
+        echo "gc dolt cleanup: failed to prune __gc_probe stats cache" >&2
+      fi
+    fi
+  fi
+fi
+
 if [ "$orphan_count" -eq 0 ]; then
-  echo "No orphaned databases found."
+  if [ "$probe_stats_cleaned" = true ]; then
+    echo "No orphaned databases found."
+    echo ""
+    echo "__gc_probe stats cache pruned ($ps_size freed)."
+  elif [ -n "${ps_size:-}" ]; then
+    echo "No orphaned databases found."
+    echo ""
+    echo "__gc_probe stats cache: $ps_size. Use --force to prune."
+  else
+    echo "No orphaned databases found."
+  fi
   exit 0
 fi
 
@@ -209,6 +253,9 @@ fi
 if [ "$force" != true ]; then
   echo ""
   echo "$orphan_count orphaned database(s). Use --force to remove."
+  if [ -n "${ps_size:-}" ]; then
+    echo "__gc_probe stats cache: $ps_size. Use --force to prune."
+  fi
   exit 0
 fi
 
@@ -364,6 +411,11 @@ refused_count=$(wc -l < "$refused_tmp" | tr -d ' ')
 unsafe_count=$(wc -l < "$unsafe_tmp" | tr -d ' ')
 echo ""
 echo "Removed $removed of $orphan_count orphaned database(s)."
+if [ "$probe_stats_cleaned" = true ]; then
+  echo "__gc_probe stats cache pruned ($ps_size freed)."
+elif [ -n "${ps_size:-}" ]; then
+  echo "__gc_probe stats cache: $ps_size. Use --force to prune."
+fi
 
 # Exit non-zero when:
 #   * any unsafe identifier was found — DB in an impossible state, demands

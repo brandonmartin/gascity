@@ -3146,6 +3146,26 @@ func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByBead(t *testing.T) {
 	}
 }
 
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByHyphenatedBeadPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/agent-diagnostics", Prefix: "agent-diagnostics", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "polecat"} // no Dir - bead-prefix lookup must handle hyphenated prefixes
+
+	got := SlingFormulaTargetBranch("agent-diagnostics-hnn", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (hyphenated rig prefix stored default)", got, "master")
+	}
+}
+
 func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgent(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
@@ -3164,6 +3184,27 @@ func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgent(t *testing.T) {
 	got := SlingFormulaTargetBranch("", deps, a)
 	if got != "master" {
 		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by agent.Dir)", got, "master")
+	}
+}
+
+func TestSlingFormulaTargetBranch_UsesRigDefaultBranchByAgentPath(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: rigPath, Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps := SlingDeps{
+		Cfg:      cfg,
+		Store:    beads.NewMemStore(),
+		Branches: fixedBranchResolver{branch: "main"},
+	}
+	a := config.Agent{Name: "refinery", Dir: rigPath}
+
+	got := SlingFormulaTargetBranch("", deps, a)
+	if got != "master" {
+		t.Errorf("SlingFormulaTargetBranch = %q, want %q (rig stored default by agent path)", got, "master")
 	}
 }
 

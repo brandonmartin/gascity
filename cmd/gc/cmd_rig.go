@@ -118,10 +118,11 @@ func newRigListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List registered rigs",
-		Long: `List all registered rigs with their paths, prefixes, and beads status.
+		Long: `List all registered rigs with their paths, prefixes, default branches, and beads status.
 
 Shows the HQ rig (the city itself) and all configured rigs. Each rig
-displays its bead ID prefix and whether its beads database is initialized.`,
+displays its bead ID prefix, recorded default branch when set, and whether
+its beads database is initialized.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRigList(args, jsonFlag, stdout, stderr) != 0 {
@@ -286,6 +287,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			}
 		}
 	}
+	if reAdd && existingRig != nil && existingRig.EffectiveDefaultBranch() == "" && resolvedDefaultBranch != "" {
+		reAddNeedsConfigWrite = true
+	}
 
 	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 	if err != nil {
@@ -299,7 +303,12 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	if reAddNeedsConfigWrite {
 		next := *cfg
 		next.Rigs = append([]config.Rig{}, cfg.Rigs...)
-		next.Rigs[existingRigIdx].Path = rigPath
+		if strings.TrimSpace(next.Rigs[existingRigIdx].Path) == "" {
+			next.Rigs[existingRigIdx].Path = rigPath
+		}
+		if next.Rigs[existingRigIdx].EffectiveDefaultBranch() == "" && resolvedDefaultBranch != "" {
+			next.Rigs[existingRigIdx].DefaultBranch = resolvedDefaultBranch
+		}
 		nextCfg = &next
 	} else if !reAdd {
 		storedPrefix := ""
@@ -414,7 +423,9 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		if prefixOverride != "" && strings.ToLower(prefixOverride) != existingRig.EffectivePrefix() {
 			fmt.Fprintf(stderr, "gc rig add: warning: --prefix=%s ignored (existing: %s); edit city.toml to change\n", prefixOverride, existingRig.EffectivePrefix()) //nolint:errcheck // best-effort stderr
 		}
-		if defaultBranchOverride != "" && defaultBranchOverride != existingRig.EffectiveDefaultBranch() {
+		if defaultBranchOverride != "" &&
+			defaultBranchOverride != existingRig.EffectiveDefaultBranch() &&
+			(existingRig.EffectiveDefaultBranch() != "" || resolvedDefaultBranch != defaultBranchOverride) {
 			fmt.Fprintf(stderr, "gc rig add: warning: --default-branch=%s ignored (existing: %s); edit city.toml to change\n", defaultBranchOverride, existingRig.EffectiveDefaultBranch()) //nolint:errcheck // best-effort stderr
 		}
 	} else {
@@ -695,11 +706,12 @@ type RigListItem struct {
 	// Path is the absolute filesystem path to the rig directory, resolved from
 	// city.toml by resolveRigPaths. Always absolute in output, regardless of
 	// the relative form stored in city.toml.
-	Path      string `json:"path"`
-	Prefix    string `json:"prefix"`
-	HQ        bool   `json:"hq"`
-	Suspended bool   `json:"suspended"`
-	Beads     string `json:"beads"`
+	Path          string `json:"path"`
+	Prefix        string `json:"prefix"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	HQ            bool   `json:"hq"`
+	Suspended     bool   `json:"suspended"`
+	Beads         string `json:"beads"`
 }
 
 // doRigList is the pure logic for "gc rig list". It reads rigs from city.toml
@@ -735,11 +747,12 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		})
 		for i := range cfg.Rigs {
 			result.Rigs = append(result.Rigs, RigListItem{
-				Name:      cfg.Rigs[i].Name,
-				Path:      cfg.Rigs[i].Path,
-				Prefix:    cfg.Rigs[i].EffectivePrefix(),
-				Suspended: cfg.Rigs[i].Suspended,
-				Beads:     rigBeadsStatus(fs, cfg.Rigs[i].Path),
+				Name:          cfg.Rigs[i].Name,
+				Path:          cfg.Rigs[i].Path,
+				Prefix:        cfg.Rigs[i].EffectivePrefix(),
+				DefaultBranch: cfg.Rigs[i].EffectiveDefaultBranch(),
+				Suspended:     cfg.Rigs[i].Suspended,
+				Beads:         rigBeadsStatus(fs, cfg.Rigs[i].Path),
 			})
 		}
 		enc := json.NewEncoder(stdout)
@@ -775,6 +788,9 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		w(fmt.Sprintf("  %s:", header))
 		w(fmt.Sprintf("    Path:   %s", cfg.Rigs[i].Path))
 		w(fmt.Sprintf("    Prefix: %s", prefix))
+		if branch := cfg.Rigs[i].EffectiveDefaultBranch(); branch != "" {
+			w(fmt.Sprintf("    Default branch: %s", branch))
+		}
 		w(fmt.Sprintf("    Beads:  %s", beads))
 	}
 	return 0

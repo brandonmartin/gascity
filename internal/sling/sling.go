@@ -341,13 +341,14 @@ func RigDirForBead(cfg *config.City, beadID string) string {
 }
 
 // RigDirForAgent returns the rig directory for an agent by matching its Dir
-// field to a rig Name.
+// field to a rig name or configured rig path.
 func RigDirForAgent(cfg *config.City, a config.Agent) string {
-	if a.Dir == "" {
+	rigName := rigNameForAgent(cfg, a)
+	if rigName == "" {
 		return ""
 	}
 	for _, r := range cfg.Rigs {
-		if r.Name == a.Dir {
+		if r.Name == rigName {
 			return r.Path
 		}
 	}
@@ -835,13 +836,24 @@ func SlingFormulaUsesTargetBranch(formulaName string) bool {
 func SlingFormulaRepoDir(beadID string, deps SlingDeps, a config.Agent) string {
 	if deps.Cfg != nil {
 		if dir := RigDirForBead(deps.Cfg, beadID); dir != "" {
-			return dir
+			return resolveScopeRoot(deps.CityPath, dir)
 		}
 		if dir := RigDirForAgent(deps.Cfg, a); dir != "" {
-			return dir
+			return resolveScopeRoot(deps.CityPath, dir)
 		}
 	}
-	return deps.CityPath
+	return resolveScopeRoot(deps.CityPath, deps.CityPath)
+}
+
+func resolveScopeRoot(cityPath, storePath string) string {
+	scopeRoot := strings.TrimSpace(storePath)
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if !filepath.IsAbs(scopeRoot) {
+		scopeRoot = filepath.Join(cityPath, scopeRoot)
+	}
+	return filepath.Clean(scopeRoot)
 }
 
 // SlingFormulaTargetBranch resolves the target branch for formula variables.
@@ -872,7 +884,7 @@ func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) str
 		return ""
 	}
 	if beadID != "" {
-		if bp := BeadPrefix(beadID); bp != "" {
+		if bp := BeadPrefixForCity(cfg, beadID); bp != "" && !IsHQPrefix(cfg, bp) {
 			if rig, ok := FindRigByPrefix(cfg, bp); ok {
 				if branch := rig.EffectiveDefaultBranch(); branch != "" {
 					return branch
@@ -880,9 +892,9 @@ func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) str
 			}
 		}
 	}
-	if a.Dir != "" {
+	if rigName := rigNameForAgent(cfg, a); rigName != "" {
 		for _, r := range cfg.Rigs {
-			if r.Name == a.Dir {
+			if r.Name == rigName {
 				if branch := r.EffectiveDefaultBranch(); branch != "" {
 					return branch
 				}

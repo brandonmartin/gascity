@@ -4074,10 +4074,10 @@ func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 		},
 	}
 
-	got := slingFormulaRepoDir("plain text", deps, config.Agent{Dir: "alpha"})
+	got := sling.SlingFormulaRepoDir("plain text", deps, config.Agent{Dir: "alpha"})
 	want := filepath.Join(cityPath, "rigs", "alpha")
 	if got != want {
-		t.Fatalf("slingFormulaRepoDir() = %q, want %q", got, want)
+		t.Fatalf("SlingFormulaRepoDir() = %q, want %q", got, want)
 	}
 }
 
@@ -6668,6 +6668,46 @@ func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForPolecatFormula(t *
 	}
 }
 
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForHyphenatedPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/agent-diagnostics", Prefix: "agent-diagnostics", DefaultBranch: "master"},
+		},
+	}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"agent-diagnostics-hnn": {ID: "agent-diagnostics-hnn"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "agent-diagnostics-hnn", nil, config.Agent{Name: "polecat"}, deps)
+
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "master" {
+		t.Fatalf("base_branch var = %q, %v; want master, true (from hyphenated rig prefix DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForAgentPath(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: rigPath, Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-refinery-patrol", "", nil, config.Agent{Name: "refinery", Dir: rigPath}, deps)
+
+	if got, ok := findVarValue(vars, "target_branch"); !ok || got != "master" {
+		t.Fatalf("target_branch var = %q, %v; want master, true (from path-scoped agent DefaultBranch)", got, ok)
+	}
+}
+
 func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForRefineryFormula(t *testing.T) {
 	// The refinery's mol-refinery-patrol uses target_branch instead of
 	// base_branch, but the resolution path is identical.
@@ -6951,8 +6991,8 @@ func TestBeadMetadataTargetStopsOnParentCycle(t *testing.T) {
 		},
 	}
 
-	if got := beadMetadataTarget(store, "A"); got != "" {
-		t.Fatalf("beadMetadataTarget = %q, want empty string", got)
+	if got := sling.BeadMetadataTarget(store, "A"); got != "" {
+		t.Fatalf("BeadMetadataTarget = %q, want empty string", got)
 	}
 }
 

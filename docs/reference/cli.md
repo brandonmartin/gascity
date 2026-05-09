@@ -1921,10 +1921,11 @@ gc rig add /path/to/project
 
 ## gc rig list
 
-List all registered rigs with their paths, prefixes, and beads status.
+List all registered rigs with their paths, prefixes, default branches, and beads status.
 
 Shows the HQ rig (the city itself) and all configured rigs. Each rig
-displays its bead ID prefix and whether its beads database is initialized.
+displays its bead ID prefix, recorded default branch when set, and whether
+its beads database is initialized.
 
 ```
 gc rig list [flags]

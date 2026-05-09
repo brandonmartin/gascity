@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -169,6 +170,35 @@ func TestDoRigAdd_DefaultBranchFlagOverridesProbe(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `default_branch = "develop"`) {
 		t.Errorf("city.toml should record flag-supplied default_branch=develop:\n%s", data)
+	}
+}
+
+func TestDoRigAdd_BackfillsExistingRigDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := makeMasterRig(t)
+	cityToml := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"master-rig\"\npath = %q\n", rigPath)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `default_branch = "master"`) {
+		t.Errorf("city.toml should backfill default_branch=master on re-add:\n%s", data)
 	}
 }
 
@@ -830,7 +860,7 @@ func TestDoRigList_WithRigs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\nprefix = \"fe\"\n"
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\nprefix = \"fe\"\ndefault_branch = \"develop\"\n"
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -857,9 +887,50 @@ func TestDoRigList_WithRigs(t *testing.T) {
 	if !strings.Contains(output, "Prefix: fe") {
 		t.Errorf("output missing rig prefix: %s", output)
 	}
+	if !strings.Contains(output, "Default branch: develop") {
+		t.Errorf("output missing rig default branch: %s", output)
+	}
 	if !strings.Contains(output, "not initialized") {
 		t.Errorf("output missing rig beads status: %s", output)
 	}
+}
+
+func TestDoRigListJSONShowsDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\ndefault_branch = \"develop\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigList(fsys.OSFS{}, cityPath, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigList returned %d, stderr: %s", code, stderr.String())
+	}
+
+	var got struct {
+		Rigs []struct {
+			Name          string `json:"name"`
+			DefaultBranch string `json:"default_branch"`
+		} `json:"rigs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode rig list JSON: %v\n%s", err, stdout.String())
+	}
+	for _, rig := range got.Rigs {
+		if rig.Name == "my-frontend" {
+			if rig.DefaultBranch != "develop" {
+				t.Fatalf("default_branch = %q, want develop\n%s", rig.DefaultBranch, stdout.String())
+			}
+			return
+		}
+	}
+	t.Fatalf("rig my-frontend not found in JSON:\n%s", stdout.String())
 }
 
 func TestDoRigList_Empty(t *testing.T) {

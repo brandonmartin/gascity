@@ -5382,6 +5382,10 @@
       "RigPatchSetInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Override mainline branch.",
+            "type": "string"
+          },
           "name": {
             "description": "Rig name.",
             "type": "string"

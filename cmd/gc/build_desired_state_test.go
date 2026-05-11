@@ -2410,6 +2410,66 @@ func TestBuildDesiredState_OnDemandNamedSession_NoPhantomPoolInstance(t *testing
 	}
 }
 
+// TestRealizePoolDesiredSessions_NamedSessionBeadRefusedAsPoolInstance verifies
+// the defense-in-depth in realizePoolDesiredSessions: even if a pool resume
+// request slips through with a SessionBeadID that points to a named-session
+// bead, the bead is NOT materialized as a pool instance. ComputePoolDesiredStates
+// is supposed to filter these out, but the defense layer guards against a
+// future regression that would re-introduce the phantom "{name}-1" sibling.
+func TestRealizePoolDesiredSessions_NamedSessionBeadRefusedAsPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	namedBead := beads.Bead{
+		ID:     "sess-refinery",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "refinery",
+			"template":                   "refinery",
+			"agent_name":                 "refinery",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), nil, &stderr)
+	bp.sessionBeads = newSessionBeadSnapshot([]beads.Bead{namedBead})
+
+	poolState := PoolDesiredState{
+		Template: "refinery",
+		Requests: []SessionRequest{{
+			Template:      "refinery",
+			Tier:          "resume",
+			SessionBeadID: namedBead.ID,
+			WorkBeadID:    "w1",
+		}},
+	}
+	desired := map[string]TemplateParams{}
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], poolState, desired, &stderr)
+
+	if len(desired) != 0 {
+		t.Fatalf("desired entries = %d, want 0 (named-session bead must not become a pool instance); got %v", len(desired), desired)
+	}
+	if !strings.Contains(stderr.String(), "refusing to materialize named-session bead") {
+		t.Errorf("expected defense-in-depth warning, got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), namedBead.ID) {
+		t.Errorf("expected warning to mention bead %q, got: %q", namedBead.ID, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"refinery"-N sibling`) {
+		t.Errorf("expected warning to describe phantom sibling, got: %q", stderr.String())
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_InProgressAssigneeMaterializes(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

@@ -216,7 +216,10 @@ git -C "$ARCHIVE" remote remove origin
 
 Re-detection is automatic on the next run — no state-file edits are
 required. The next log line will read `archive running in local-only
-mode`.
+mode`. If push mode had accumulated failures before the remote was
+removed, local-only detection clears that stale failure counter while
+retaining `pending_archive_push` so deferred commits are still pushed if
+`origin` returns.
 
 ### Reading a `JSONL push failed [HIGH]` escalation
 
@@ -238,6 +241,12 @@ Remediation:
 - Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
 - See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
 ```
+
+The exporter sends one HIGH escalation for a still-unresolved push
+failure. It continues recording `consecutive_push_failures` and
+`pending_archive_push` in state, but does not mail the same failure on
+every tick. A successful push or a switch back to local-only mode clears
+the escalation marker.
 
 Common root causes, in rough order of frequency:
 

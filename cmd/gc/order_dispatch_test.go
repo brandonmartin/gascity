@@ -4334,6 +4334,52 @@ func TestOrderDispatchOpenWispRootDoesNotBlockRedispatch(t *testing.T) {
 	}
 }
 
+// listIncludingClosedStore forces List to include closed beads regardless of
+// the caller's IncludeClosed setting. Production stores honor IncludeClosed:
+// false, but hasOpenWorkStrict's defensive status check must still skip closed
+// beads if a store implementation (or a stale cache) returns them.
+type listIncludingClosedStore struct {
+	beads.Store
+}
+
+func (s listIncludingClosedStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	q.IncludeClosed = true
+	return s.Store.List(q)
+}
+
+// TestHasOpenWorkStrictSkipsClosedTrackingBead covers the defensive
+// status-closed branch in hasOpenWorkStrict (cmd/gc/order_dispatch.go:802-803).
+// The standard query passes IncludeClosed: false, so closed beads normally
+// don't reach the loop — but a misbehaving store (or a stale CachingStore
+// view) could leak one through. If hasOpenWorkStrict didn't skip closed
+// beads, a completed tracking bead would permanently block re-dispatch — the
+// same failure shape ga-lo8c hit with leftover wisp roots.
+func TestHasOpenWorkStrictSkipsClosedTrackingBead(t *testing.T) {
+	base := beads.NewMemStore()
+	store := listIncludingClosedStore{Store: base}
+
+	b, err := store.Create(beads.Bead{
+		Title:  "order:my-order",
+		Labels: []string{"order-run:my-order", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("seed bead: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("close seed bead: %v", err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "my-order")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if has {
+		t.Fatal("closed tracking bead must not count as in-flight work; " +
+			"the defensive status filter at order_dispatch.go:802 should skip it")
+	}
+}
+
 // Unused but keep for future event assertion tests.
 var (
 	_ = (*memRecorder).hasSubject

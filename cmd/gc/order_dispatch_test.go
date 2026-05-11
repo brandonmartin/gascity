@@ -4280,6 +4280,60 @@ func TestOrderDispatchFiresAfterWorkClosed(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchOpenWispRootDoesNotBlockRedispatch reproduces the
+// formula+pool auto-dispatch failure tracked by ga-lo8c (continuation of
+// closed ga-jra). After a city restart, the wisp root bead from a previous
+// formula+pool dispatch persists in the store with status="open" and the
+// "order-run:<scoped>" label (stamped by dispatchWisp at order_dispatch.go:706).
+// Molecule roots are never auto-closed when their step beads complete, so
+// the leftover open root permanently tripped hasOpenWorkStrict and starved
+// the order's cooldown gate.
+//
+// In-flight dispatch is signaled by the tracking bead (carries both
+// "order-run:<scoped>" AND labelOrderTracking). Wisp roots carry only the
+// former — distinguishing the two is the fix.
+func TestOrderDispatchOpenWispRootDoesNotBlockRedispatch(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Simulate post-restart state: an open wisp root from the prior
+	// formula+pool dispatch. The tracking bead from that dispatch was
+	// already closed by dispatchOne's deferred Close, but the molecule
+	// root remains open because nothing in the dispatch path closes it.
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-formula-pool-work",
+		Labels: []string{"order-run:my-pool-order"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wispRoot.Status == "closed" {
+		t.Fatalf("seed wisp root should be open, got status=%q", wispRoot.Status)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "my-pool-order",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	// Future "now" so cooldown evaluates Due=true (LastRun = wispRoot.CreatedAt).
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))
+	ad.drain(context.Background())
+
+	if !ran {
+		t.Fatal("exec should have run — an open wisp root (no labelOrderTracking) " +
+			"is leftover state, not in-flight work, and must not block re-dispatch")
+	}
+}
+
 // Unused but keep for future event assertion tests.
 var (
 	_ = (*memRecorder).hasSubject

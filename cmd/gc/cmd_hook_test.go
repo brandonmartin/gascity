@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHookNoWork(t *testing.T) {
@@ -42,6 +43,40 @@ func TestHookCommandError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "command failed") {
 		t.Errorf("stderr = %q, want to contain %q", stderr.String(), "command failed")
+	}
+}
+
+func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("doHook(error with output) = %d, want 1", code)
+	}
+	if got := stdout.String(); got != "[]" {
+		t.Errorf("stdout = %q, want partial JSON output", got)
+	}
+	if !strings.Contains(stderr.String(), "partial stdout") {
+		t.Errorf("stderr = %q, want timeout diagnostic", stderr.String())
+	}
+}
+
+func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
+	oldTimeout := hookWorkQueryTimeout
+	hookWorkQueryTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { hookWorkQueryTimeout = oldTimeout })
+
+	out, err := shellWorkQueryWithEnv("printf '[]\\n'; sleep 1", "", nil)
+	if err == nil {
+		t.Fatal("shellWorkQueryWithEnv() error = nil, want timeout")
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("stdout = %q, want partial JSON output", out)
+	}
+	if !strings.Contains(err.Error(), "partial stdout") {
+		t.Fatalf("error = %v, want partial stdout diagnostic", err)
 	}
 }
 

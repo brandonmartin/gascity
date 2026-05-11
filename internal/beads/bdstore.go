@@ -26,7 +26,10 @@ const (
 // The dir argument sets the working directory; name and args specify the command.
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
-var bdCommandTimeout = 120 * time.Second
+var (
+	bdCommandTimeout     = 120 * time.Second
+	bdReadCommandTimeout = 20 * time.Second
+)
 
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.
 // Captures stdout for parsing and stderr for error diagnostics.
@@ -59,7 +62,8 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
 		}
 		trace("start", nil)
-		ctx, cancel := context.WithTimeout(context.Background(), bdCommandTimeout)
+		timeout := bdCommandTimeoutFor(name, args)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
@@ -80,7 +84,7 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				err, out, stderr.String())
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after %s", bdCommandTimeout)
+			timeoutErr := fmt.Errorf("timed out after %s", timeout)
 			trace("timeout", timeoutErr)
 			if stderr.Len() > 0 {
 				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
@@ -103,6 +107,18 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		}
 		trace("done", err)
 		return out, err
+	}
+}
+
+func bdCommandTimeoutFor(name string, args []string) time.Duration {
+	if name != "bd" || len(args) == 0 {
+		return bdCommandTimeout
+	}
+	switch args[0] {
+	case "count", "list", "ready", "show", "stats":
+		return bdReadCommandTimeout
+	default:
+		return bdCommandTimeout
 	}
 }
 

@@ -456,10 +456,14 @@ func runManagedDoltSQL(host, port, user string, args ...string) (string, error) 
 		"--host", host,
 		"--port", port,
 		"--user", user,
-		"--password", managedDoltPassword(),
+	}
+	if password := managedDoltPassword(); password != "" {
+		baseArgs = append(baseArgs, "--password", password)
+	}
+	baseArgs = append(baseArgs,
 		"--no-tls",
 		"sql",
-	}
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", append(baseArgs, args...)...)

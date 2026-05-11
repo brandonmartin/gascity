@@ -686,6 +686,11 @@ name = "demo"
 	}
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	// Clear any inherited scope pin so the GC_BEADS override applies to
+	// this test's city. When run from a polecat session, the ambient
+	// GC_BEADS_SCOPE_ROOT points at the rig repo and would suppress the
+	// override before the provider check could fire.
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	var stdout, stderr bytes.Buffer
 	if got := doBd([]string{"list"}, &stdout, &stderr); got == 0 {

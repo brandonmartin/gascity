@@ -687,9 +687,17 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	return false
 }
 
-// hasOpenWorkStrict reports whether any non-closed work or tracking bead
-// exists for this order. Open tracking beads represent in-flight dispatch and
-// must block condition/event orders that do not consult LastRun.
+// hasOpenWorkStrict reports whether an open tracking bead exists for this
+// order — i.e. a dispatchOne goroutine is still in flight. Tracking beads
+// carry both "order-run:<scoped>" and labelOrderTracking and are closed when
+// the dispatch completes (see dispatchOne's deferred store.Close).
+//
+// Wisp root beads also carry "order-run:<scoped>" (used by gc order history
+// and the orders API feed for run visibility), but molecule roots never
+// auto-close after their step beads finish. They are NOT in-flight work and
+// must not block re-dispatch — counting them was the cause of ga-jra, where
+// formula+pool orders stalled indefinitely after their first auto-fire
+// because the leftover open wisp root kept tripping this check.
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
 		Label: "order-run:" + scopedName,
@@ -699,8 +707,13 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 		return false, fmt.Errorf("listing order work beads: %w", err)
 	}
 	for _, b := range results {
-		if b.Status != "closed" {
-			return true, nil
+		if b.Status == "closed" {
+			continue
+		}
+		for _, lbl := range b.Labels {
+			if lbl == labelOrderTracking {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

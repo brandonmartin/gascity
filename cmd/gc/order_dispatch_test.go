@@ -3925,6 +3925,50 @@ func TestOrderDispatchFiresAfterWorkClosed(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchIgnoresOpenWispRootsFromPriorDispatches guards against
+// regressing the gascity#ga-jra bug: an open wisp root left behind by a
+// previous formula dispatch (wisp roots are not auto-closed) carries the
+// "order-run:<scoped>" label, but it is NOT in-flight dispatch and must
+// not block re-dispatch. Only an open tracking bead (carrying
+// labelOrderTracking) represents in-flight work.
+func TestOrderDispatchIgnoresOpenWispRootsFromPriorDispatches(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Seed an OPEN wisp root — simulates the molecule root from a previous
+	// formula dispatch whose tracking bead has already been closed by
+	// dispatchOne, but whose root bead remains open (molecule roots never
+	// auto-close after their step beads finish).
+	if _, err := store.Create(beads.Bead{
+		Title:  "mol-do-work",
+		Labels: []string{"order-run:my-auto"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "my-auto",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	// Future "now" so cooldown trigger fires (LastRun is the wisp root's
+	// CreatedAt, comfortably > 1s ago).
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))
+	ad.drain(context.Background())
+
+	if !ran {
+		t.Error("exec should have run — open wisp roots without labelOrderTracking must not block re-dispatch")
+	}
+}
+
 // Unused but keep for future event assertion tests.
 var (
 	_ = (*memRecorder).hasSubject

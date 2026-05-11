@@ -7,6 +7,101 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+func TestSessionBeadAssigneeIdentities(t *testing.T) {
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want []string
+	}{
+		{
+			name: "empty bead produces no identities",
+			bead: beads.Bead{},
+			want: []string{},
+		},
+		{
+			name: "id only",
+			bead: beads.Bead{ID: "mc-xyz"},
+			want: []string{"mc-xyz"},
+		},
+		{
+			name: "session_name only",
+			bead: beads.Bead{Metadata: map[string]string{"session_name": "worker-mc-live"}},
+			want: []string{"worker-mc-live"},
+		},
+		{
+			name: "configured_named_identity only",
+			bead: beads.Bead{Metadata: map[string]string{"configured_named_identity": "reviewer"}},
+			want: []string{"reviewer"},
+		},
+		{
+			name: "alias only",
+			bead: beads.Bead{Metadata: map[string]string{"alias": "nux"}},
+			want: []string{"nux"},
+		},
+		{
+			name: "alias_history single entry",
+			bead: beads.Bead{Metadata: map[string]string{"alias_history": "previous"}},
+			want: []string{"previous"},
+		},
+		{
+			name: "alias_history multiple entries",
+			bead: beads.Bead{Metadata: map[string]string{"alias_history": "first,second,third"}},
+			want: []string{"first", "second", "third"},
+		},
+		{
+			name: "all fields populated",
+			bead: beads.Bead{
+				ID: "mc-xyz",
+				Metadata: map[string]string{
+					"session_name":              "worker-mc-live",
+					"configured_named_identity": "reviewer",
+					"alias":                     "rictus",
+					"alias_history":             "nux",
+				},
+			},
+			want: []string{"mc-xyz", "worker-mc-live", "reviewer", "rictus", "nux"},
+		},
+		{
+			name: "whitespace-only values are trimmed and skipped",
+			bead: beads.Bead{
+				ID: "  ",
+				Metadata: map[string]string{
+					"session_name":              "   ",
+					"configured_named_identity": "\t",
+					"alias":                     " ",
+					"alias_history":             "  ,  , real ,  ",
+				},
+			},
+			want: []string{"real"},
+		},
+		{
+			name: "values with surrounding whitespace are trimmed",
+			bead: beads.Bead{
+				ID: "  mc-xyz  ",
+				Metadata: map[string]string{
+					"session_name":              "  worker-mc-live  ",
+					"configured_named_identity": "  reviewer  ",
+					"alias":                     "  nux  ",
+				},
+			},
+			want: []string{"mc-xyz", "worker-mc-live", "reviewer", "nux"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionBeadAssigneeIdentities(tt.bead)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d identities %v, want %d %v", len(got), got, len(tt.want), tt.want)
+			}
+			for i, id := range got {
+				if id != tt.want[i] {
+					t.Errorf("identity[%d] = %q, want %q (full got=%v, want=%v)", i, id, tt.want[i], got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestPoolSessionName(t *testing.T) {
 	tests := []struct {
 		template string

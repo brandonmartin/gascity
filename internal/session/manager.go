@@ -79,7 +79,13 @@ type Info struct {
 	ResumeCommand string // explicit resume command template ({{.SessionKey}})
 	CreatedAt     time.Time
 	LastActive    time.Time
-	Attached      bool
+	// LastNudgeDeliveredAt records the wall-clock time of the most recent
+	// successful queued-nudge delivery to this session. Zero when no
+	// queued nudge has been delivered yet (or the metadata predates the
+	// stamping path). Surfaced in `gc session list` so operators can
+	// spot warm sessions whose delivery loop has stalled.
+	LastNudgeDeliveredAt time.Time
+	Attached             bool
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a
@@ -1312,6 +1318,11 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		ResumeStyle:   b.Metadata["resume_style"],
 		ResumeCommand: b.Metadata["resume_command"],
 		CreatedAt:     b.CreatedAt,
+	}
+	if raw := strings.TrimSpace(b.Metadata["last_nudge_delivered_at"]); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			info.LastNudgeDeliveredAt = parsed
+		}
 	}
 
 	// Enrich with live runtime state if active.

@@ -783,7 +783,24 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 		return false, nil
 	}
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
+	stampLastNudgeDeliveredAt(deliveryStore, target.sessionID, time.Now())
 	return true, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items))
+}
+
+// lastNudgeDeliveredAtKey is the session-bead metadata key that records the
+// wall-clock time of the most recent successful queued-nudge delivery for a
+// session. It is exposed by `gc session list` so operators can spot warm
+// sessions whose delivery loop has stalled (queued items piling up while
+// metadata.last_nudge_delivered_at stays old).
+const lastNudgeDeliveredAtKey = "last_nudge_delivered_at"
+
+func stampLastNudgeDeliveredAt(store beads.Store, sessionID string, t time.Time) {
+	if store == nil || sessionID == "" {
+		return
+	}
+	// Best-effort stamp. Delivery already succeeded, so a metadata write
+	// failure here must not bubble back to the caller and force a redelivery.
+	_ = store.SetMetadata(sessionID, lastNudgeDeliveredAtKey, t.UTC().Format(time.RFC3339))
 }
 
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
@@ -811,15 +828,19 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	if target.sessionName == "" {
 		return
 	}
-	if target.sessionTransport() == "acp" {
-		return
-	}
 	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
 	if nudgeDispatcherIsSupervisor(target.cfg) {
 		return
 	}
+	// ACP sessions go through the same per-session poller in legacy mode.
+	// tryDeliverQueuedNudgesByPoller formats the message via the ACP
+	// runtime branch and invokes handle.Nudge, which surfaces the queued
+	// content to the agent as a session/prompt. Excluding ACP here used
+	// to strand queued nudges against alive-but-idle ACP sessions because
+	// inject-on-hook only fires when the agent receives a fresh prompt
+	// from another path.
 	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
 		return
 	}

@@ -729,7 +729,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
 	for _, s := range sessions {
 		state := string(s.State)
 		if s.State == "" {
@@ -743,7 +743,11 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		if !s.LastActive.IsZero() {
 			lastActive = formatDuration(time.Since(s.LastActive)) + " ago"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
+		lastNudge := "-"
+		if !s.LastNudgeDeliveredAt.IsZero() {
+			lastNudge = formatDuration(time.Since(s.LastNudgeDeliveredAt)) + " ago"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0

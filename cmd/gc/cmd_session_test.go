@@ -1150,6 +1150,106 @@ func TestCmdSessionListJSONNoSessionsReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+// TestCmdSessionList_RendersLastNudgeColumn pins the table rendering of the
+// "LAST NUDGE" column added by the warm-idle ACP nudge fix: the header is
+// emitted, sessions stamped with metadata.last_nudge_delivered_at render as
+// "<duration> ago", and sessions without the stamp fall back to "-".
+func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+
+	nudgeStamp := time.Now().Add(-2*time.Hour - 30*time.Minute).UTC().Format(time.RFC3339)
+	if _, err := store.Create(beads.Bead{
+		Title:  "nudged-session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":            "nudged-session",
+			"template":                "mayor",
+			"state":                   "asleep",
+			"last_nudge_delivered_at": nudgeStamp,
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(nudged session bead): %v", err)
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "quiet-session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "quiet-session",
+			"template":     "mayor",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(quiet session bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 1 || !strings.Contains(lines[0], "LAST NUDGE") {
+		t.Fatalf("missing LAST NUDGE column header; first line = %q\nfull output:\n%s", firstLine(lines), out)
+	}
+	if !strings.Contains(out, "2h ago") {
+		t.Fatalf("output missing formatted LAST NUDGE (want %q) for nudged session:\n%s", "2h ago", out)
+	}
+
+	nudgedRow := findRowContaining(lines, "nudged-session")
+	if nudgedRow == "" {
+		t.Fatalf("output missing row for nudged session:\n%s", out)
+	}
+	if got := lastField(nudgedRow); got != "ago" {
+		t.Fatalf("nudged-session row last field = %q, want %q; row=%q", got, "ago", nudgedRow)
+	}
+
+	quietRow := findRowContaining(lines, "quiet-session")
+	if quietRow == "" {
+		t.Fatalf("output missing row for quiet session:\n%s", out)
+	}
+	if got := lastField(quietRow); got != "-" {
+		t.Fatalf("quiet-session LAST NUDGE = %q, want %q; row=%q", got, "-", quietRow)
+	}
+}
+
+func firstLine(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[0]
+}
+
+func findRowContaining(lines []string, needle string) string {
+	for _, line := range lines {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
+func lastField(row string) string {
+	fields := strings.Fields(row)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[len(fields)-1]
+}
+
 func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")

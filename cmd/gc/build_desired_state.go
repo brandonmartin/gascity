@@ -734,14 +734,10 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 		return
 	}
 	for _, session := range sessionBeads.Open() {
-		ids := []string{
-			session.ID,
-			session.Metadata["session_name"],
-			session.Metadata["configured_named_identity"],
-		}
+		ids := sessionBeadAssigneeIdentities(session)
 		matched := false
 		for _, id := range ids {
-			if _, ok := skip[strings.TrimSpace(id)]; ok {
+			if _, ok := skip[id]; ok {
 				matched = true
 				break
 			}
@@ -750,10 +746,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 			continue
 		}
 		for _, id := range ids {
-			id = strings.TrimSpace(id)
-			if id != "" {
-				skip[id] = struct{}{}
-			}
+			skip[id] = struct{}{}
 		}
 	}
 }
@@ -780,9 +773,9 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 			if session.Status == "closed" {
 				continue
 			}
-			add(session.ID)
-			add(session.Metadata["session_name"])
-			add(session.Metadata["configured_named_identity"])
+			for _, id := range sessionBeadAssigneeIdentities(session) {
+				add(id)
+			}
 		}
 	}
 	if cfg != nil {

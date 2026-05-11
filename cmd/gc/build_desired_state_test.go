@@ -2350,6 +2350,66 @@ func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T
 	}
 }
 
+// TestBuildDesiredState_OnDemandNamedSession_NoPhantomPoolInstance verifies the
+// ga-fiw fix: when work is assigned to a max_active_sessions=1 named-session
+// agent (e.g. refinery), only ONE desired session entry exists — not the
+// canonical named identity plus a phantom "{name}-1" pool sibling.
+//
+// Pre-fix bug: ComputePoolDesiredStates emitted a resume request for the
+// named-session bead, which realizePoolDesiredSessions then renamed to
+// "{name}-1" because claimPoolSlot returns 1 for beads without pool_slot
+// metadata and poolInstanceName always appends a numeric suffix.
+func TestBuildDesiredState_OnDemandNamedSession_NoPhantomPoolInstance(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:    "refinery work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "refinery",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(b.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Mode:     "on_demand",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	refineryEntries := []TemplateParams{}
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "refinery" {
+			refineryEntries = append(refineryEntries, tp)
+		}
+	}
+	if len(refineryEntries) != 1 {
+		var names []string
+		for _, tp := range refineryEntries {
+			names = append(names, tp.SessionName)
+		}
+		t.Fatalf("refinery desired entries = %d, want 1 (no phantom pool sibling); got session_names %v", len(refineryEntries), names)
+	}
+	if got := refineryEntries[0].InstanceName; got == "refinery-1" || got == "test-city/refinery-1" {
+		t.Errorf("desired refinery has phantom pool-instance identity %q (max_active_sessions=1 forbids -N suffix)", got)
+	}
+}
+
 func TestBuildDesiredState_OnDemandNamedSession_InProgressAssigneeMaterializes(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

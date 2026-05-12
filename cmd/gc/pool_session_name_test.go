@@ -299,6 +299,73 @@ func (s sessionListMissStore) List(query beads.ListQuery) ([]beads.Bead, error) 
 	return s.Store.List(query)
 }
 
+func TestLiveSessionBeadExistsByIdentity_SkipsClosedSessionBead(t *testing.T) {
+	// Regression: directSessionBeadIDCandidates can resolve to a session
+	// bead that has since been closed. liveSessionBeadExistsByIdentity must
+	// skip closed beads via the early continue so the caller falls through
+	// to the live-list fallback instead of claiming the dead session is alive.
+	base := beads.NewMemStore()
+	closed, err := base.Create(beads.Bead{
+		Title:  "closed session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	if err := base.Close(closed.ID); err != nil {
+		t.Fatalf("Close session bead: %v", err)
+	}
+	closed, err = base.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Reload closed session: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("closed status = %q, want closed", closed.Status)
+	}
+
+	store := sessionListMissStore{
+		Store:          base,
+		directSessions: map[string]beads.Bead{"worker-mc-dead": closed},
+	}
+
+	if liveSessionBeadExistsByIdentity(store, "worker-mc-dead") {
+		t.Error("liveSessionBeadExistsByIdentity = true, want false for closed session bead")
+	}
+}
+
+func TestLiveSessionBeadExistsByIdentity_SkipsNonSessionBead(t *testing.T) {
+	// Regression: directSessionBeadIDCandidates can resolve to a bead that
+	// is not a session (e.g. a work bead whose ID collides with the
+	// assignee string). liveSessionBeadExistsByIdentity must skip such
+	// beads instead of treating them as live session owners.
+	base := beads.NewMemStore()
+	notSession, err := base.Create(beads.Bead{
+		Title: "not a session",
+		Type:  "task",
+	})
+	if err != nil {
+		t.Fatalf("Create non-session bead: %v", err)
+	}
+	if notSession.Type == sessionBeadType {
+		t.Fatalf("test setup: bead type = %q, want non-session", notSession.Type)
+	}
+	for _, label := range notSession.Labels {
+		if label == sessionBeadLabel {
+			t.Fatalf("test setup: bead has session label %q", label)
+		}
+	}
+
+	store := sessionListMissStore{
+		Store:          base,
+		directSessions: map[string]beads.Bead{"worker-mc-task": notSession},
+	}
+
+	if liveSessionBeadExistsByIdentity(store, "worker-mc-task") {
+		t.Error("liveSessionBeadExistsByIdentity = true, want false for non-session bead")
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionMissingFromSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{

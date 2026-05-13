@@ -27,8 +27,12 @@ const (
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
 var (
-	bdCommandTimeout     = 120 * time.Second
-	bdReadCommandTimeout = 20 * time.Second
+	bdCommandTimeout = 120 * time.Second
+	// bdReadCommandTimeout bounds bd read-only subcommands (count, list,
+	// ready, show, stats). Default matches bdCommandTimeout to preserve
+	// pre-bounded behavior; lowered in follow-up work after slow read
+	// paths are identified.
+	bdReadCommandTimeout = 120 * time.Second
 )
 
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.

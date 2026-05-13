@@ -59,6 +59,10 @@ const BeadType = "session"
 // LabelSession is the label applied to all session beads for filtering.
 const LabelSession = "gc:session"
 
+// MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
+// the wall-clock time of the most recent successful queued-nudge delivery.
+const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
+
 // Info holds the user-facing details of a chat session.
 type Info struct {
 	ID            string
@@ -80,10 +84,10 @@ type Info struct {
 	CreatedAt     time.Time
 	LastActive    time.Time
 	// LastNudgeDeliveredAt records the wall-clock time of the most recent
-	// successful queued-nudge delivery to this session. Zero when no
-	// queued nudge has been delivered yet (or the metadata predates the
-	// stamping path). Surfaced in `gc session list` so operators can
-	// spot warm sessions whose delivery loop has stalled.
+	// successful nudge delivery to this session. Zero when no nudge has
+	// been delivered yet (or the metadata predates the stamping path).
+	// Surfaced in `gc session list` so operators can spot warm sessions
+	// whose delivery loop has stalled.
 	LastNudgeDeliveredAt time.Time
 	Attached             bool
 }
@@ -1319,7 +1323,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		ResumeCommand: b.Metadata["resume_command"],
 		CreatedAt:     b.CreatedAt,
 	}
-	if raw := strings.TrimSpace(b.Metadata["last_nudge_delivered_at"]); raw != "" {
+	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
 		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
 			info.LastNudgeDeliveredAt = parsed
 		}

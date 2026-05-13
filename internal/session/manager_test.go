@@ -430,8 +430,8 @@ func TestGetSurfacesLastNudgeDeliveredAtMetadata(t *testing.T) {
 	}
 
 	stamp := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	if err := store.SetMetadata(info.ID, "last_nudge_delivered_at", stamp.Format(time.RFC3339)); err != nil {
-		t.Fatalf("SetMetadata(last_nudge_delivered_at): %v", err)
+	if err := store.SetMetadata(info.ID, MetadataLastNudgeDeliveredAt, stamp.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", MetadataLastNudgeDeliveredAt, err)
 	}
 
 	got, err := mgr.Get(info.ID)
@@ -457,7 +457,7 @@ func TestGetIgnoresInvalidLastNudgeDeliveredAtMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
-	if err := store.SetMetadata(info.ID, "last_nudge_delivered_at", "not-a-timestamp"); err != nil {
+	if err := store.SetMetadata(info.ID, MetadataLastNudgeDeliveredAt, "not-a-timestamp"); err != nil {
 		t.Fatalf("SetMetadata: %v", err)
 	}
 

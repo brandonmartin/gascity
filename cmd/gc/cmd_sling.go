@@ -1440,6 +1440,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
+				stampLastNudgeDeliveredAt(store, target.sessionID, time.Now())
 				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
 				return
 			}

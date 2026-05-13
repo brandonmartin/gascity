@@ -236,8 +236,8 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 // once it has been idle longer than the quiescence window. Idle ACP
 // sessions used to depend exclusively on inject-on-hook drain, but a
 // pure-hook delivery path never fires for a warm session that is not
-// receiving fresh user prompts — queued patrol wisps piled up
-// indefinitely against an alive but quiet deacon. The dispatcher now
+// receiving fresh user prompts — queued reminders piled up
+// indefinitely against an alive but quiet agent. The dispatcher now
 // owns wake delivery; the hook still drains opportunistically when the
 // agent receives external prompts, and the atomic queue claim prevents
 // double delivery.
@@ -323,16 +323,16 @@ func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
 	if getErr != nil {
 		t.Fatalf("store.Get session bead: %v", getErr)
 	}
-	stamp := strings.TrimSpace(refetched.Metadata[lastNudgeDeliveredAtKey])
+	stamp := strings.TrimSpace(refetched.Metadata[session.MetadataLastNudgeDeliveredAt])
 	if stamp == "" {
-		t.Fatalf("session bead missing %s metadata after successful ACP delivery", lastNudgeDeliveredAtKey)
+		t.Fatalf("session bead missing %s metadata after successful ACP delivery", session.MetadataLastNudgeDeliveredAt)
 	}
 	parsed, parseErr := time.Parse(time.RFC3339, stamp)
 	if parseErr != nil {
-		t.Fatalf("parse %s=%q: %v", lastNudgeDeliveredAtKey, stamp, parseErr)
+		t.Fatalf("parse %s=%q: %v", session.MetadataLastNudgeDeliveredAt, stamp, parseErr)
 	}
 	if drift := time.Since(parsed); drift < 0 || drift > time.Minute {
-		t.Fatalf("%s timestamp drift %s is outside the 1-minute test window (raw=%q)", lastNudgeDeliveredAtKey, drift, stamp)
+		t.Fatalf("%s timestamp drift %s is outside the 1-minute test window (raw=%q)", session.MetadataLastNudgeDeliveredAt, drift, stamp)
 	}
 }
 
@@ -398,13 +398,11 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	}
 }
 
-// TestMaybeStartNudgePollerStartsACPSessionInLegacyMode verifies the
-// per-session poller now starts for ACP sessions when the city runs in
-// legacy (non-supervisor) mode. Previously the helper short-circuited
-// on transport=acp, leaving idle ACP agents without any delivery loop —
-// queued nudges piled up against the agent because inject-on-hook only
-// fires when a fresh prompt arrives from another path.
-func TestMaybeStartNudgePollerStartsACPSessionInLegacyMode(t *testing.T) {
+// TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode verifies the
+// legacy per-session poller still skips ACP sessions. A sidecar `gc
+// nudge poll` process can observe the ACP control socket, but it does
+// not own the in-memory ACP connection needed to send session/prompt.
+func TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode(t *testing.T) {
 	prev := startNudgePoller
 	t.Cleanup(func() { startNudgePoller = prev })
 
@@ -420,8 +418,8 @@ func TestMaybeStartNudgePollerStartsACPSessionInLegacyMode(t *testing.T) {
 		transport:   "acp",
 		cfg:         &config.City{},
 	})
-	if !called {
-		t.Fatal("startNudgePoller not invoked for ACP session in legacy mode; per-session poller is required to deliver queued nudges to warm-idle ACP sessions")
+	if called {
+		t.Fatal("startNudgePoller invoked for ACP session in legacy mode; sidecar ACP pollers cannot deliver without owning the connection")
 	}
 }
 

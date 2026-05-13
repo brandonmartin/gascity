@@ -1155,6 +1155,8 @@ func TestCmdSessionListJSONNoSessionsReturnsEmptyArray(t *testing.T) {
 // emitted, sessions stamped with metadata.last_nudge_delivered_at render as
 // "<duration> ago", and sessions without the stamp fall back to "-".
 func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -1173,10 +1175,10 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"session_name":            "nudged-session",
-			"template":                "mayor",
-			"state":                   "asleep",
-			"last_nudge_delivered_at": nudgeStamp,
+			"session_name":                       "nudged-session",
+			"template":                           "worker",
+			"state":                              "asleep",
+			session.MetadataLastNudgeDeliveredAt: nudgeStamp,
 		},
 	}); err != nil {
 		t.Fatalf("store.Create(nudged session bead): %v", err)
@@ -1188,7 +1190,7 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
 			"session_name": "quiet-session",
-			"template":     "mayor",
+			"template":     "worker",
 			"state":        "asleep",
 		},
 	}); err != nil {
@@ -1224,6 +1226,90 @@ func TestCmdSessionList_RendersLastNudgeColumn(t *testing.T) {
 	if got := lastField(quietRow); got != "-" {
 		t.Fatalf("quiet-session LAST NUDGE = %q, want %q; row=%q", got, "-", quietRow)
 	}
+}
+
+func TestCmdSessionListJSONOmitZeroLastNudgeDeliveredAt(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+
+	nudgeStamp := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	if _, err := store.Create(beads.Bead{
+		Title:  "nudged-session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":                       "nudged-session",
+			"template":                           "worker",
+			"state":                              "asleep",
+			session.MetadataLastNudgeDeliveredAt: nudgeStamp.Format(time.RFC3339),
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(nudged session bead): %v", err)
+	}
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "quiet-session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "quiet-session",
+			"template":     "worker",
+			"state":        "asleep",
+		},
+	}); err != nil {
+		t.Fatalf("store.Create(quiet session bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionList(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"last_nudge_delivered_at": "0001-01-01`) {
+		t.Fatalf("stdout contains zero-time last nudge timestamp:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "LastNudgeDeliveredAt") {
+		t.Fatalf("stdout uses Go field name for last nudge timestamp:\n%s", stdout.String())
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("stdout is not a JSON session array: %v; stdout=%q", err, stdout.String())
+	}
+	quiet := sessionListJSONRowBySessionName(rows, "quiet-session")
+	if quiet == nil {
+		t.Fatalf("missing quiet-session row in JSON output:\n%s", stdout.String())
+	}
+	if _, ok := quiet["last_nudge_delivered_at"]; ok {
+		t.Fatalf("quiet-session last_nudge_delivered_at present, want omitted: %#v", quiet)
+	}
+
+	nudged := sessionListJSONRowBySessionName(rows, "nudged-session")
+	if nudged == nil {
+		t.Fatalf("missing nudged-session row in JSON output:\n%s", stdout.String())
+	}
+	if got, want := nudged["last_nudge_delivered_at"], nudgeStamp.Format(time.RFC3339); got != want {
+		t.Fatalf("nudged-session last_nudge_delivered_at = %#v, want %q; row=%#v", got, want, nudged)
+	}
+}
+
+func sessionListJSONRowBySessionName(rows []map[string]any, name string) map[string]any {
+	for _, row := range rows {
+		if row["SessionName"] == name {
+			return row
+		}
+	}
+	return nil
 }
 
 func firstLine(lines []string) string {

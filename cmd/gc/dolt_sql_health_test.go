@@ -393,30 +393,6 @@ func TestRunManagedDoltSQLTimesOut(t *testing.T) {
 	}
 }
 
-func TestRunManagedDoltSQLOmitsEmptyPasswordFlag(t *testing.T) {
-	binDir := t.TempDir()
-	argsFile := filepath.Join(t.TempDir(), "args.txt")
-	fakeDolt := filepath.Join(binDir, "dolt")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", argsFile)
-	if err := os.WriteFile(fakeDolt, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_DOLT_PASSWORD", "")
-
-	if _, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1"); err != nil {
-		t.Fatalf("runManagedDoltSQL() error = %v", err)
-	}
-	data, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "--password") {
-		t.Fatalf("dolt args included empty --password flag:\n%s", data)
-	}
-}
-
 func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
 	binDir := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "args.txt")

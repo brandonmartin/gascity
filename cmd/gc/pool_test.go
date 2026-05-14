@@ -1108,21 +1108,23 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents: []config.Agent{
-			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool
+			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool (no MinActiveSessions/ScaleCheck)
 			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnDeath: "echo death"},
-			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"}, // max=1, skipped
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"}, // max=1 POOL (MinActiveSessions set) — keeps cat-1 per the disambiguator
 		},
 	}
 
 	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), runtime.NewFake(), nil)
 
 	// dog has max=3, so 3 handlers (dog-1, dog-2, dog-3).
-	// cat has max=1, skipped. mayor is not a pool.
-	if len(handlers) != 3 {
-		t.Fatalf("len(handlers) = %d, want 3", len(handlers))
+	// cat is a max=1 POOL agent (MinActiveSessions set), so cat-1 keeps the
+	// `-N` suffix per SupportsInstanceExpansion's disambiguator — 1 handler.
+	// mayor is not a pool (neither MinActiveSessions nor ScaleCheck set).
+	if len(handlers) != 4 {
+		t.Fatalf("len(handlers) = %d, want 4", len(handlers))
 	}
 
-	// Default session template is empty → session name = sanitized agent name.
+	// dog-1, dog-2, dog-3 handlers
 	for i := 1; i <= 3; i++ {
 		sn := fmt.Sprintf("dog-%d", i)
 		info, ok := handlers[sn]
@@ -1133,6 +1135,13 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 		if !strings.Contains(info.Command, "echo death") {
 			t.Errorf("handler[%s].Command = %q, want configured on_death command", sn, info.Command)
 		}
+	}
+
+	// cat-1 handler (max=1 pool keeps the suffix)
+	if info, ok := handlers["cat-1"]; !ok {
+		t.Errorf("missing handler for cat-1 (have keys: %v)", handlerKeys(handlers))
+	} else if !strings.Contains(info.Command, "echo death") {
+		t.Errorf("handler[cat-1].Command = %q, want configured on_death command", info.Command)
 	}
 }
 

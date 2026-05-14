@@ -61,6 +61,7 @@ type CityRuntime struct {
 	dops                    drainOps
 	ct                      crashTracker
 	it                      idleTracker
+	mat                     maxSessionAgeTracker
 	wg                      wispGC
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
@@ -176,6 +177,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	}
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
+	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
 
 	var wg wispGC
 	if p.Cfg.Daemon.WispGCEnabled() {
@@ -236,6 +238,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		dops:                    p.Dops,
 		ct:                      ct,
 		it:                      it,
+		mat:                     mat,
 		wg:                      wg,
 		od:                      od,
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
@@ -1160,6 +1163,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
+	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 
 	if nextCfg.Daemon.WispGCEnabled() {
 		cr.wg = newWispGC(nextCfg.Daemon.WispGCIntervalDuration(),
@@ -1223,6 +1227,18 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if trace != nil {
 		trace.configRevision = result.Revision
 		trace.syncArms(time.Now().UTC(), nextCfg)
+	}
+
+	if cr.activeReload != nil && cr.activeReload.soft {
+		cityName := cr.cityName
+		if cityName == "" {
+			cityName = config.EffectiveCityName(nextCfg, "")
+		}
+		desired := buildDesiredState(cityName, cr.cityPath, time.Now().UTC(), nextCfg, cr.sp, cr.cityBeadStore(), cr.stderr)
+		accepted := acceptConfigDriftAcrossSessions(cr.cityBeadStore(), desired.State, cr.stderr)
+		if accepted > 0 {
+			fmt.Fprintf(cr.stdout, "%s: soft reload: accepted config drift on %d session(s)\n", cr.logPrefix, accepted) //nolint:errcheck // best-effort stdout
+		}
 	}
 
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
@@ -1478,6 +1494,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
 		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
 		withAsyncStartTracker(&cr.asyncStarts),
+		withMaxSessionAgeTracker(cr.mat),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 	if trace != nil {

@@ -250,6 +250,64 @@ func TestBuiltinProvidersOpenCodePromptModeRegression(t *testing.T) {
 	}
 }
 
+// TestBuiltinProvidersResumeFlags asserts that every builtin provider known
+// to support session resume populates ResumeFlag and ResumeStyle. The flag
+// shapes are mirrored from gastown's reference table (mayor/rig/internal/
+// config/agents.go) which has been validated against each provider's CLI.
+// session_reconciler.resolveResumeCommand short-circuits when ResumeFlag is
+// empty, silently dropping the session-id and starting a fresh process —
+// regressing one of these to "" would re-introduce that bug for the
+// provider in question.
+func TestBuiltinProvidersResumeFlags(t *testing.T) {
+	tests := []struct {
+		provider    string
+		resumeFlag  string
+		resumeStyle string
+	}{
+		{"claude", "--resume", "flag"},
+		{"codex", "resume", "subcommand"},
+		{"gemini", "--resume", "flag"},
+		{"cursor", "--resume", "flag"},
+		{"copilot", "--resume", "flag"},
+		{"amp", "threads continue", "subcommand"},
+		{"opencode", "--session", "flag"},
+		{"auggie", "--resume", "flag"},
+	}
+	providers := BuiltinProviders()
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			p, ok := providers[tt.provider]
+			if !ok {
+				t.Fatalf("BuiltinProviders() missing %q", tt.provider)
+			}
+			if p.ResumeFlag != tt.resumeFlag {
+				t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, tt.resumeFlag)
+			}
+			if p.ResumeStyle != tt.resumeStyle {
+				t.Errorf("ResumeStyle = %q, want %q", p.ResumeStyle, tt.resumeStyle)
+			}
+		})
+	}
+}
+
+// TestBuiltinProvidersSessionIDFlag pins which providers populate
+// SessionIDFlag. Claude is the only provider with a documented "start a new
+// session with this id" flag (--session-id). Codex exposes session ids only
+// through `codex resume <id>` (a resume path, not a fresh-start path), so it
+// stays empty — populating it would make resolveSessionCommand emit
+// `codex --session-id <key>` on first start, which codex rejects.
+func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
+	providers := BuiltinProviders()
+	if got := providers["claude"].SessionIDFlag; got != "--session-id" {
+		t.Errorf("claude SessionIDFlag = %q, want --session-id", got)
+	}
+	for _, name := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
+		if got := providers[name].SessionIDFlag; got != "" {
+			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
+		}
+	}
+}
+
 func TestBuiltinProviderOrderReturnsNewSlice(t *testing.T) {
 	a := BuiltinProviderOrder()
 	b := BuiltinProviderOrder()

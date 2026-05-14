@@ -1246,6 +1246,60 @@ func TestWitnessPatrolStateClassificationCoversSessionStates(t *testing.T) {
 	}
 }
 
+// TestWitnessPatrolAllStepsContinueNotExit guards against the regression
+// in upstream #1884: every intermediate step in mol-witness-patrol must
+// tell the agent to continue rather than exit the wisp. The burn
+// primitive only lives in `next-iteration`, so any step that reads as
+// terminal ("Exit criteria: no orphans found.") leaks wisps when an LLM
+// treats the early-exit as a terminal instruction.
+func TestWitnessPatrolAllStepsContinueNotExit(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+
+	var parsed struct {
+		Steps []struct {
+			ID          string `toml:"id"`
+			Description string `toml:"description"`
+		} `toml:"steps"`
+	}
+	if _, err := toml.Decode(string(data), &parsed); err != nil {
+		t.Fatalf("parsing witness patrol formula: %v", err)
+	}
+
+	byID := make(map[string]string, len(parsed.Steps))
+	for _, s := range parsed.Steps {
+		byID[s.ID] = s.Description
+	}
+
+	intermediate := []string{
+		"check-inbox",
+		"recover-orphaned-beads",
+		"check-refinery",
+		"check-polecat-health",
+	}
+	for _, id := range intermediate {
+		desc, ok := byID[id]
+		if !ok {
+			t.Errorf("witness patrol formula missing step %q", id)
+			continue
+		}
+		if !strings.Contains(desc, "do NOT exit") {
+			t.Errorf("step %q missing continuation reminder 'do NOT exit' so an LLM can treat the step as terminal and leak the wisp:\n%s", id, desc)
+		}
+		if !strings.Contains(desc, "next-iteration") {
+			t.Errorf("step %q missing reference to `next-iteration` as the sole burn site:\n%s", id, desc)
+		}
+	}
+
+	if _, ok := byID["next-iteration"]; !ok {
+		t.Fatal("witness patrol formula missing `next-iteration` step — continuation clauses point at a non-existent target")
+	}
+}
+
 func TestAllFormulasExist(t *testing.T) {
 	dir := exampleDir()
 	formulaDir := filepath.Join(dir, "packs", "gastown", "formulas")
@@ -1711,4 +1765,43 @@ func TestDoltHealthFormulasExist(t *testing.T) {
 	if count == 0 {
 		t.Error("no formula files found")
 	}
+}
+
+// TestDeaconPatrolDetectsQueueStarvation verifies the deacon formula
+// cross-checks assigned open beads against visible work signal, so a
+// stuck self-polling refinery is flagged even when its patrol wisp is
+// cycling fresh. See upstream #1833.
+func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`id = "queue-starvation-check"`,
+		`needs = ["health-scan"]`,
+		"Cross-check assigned work against visible work signal",
+		"gc bd list --status=open --assignee=",
+		"bead.updated_at",
+		"30min",
+		`"gc.routed_to":"{{binding_prefix}}dog"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("deacon formula missing queue-starvation guidance %q", want)
+		}
+	}
+
+	// The new step must chain into the next one.
+	if !strings.Contains(body, `needs = ["queue-starvation-check"]`) {
+		t.Errorf("deacon formula step after queue-starvation-check must depend on it")
+	}
+
+	assertContainsInOrder(t, body,
+		`id = "health-scan"`,
+		`id = "queue-starvation-check"`,
+		`id = "utility-agent-health"`,
+	)
 }

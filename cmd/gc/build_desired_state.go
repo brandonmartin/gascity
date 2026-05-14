@@ -734,14 +734,10 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 		return
 	}
 	for _, session := range sessionBeads.Open() {
-		ids := []string{
-			session.ID,
-			session.Metadata["session_name"],
-			session.Metadata["configured_named_identity"],
-		}
+		ids := sessionBeadAssigneeIdentities(session)
 		matched := false
 		for _, id := range ids {
-			if _, ok := skip[strings.TrimSpace(id)]; ok {
+			if _, ok := skip[id]; ok {
 				matched = true
 				break
 			}
@@ -750,10 +746,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 			continue
 		}
 		for _, id := range ids {
-			id = strings.TrimSpace(id)
-			if id != "" {
-				skip[id] = struct{}{}
-			}
+			skip[id] = struct{}{}
 		}
 	}
 }
@@ -780,9 +773,9 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 			if session.Status == "closed" {
 				continue
 			}
-			add(session.ID)
-			add(session.Metadata["session_name"])
-			add(session.Metadata["configured_named_identity"])
+			for _, id := range sessionBeadAssigneeIdentities(session) {
+				add(id)
+			}
 		}
 	}
 	if cfg != nil {
@@ -1262,10 +1255,10 @@ func discoverSessionBeadsWithRoots(
 		if isFailedCreateSessionBead(b) {
 			continue
 		}
-		// Skip beads already in desired state (from config iteration).
-		if _, exists := desired[sn]; exists {
-			continue
-		}
+		// Remember whether the main config/pool pass already selected this
+		// exact session bead. Pool-managed capacity not selected there should
+		// not be recovered merely because it is pending or creating.
+		_, sessionAlreadyDesired := desired[sn]
 		// Skip held beads — the reconciler's wakeReasons handles held_until,
 		// but we still need the bead in desired state so the reconciler
 		// doesn't classify it as orphaned. Only skip if we can't resolve
@@ -1302,12 +1295,26 @@ func discoverSessionBeadsWithRoots(
 			manualSession := isManualSessionBeadForAgent(b, cfgAgent)
 			creating := b.Metadata["state"] == "creating"
 			pendingCreate := isPendingPoolCreate(b)
-			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating && !pendingCreate && !scaleCheckPartial {
+			templateDesired := desiredHasTemplate(desired, template)
+			// Pool-managed beads are controller-created capacity. A pending
+			// or creating bead that the pool pass did not select is stale
+			// capacity, not a reason to spawn a worker with an empty hook.
+			controllerManagedPool := strings.TrimSpace(b.Metadata[poolManagedMetadataKey]) == boolMetadata(true) ||
+				strings.TrimSpace(b.Metadata["pool_slot"]) != "" || pendingCreate
+			if controllerManagedPool && isDrainedSessionBead(b) {
 				continue
 			}
-			if !manualSession && (!creating || isStaleCreating(b)) && !desiredHasTemplate(desired, template) && !pendingCreate && !scaleCheckPartial {
+			if controllerManagedPool && !manualSession && !isNamedSessionBead(b) &&
+				!sessionAlreadyDesired && !templateDesired && !scaleCheckPartial {
 				continue
 			}
+			if !manualSession && (!creating || isStaleCreating(b)) && !templateDesired && !pendingCreate && !scaleCheckPartial {
+				continue
+			}
+		}
+		// Skip beads already in desired state (from config iteration).
+		if sessionAlreadyDesired {
+			continue
 		}
 		// Resolve TemplateParams for this bead's session.
 		//

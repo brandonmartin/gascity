@@ -671,6 +671,13 @@ func TestGcBdRejectsGCBeadsFileOverride(t *testing.T) {
 	cityFlag = ""
 	rigFlag = ""
 
+	// Scrub inherited beads env (notably GC_BEADS_SCOPE_ROOT from a
+	// gc agent's outer city) so the explicit GC_BEADS override below
+	// is honored by configuredBeadsProviderValue. Without this, a leaked
+	// GC_BEADS_SCOPE_ROOT disqualifies the override and the provider
+	// resolution falls back to city.toml peek (which has no [beads]
+	// section here) → defaults to "bd" → rejection never fires.
+	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
@@ -679,6 +686,11 @@ name = "demo"
 	}
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	// Clear any inherited scope pin so the GC_BEADS override applies to
+	// this test's city. When run from a polecat session, the ambient
+	// GC_BEADS_SCOPE_ROOT points at the rig repo and would suppress the
+	// override before the provider check could fire.
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	var stdout, stderr bytes.Buffer
 	if got := doBd([]string{"list"}, &stdout, &stderr); got == 0 {

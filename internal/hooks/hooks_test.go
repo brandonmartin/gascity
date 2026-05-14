@@ -67,11 +67,19 @@ func TestValidateRejectsUnsupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("Validate should reject amp, auggie, and bogus")
 	}
-	if !strings.Contains(err.Error(), "amp (no hook mechanism)") {
-		t.Errorf("error should mention amp: %v", err)
+	// Amp and Auggie CLIs both DO expose hook mechanisms in their own
+	// docs; Gas Town just has not wired hook installation for them yet.
+	// The error message must reflect that accurately so users know to
+	// track gap 4 of #672 instead of believing the providers themselves
+	// are hookless.
+	if !strings.Contains(err.Error(), "amp (hooks not yet wired") {
+		t.Errorf("error should mention amp is unwired: %v", err)
 	}
-	if !strings.Contains(err.Error(), "auggie (no hook mechanism)") {
-		t.Errorf("error should mention auggie: %v", err)
+	if !strings.Contains(err.Error(), "auggie (hooks not yet wired") {
+		t.Errorf("error should mention auggie is unwired: %v", err)
+	}
+	if !strings.Contains(err.Error(), "#672") {
+		t.Errorf("error should reference the tracking audit issue: %v", err)
 	}
 	if !strings.Contains(err.Error(), "bogus (unknown)") {
 		t.Errorf("error should mention bogus: %v", err)
@@ -136,6 +144,9 @@ func TestInstallClaude(t *testing.T) {
 	}
 	if !strings.Contains(s, `"editorMode": "normal"`) {
 		t.Error("claude settings should contain editorMode")
+	}
+	if !strings.Contains(s, `"awaySummaryEnabled": false`) {
+		t.Error("claude settings should disable awaySummaryEnabled to prevent idle stalls (gh-1962)")
 	}
 	if !strings.Contains(s, `$HOME/go/bin`) {
 		t.Error("claude hook commands should include PATH export")
@@ -981,6 +992,17 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	if !strings.Contains(codexHooks, `gc handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
+	}
+	// Copilot CLI documents preCompact (camelCase). The hook fires before
+	// context compaction starts so handoff can capture state; without it,
+	// long Copilot sessions silently lose context at compact boundaries.
+	// See gastownhall/gascity#672 gap 3.
+	copilotHooks := string(fs.Files["/work/.github/hooks/gascity.json"])
+	if !strings.Contains(copilotHooks, `"preCompact"`) {
+		t.Error("copilot hooks should include preCompact (closes #672 gap 3)")
+	}
+	if !strings.Contains(copilotHooks, `gc handoff --auto \"context cycle\"`) {
+		t.Error("copilot preCompact should use auto handoff")
 	}
 	for _, rel := range []string{
 		"/work/.codex/hooks.json",

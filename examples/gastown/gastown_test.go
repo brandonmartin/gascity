@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"text/template"
@@ -419,6 +421,156 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	} {
 		if strings.Contains(body, bad) {
 			t.Fatalf("polecat formula must preserve refinery handoff diagnostics and pass a nudge message; found %q", bad)
+		}
+	}
+}
+
+// TestPolecatFormulaRoutesNoChangesToWitness guards the close-vs-route
+// deadlock fix from ga-5uzo5: when the polecat's branch has zero commits
+// past origin/<base_branch>, the submit-and-exit step routes the bead
+// to the rig witness with merge_result=no-changes BEFORE pushing.
+// Pushing an empty branch to the refinery recreates the deadlock the
+// polecat injection forbids.
+func TestPolecatFormulaRoutesNoChangesToWitness(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"**1b. No-changes detection",
+		`COMMIT_COUNT=$(git rev-list --count origin/{{base_branch}}..HEAD`,
+		`if [ "$COMMIT_COUNT" = "0" ]; then`,
+		`WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness"`,
+		"gc bd update {{issue}}",
+		`--assignee="$WITNESS_TARGET"`,
+		`--set-metadata gc.routed_to="$WITNESS_TARGET"`,
+		"--set-metadata merge_result=no-changes",
+		"--set-metadata no_changes_reason=",
+		`gc session wake "$WITNESS_TARGET" || true`,
+		"gc runtime drain-ack",
+		"exit",
+		"fi",
+		"**2. Push your branch:**",
+	)
+
+	for _, bad := range []string{
+		"bd close --reason=no-changes",
+		"gc bd close",
+	} {
+		if strings.Contains(body, bad) {
+			t.Errorf("polecat formula must not instruct self-close (%q present)", bad)
+		}
+	}
+}
+
+// TestRefineryFormulaRoutesEmptyBranchToWitness is the defense-in-depth
+// half of the ga-5uzo5 fix. Even when a polecat's submit step somehow
+// pushes a branch, the refinery rebase may rebase out all commits
+// (already-merged-elsewhere case). The refinery must route to witness
+// instead of silently fast-forwarding an empty merge or improvising
+// "use bd close" instructions in rejection_reason.
+func TestRefineryFormulaRoutesEmptyBranchToWitness(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"**No-changes defense.**",
+		"`git rev-list --count origin/$TARGET..temp`",
+		`WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness"`,
+		"gc bd update $WORK",
+		`--assignee="$WITNESS_TARGET"`,
+		`--set-metadata gc.routed_to="$WITNESS_TARGET"`,
+		"--set-metadata merge_result=no-changes",
+		"--set-metadata no_changes_reason=",
+		"--unset-metadata rejection_reason",
+		"`gc bd mol burn <wisp-id> --force`",
+	)
+
+	for _, bad := range []string{
+		`rejection_reason="use bd close`,
+		`rejection_reason="no-changes:`,
+		`rejection_reason="Empty branch`,
+	} {
+		if strings.Contains(body, bad) {
+			t.Errorf("refinery formula must not emit close-vs-route deadlock language (%q present)", bad)
+		}
+	}
+}
+
+// TestWitnessPatrolClosesNoChangesBeads verifies the witness has an
+// explicit step authorized to close beads routed for no-changes terminal
+// handling. This authority breaks the close-vs-route deadlock at the
+// terminal end: the polecat routes, the witness closes.
+func TestWitnessPatrolClosesNoChangesBeads(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+	body := string(data)
+
+	var parsed struct {
+		Steps []struct {
+			ID          string   `toml:"id"`
+			Needs       []string `toml:"needs"`
+			Description string   `toml:"description"`
+		} `toml:"steps"`
+	}
+	if _, err := toml.Decode(body, &parsed); err != nil {
+		t.Fatalf("parsing witness patrol formula: %v", err)
+	}
+
+	var step *struct {
+		ID          string   `toml:"id"`
+		Needs       []string `toml:"needs"`
+		Description string   `toml:"description"`
+	}
+	for i := range parsed.Steps {
+		if parsed.Steps[i].ID == "close-no-changes-beads" {
+			step = &parsed.Steps[i]
+			break
+		}
+	}
+	if step == nil {
+		t.Fatal("witness patrol formula missing `close-no-changes-beads` step")
+	}
+
+	wantNeeds := []string{"recover-orphaned-beads"}
+	if !reflect.DeepEqual(step.Needs, wantNeeds) {
+		t.Errorf("close-no-changes-beads needs = %v, want %v", step.Needs, wantNeeds)
+	}
+
+	assertContainsInOrder(t, step.Description,
+		`gc bd list --assignee=$GC_AGENT --status=open --json`,
+		`select(.metadata.merge_result == "no-changes")`,
+		`gc bd close "$BEAD" --reason "no-changes:$REASON"`,
+	)
+
+	for _, want := range []string{
+		"do NOT exit",
+		"next-iteration",
+		`metadata.merge_result == "no-changes"`,
+	} {
+		if !strings.Contains(step.Description, want) {
+			t.Errorf("close-no-changes-beads step missing %q:\n%s", want, step.Description)
+		}
+	}
+
+	for i := range parsed.Steps {
+		if parsed.Steps[i].ID == "check-refinery" {
+			if !slices.Contains(parsed.Steps[i].Needs, "close-no-changes-beads") {
+				t.Errorf("check-refinery step must declare needs=[close-no-changes-beads] so the witness closes no-changes beads before assessing refinery queue depth: %v", parsed.Steps[i].Needs)
+			}
 		}
 	}
 }
@@ -1925,6 +2077,7 @@ func TestWitnessPatrolAllStepsContinueNotExit(t *testing.T) {
 	intermediate := []string{
 		"check-inbox",
 		"recover-orphaned-beads",
+		"close-no-changes-beads",
 		"check-refinery",
 		"check-polecat-health",
 	}

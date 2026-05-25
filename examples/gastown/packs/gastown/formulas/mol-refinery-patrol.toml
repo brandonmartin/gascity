@@ -186,7 +186,51 @@ git checkout -b temp origin/$BRANCH
 git rebase origin/$TARGET
 ```
 
-If rebase SUCCEEDED (exit 0): close this step, proceed to run-tests.
+If rebase SUCCEEDED (exit 0):
+
+**No-changes defense.** After a clean rebase, check whether the
+branch carries any commits past `$TARGET`. If not, the work either
+landed via another bead (already-merged elsewhere) or never had
+commits to begin with. Do NOT silently fast-forward an empty merge
+and close the bead — that produces a closed-as-merged bead with no
+audit trail. Instead, route the bead to the rig witness for an
+explicit no-changes close.
+
+If `git rev-list --count origin/$TARGET..temp` is `0` after a clean
+rebase:
+
+1. Route the bead to the rig witness with no-changes metadata so the
+   witness can close it (the witness has explicit close authority for
+   `merge_result=no-changes`; the polecat does not):
+```bash
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness"
+gc bd update $WORK \
+  --status=open \
+  --assignee="$WITNESS_TARGET" \
+  --set-metadata gc.routed_to="$WITNESS_TARGET" \
+  --set-metadata merge_result=no-changes \
+  --set-metadata no_changes_reason="No commits past $TARGET after rebase (already-merged or empty branch)" \
+  --unset-metadata rejection_reason
+```
+2. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
+3. Pour next patrol iteration before burning:
+```bash
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
+gc bd update "$NEXT" --assignee=$GC_AGENT
+```
+4. Burn this wisp: `gc bd mol burn <wisp-id> --force`
+
+`rejection_reason` is unset because the bead never failed merging —
+it just had nothing to merge. Leaving a stale rejection field on a
+no-changes close would confuse downstream tooling.
+
+This is defense-in-depth. The polecat's `submit-and-exit` step
+should catch the no-commits case BEFORE pushing, so this path
+fires only when commits rebased to zero against the target. Do
+NOT emit "use bd close" instructions in `rejection_reason` — that
+recreates the deadlock the polecat injection forbids.
+
+If rebase produced commits past `$TARGET`: close this step, proceed to run-tests.
 
 If rebase FAILED (conflicts):
 

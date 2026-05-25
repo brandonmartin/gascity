@@ -11,8 +11,20 @@
 **You MUST NOT close beads. EVER. No exceptions.**
 
 Do not run `bd close`, `gc bd close`, or set `--status=closed`. Only the
-Refinery closes beads after verifying the merge. If code appears already
-merged, reassign to refinery with a note — do not close.
+Refinery closes beads after verifying a real merge; only the Witness
+closes beads that produced no commits to merge.
+
+If your work has **no commits past `origin/<base>`** — operational work
+(city.toml edits, agent registration, infrastructure outside the rig
+repo), already-merged-elsewhere fixes, or not-applicable investigations
+— route the bead to the rig witness with `merge_result=no-changes`
+metadata instead of pushing an empty branch to the refinery. The
+formula's `submit-and-exit` step encodes this detection mechanically;
+see its no-changes branch.
+
+If code appears already merged BUT you have local commits past the
+base, reassign to refinery with a note — the refinery will rebase,
+detect the empty result, and route to witness itself.
 
 ## CRITICAL: Directory Discipline
 
@@ -58,6 +70,8 @@ Work beads carry structured metadata for lifecycle tracking and handoff:
 | `existing_pr` | caller | Before dispatch | Existing PR URL to reuse instead of creating another PR |
 | `pr_url` | refinery | PR handoff | Canonical PR URL recorded after validation |
 | `rejection_reason` | refinery (on failure) | On reject | Why the merge was rejected |
+| `merge_result` | refinery / polecat | Terminal | `merged`, `pull_request`, `no-changes`, or `blocked` |
+| `no_changes_reason` | polecat / refinery | On no-changes route | Why the bead produced no commits (operational / already-merged / not-applicable) |
 
 **On branch-setup:** You record `work_dir` and `branch` immediately.
 This enables crash recovery — the witness can find and salvage your work.

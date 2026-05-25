@@ -122,6 +122,15 @@ On rebase conflict or test failure:
 A new polecat picks up the bead, sees `metadata.branch` and
 `metadata.rejection_reason`, rebases or redoes work, reassigns to refinery.
 
+**Do NOT improvise "use `bd close` --reason=no-changes" instructions in
+`rejection_reason`.** The polecat injection forbids self-close; emitting
+that text recreates the close-vs-route deadlock that ga-5uzo5 closed.
+When you detect a branch with no commits past `$TARGET` after a clean
+rebase, route the bead to the rig witness with
+`metadata.merge_result=no-changes` instead — the formula's rebase step
+encodes this defense-in-depth path explicitly. The witness has the
+authority to close no-changes beads; the polecat does not.
+
 **On the next merge of a previously-rejected bead, clear
 `rejection_reason` before `gc bd close`.** A bead carrying both a
 "closed merged" status and a stale `rejection_reason` is internally

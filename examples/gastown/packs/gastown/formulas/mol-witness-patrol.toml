@@ -368,9 +368,64 @@ wisp here. The `next-iteration` step is the only place that pours the
 next wisp and burns this one."""
 
 [[steps]]
+id = "close-no-changes-beads"
+title = "Close beads routed for no-changes close"
+needs = ["recover-orphaned-beads"]
+description = """
+Close work beads that polecats or the refinery routed to you with
+`metadata.merge_result = "no-changes"`. These are beads whose work
+produced no commits past the target branch — operational/deployment
+work, already-merged-elsewhere fixes, or not-applicable
+investigations. The polecat injection forbids self-close, so the
+polecat routes the bead to the witness for the terminal close
+instead. Closing here is the explicit witness authority that breaks
+the historical close-vs-route deadlock (see ga-5uzo5).
+
+**Step 1: Find no-changes beads assigned to you:**
+```bash
+NO_CHANGES_JSON=$(gc bd list --assignee=$GC_AGENT --status=open --json --limit=0)
+echo "$NO_CHANGES_JSON" | jq -r '.[] | select(.metadata.merge_result == "no-changes") | .id'
+```
+
+If the list is empty, close this step and continue to `check-refinery`.
+
+**Step 2: For each no-changes bead, close with the recorded reason:**
+```bash
+echo "$NO_CHANGES_JSON" | jq -r '.[] | select(.metadata.merge_result == "no-changes") | .id' | while read BEAD; do
+    REASON=$(gc bd show "$BEAD" --json | jq -r '.[0].metadata.no_changes_reason // "no commits to merge"')
+    gc bd close "$BEAD" --reason "no-changes:$REASON"
+done
+```
+
+The `no-changes:` prefix on the close reason is the durable signal
+that the bead terminated without code changes — distinct from
+`Merged to <target> at <sha>` (real merge) and `Pull request ready: <url>`
+(PR handoff). Audit tooling and dashboards can filter on this prefix
+to surface operational-work throughput separately from code merges.
+
+**Step 3: Clean up any abandoned worktree.**
+
+The polecat that routed a no-changes bead never pushed a branch but
+may have created a worktree during `workspace-setup`. Read
+`metadata.work_dir` and remove the worktree if present:
+```bash
+echo "$NO_CHANGES_JSON" | jq -r '.[] | select(.metadata.merge_result == "no-changes") | [.id, (.metadata.work_dir // "")] | @tsv' | while IFS=$'\t' read BEAD WORKTREE; do
+    [ -z "$WORKTREE" ] && continue
+    [ ! -d "$WORKTREE" ] && continue
+    git worktree remove "$WORKTREE" --force 2>/dev/null || rm -rf "$WORKTREE" 2>/dev/null
+done
+git worktree prune
+```
+
+**Exit criteria:** All no-changes beads closed with `no-changes:` prefix,
+abandoned worktrees pruned. Continue to `check-refinery` — do NOT exit
+the wisp here. The `next-iteration` step is the only place that pours
+the next wisp and burns this one."""
+
+[[steps]]
 id = "check-refinery"
 title = "Check refinery queue health"
-needs = ["recover-orphaned-beads"]
+needs = ["close-no-changes-beads"]
 description = """
 Ensure the refinery is processing work and the queue is healthy.
 

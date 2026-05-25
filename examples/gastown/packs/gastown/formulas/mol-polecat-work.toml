@@ -281,6 +281,53 @@ git add -A && git commit -m "chore: capture remaining work ({{issue}})"
 This is a belt-and-suspenders check — self-review should have caught this,
 but we never push with untracked work left behind.
 
+**1b. No-changes detection (route empty-branch work to witness):**
+
+Some work produces no commits past `origin/{{base_branch}}`:
+
+- **Operational/deployment work** that happens outside the rig repo
+  (city.toml edits, agent registration, infrastructure config, pod
+  restarts).
+- **Already-merged work** where the same fix landed via another bead
+  before this polecat got to it.
+- **Not-applicable / can't-reproduce** investigations whose terminal
+  state is "nothing to ship."
+
+In all three cases, pushing to the refinery guarantees a rejection loop:
+the refinery has no commits to merge and cannot close the bead.
+Detect this BEFORE pushing and route the bead to the rig witness for
+no-changes close. This keeps the polecat injection's absolute
+"no close" rule intact — the polecat only routes; the witness closes.
+
+```bash
+COMMIT_COUNT=$(git rev-list --count origin/{{base_branch}}..HEAD 2>/dev/null || echo 0)
+if [ "$COMMIT_COUNT" = "0" ]; then
+    WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}witness"
+    gc bd update {{issue}} \
+      --status=open \
+      --assignee="$WITNESS_TARGET" \
+      --set-metadata gc.routed_to="$WITNESS_TARGET" \
+      --set-metadata merge_result=no-changes \
+      --set-metadata no_changes_reason="<one of: operational | already-merged | not-applicable> — <brief>" \
+      --notes "No commits past origin/{{base_branch}}: <reason summary>"
+    gc session wake "$WITNESS_TARGET" || true
+    gc session nudge "$WITNESS_TARGET" "Bead {{issue}} routed for no-changes close." || true
+    gc runtime drain-ack
+    exit
+fi
+```
+
+The `no_changes_reason` value is mechanical, not a judgment call:
+the polecat already knows from its load-context investigation which
+category applies (operational vs already-merged vs not-applicable).
+The witness uses this field as the close reason.
+
+**Do NOT push an empty branch to origin.** Routing replaces push for
+no-changes work. The branch was never created with anything to
+publish, and pushing it forces refinery to detect-and-reroute on its
+end — wasting a refinery wisp and creating a transient empty branch
+on origin.
+
 **2. Push your branch:**
 ```bash
 git push origin HEAD

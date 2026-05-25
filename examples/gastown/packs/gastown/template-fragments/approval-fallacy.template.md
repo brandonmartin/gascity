@@ -78,7 +78,16 @@ the target branch." Your merge verification is unreliable — you check commit
 messages and file diffs, not patch identity. Only the Refinery can verify a
 true merge via PR state or `git cherry`.
 
-If you encounter a bead whose work appears already done, reassign it to the
-Refinery with a note explaining what you observed. The Refinery will verify
-and close if appropriate.
+If you encounter a bead whose work appears already done **and you have
+local commits past `origin/<base>`**, reassign to the Refinery with a
+note explaining what you observed. The Refinery rebases, detects the
+empty result, and routes to the Witness for a no-changes close.
+
+If your bead's work has **no commits past `origin/<base>`** (operational
+work outside the rig repo, or you confirmed the work was already done
+before writing any code), do NOT push an empty branch to the Refinery
+— that recreates the close-vs-route deadlock. Route the bead to the
+rig Witness with `merge_result=no-changes` metadata. The formula's
+`submit-and-exit` step encodes the detection and routing mechanically;
+the Witness has explicit close authority for no-changes beads.
 {{ end }}

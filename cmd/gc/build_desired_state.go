@@ -86,6 +86,8 @@ type defaultScaleCheckTarget struct {
 	err      error
 }
 
+const namedSessionWispWakeProbeLimit = 25
+
 var errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
@@ -769,6 +771,15 @@ func buildDesiredStateWithSessionBeads(
 			break
 		}
 	}
+	if store != nil && len(namedSpecs) > 0 {
+		wispDemand, wispPartial := namedSessionPatrolWispWakeDemand(cityPath, cfg, store, rigStores, namedSpecs, namedWorkReady, stderr)
+		if wispPartial {
+			storePartial = true
+		}
+		for identity := range wispDemand {
+			namedWorkReady[identity] = true
+		}
+	}
 	if len(assignedWorkBeads) > 0 {
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
 	}
@@ -1127,6 +1138,119 @@ func collectAssignedWorkBeadsWithStores(
 		}
 	}
 	return result, resultStores, resultStoreRefs, partial
+}
+
+func namedSessionPatrolWispWakeDemand(
+	cityPath string,
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	namedSpecs map[string]namedSessionSpec,
+	alreadyReady map[string]bool,
+	stderr io.Writer,
+) (map[string]bool, bool) {
+	if cfg == nil || cityStore == nil || len(namedSpecs) == 0 {
+		return nil, false
+	}
+	identities := make([]string, 0, len(namedSpecs))
+	for identity := range namedSpecs {
+		identities = append(identities, identity)
+	}
+	sort.Strings(identities)
+
+	var partial bool
+	demand := make(map[string]bool)
+	for _, identity := range identities {
+		spec := namedSpecs[identity]
+		if spec.Mode != "on_demand" || alreadyReady[identity] {
+			continue
+		}
+		store, storeRef, ok := namedSessionWispWakeStore(cityPath, cfg, cityStore, rigStores, spec)
+		if !ok {
+			partial = true
+			fmt.Fprintf(stderr, "namedWispWake: %s reachable store %q unavailable\n", identity, storeRef) //nolint:errcheck
+			continue
+		}
+		for _, status := range []string{"in_progress", "open"} {
+			rows, err := listForControllerDemand(store, beads.ListQuery{
+				Status:   status,
+				Assignee: identity,
+				Limit:    namedSessionWispWakeProbeLimit,
+				TierMode: beads.TierWisps,
+			})
+			if err != nil {
+				partial = true
+				log.Printf("namedWispWake: List(%s, assignee=%q, wisps): %v", status, identity, err)
+				if !beads.IsPartialResult(err) || len(rows) == 0 {
+					continue
+				}
+			}
+			for _, row := range rows {
+				if !isPatrolWispWakeCandidate(row) {
+					continue
+				}
+				fmt.Fprintf(stderr, "namedWispWake: %s matched by wisp %s (store=%s status=%s)\n", identity, row.ID, storeRef, row.Status) //nolint:errcheck
+				demand[identity] = true
+				break
+			}
+			if demand[identity] {
+				break
+			}
+		}
+	}
+	if len(demand) == 0 {
+		return nil, partial
+	}
+	return demand, partial
+}
+
+func namedSessionWispWakeStore(
+	cityPath string,
+	cfg *config.City,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	spec namedSessionSpec,
+) (beads.Store, string, bool) {
+	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, spec.Agent)
+	if storeRef == "" {
+		return cityStore, "", cityStore != nil
+	}
+	if rigStores == nil {
+		return nil, storeRef, false
+	}
+	store := rigStores[storeRef]
+	return store, storeRef, store != nil
+}
+
+func isPatrolWispWakeCandidate(bead beads.Bead) bool {
+	if !bead.Ephemeral {
+		return false
+	}
+	if bead.Status != "open" && bead.Status != "in_progress" {
+		return false
+	}
+	values := []string{
+		bead.Title,
+		bead.Ref,
+		bead.Metadata["formula"],
+		bead.Metadata["gc.formula"],
+		bead.Metadata["wisp_type"],
+		bead.Metadata["gc.wisp_type"],
+	}
+	for _, value := range values {
+		if isPatrolFormulaSignal(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPatrolFormulaSignal(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	return value == "patrol" || strings.HasSuffix(value, "-patrol") || strings.HasSuffix(value, ".patrol")
 }
 
 func assignedWorkReadyLimit(cfg *config.City) int {

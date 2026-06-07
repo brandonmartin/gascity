@@ -2586,7 +2586,29 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	trimmed = strings.ReplaceAll(trimmed, "\u00a0", " ")
 	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
 	prefix := strings.TrimSpace(normalizedPrefix)
-	return strings.HasPrefix(trimmed, normalizedPrefix) || (prefix != "" && trimmed == prefix)
+	// Some TUIs (e.g. grok) render the input line inside a box border, so the
+	// captured line is "│ ❯ …" rather than "❯ …". Test a border-stripped variant
+	// too so the prompt glyph after the border is detected — otherwise readiness
+	// and idle detection never match and queued prompt delivery is never released.
+	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+		if strings.HasPrefix(cand, normalizedPrefix) || (prefix != "" && cand == prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripLeadingBoxBorder removes a leading vertical box-drawing character
+// (│ U+2502 / ┃ U+2503) plus surrounding spaces from a line, so prompt detection
+// can see a prompt glyph that a TUI renders inside a bordered input box (grok).
+// Returns the input unchanged when there is no such border.
+func stripLeadingBoxBorder(s string) string {
+	s = strings.TrimLeft(s, " \t")
+	r := []rune(s)
+	if len(r) > 0 && (r[0] == '│' || r[0] == '┃') {
+		return strings.TrimLeft(string(r[1:]), " \t")
+	}
+	return s
 }
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in

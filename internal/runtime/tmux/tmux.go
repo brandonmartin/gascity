@@ -37,7 +37,12 @@ import (
 
 const pollInterval = 100 * time.Millisecond
 
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "kimi", "opencode", "pi", "antigravity"}
+// grok's TUI treats Escape as "clear input"/mode-toggle, so synthesizing an
+// Escape between the pasted prompt and the submit Enter (the default for
+// non-listed providers) prevents the Enter from submitting — the worker then
+// idles at grok's welcome screen forever. Skip the pre-Enter Escape for grok
+// (like the other send-keys-driven TUIs). See ga-3xu / grok-engagement follow-up.
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "opencode", "pi", "antigravity"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.

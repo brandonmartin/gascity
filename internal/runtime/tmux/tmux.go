@@ -1628,6 +1628,14 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		target = agentPane
 	}
 
+	// Wake a detached pane BEFORE the first send. A fully-detached pool TUI
+	// (e.g. grok, never observed by a client) may not be servicing its event
+	// loop, so the initial paste is silently dropped at the application layer
+	// even though tmux delivers the bytes (no error). SIGWINCH kicks the
+	// render/input loop so the paste is actually consumed. The post-send wake
+	// below remains for the submit Enter.
+	t.WakePaneIfDetached(session)
+
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err

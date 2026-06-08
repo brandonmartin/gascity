@@ -527,6 +527,9 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if p.TitleModel != "grok-composer-2.5-fast" {
 		t.Errorf("TitleModel = %q, want %q", p.TitleModel, "grok-composer-2.5-fast")
 	}
+	if p.ReadyDelayMs != 12000 {
+		t.Errorf("ReadyDelayMs = %d, want 12000", p.ReadyDelayMs)
+	}
 
 	rp := specToResolved("grok", &p)
 	if got := rp.ProviderSessionCreateTransport(); got != "" {

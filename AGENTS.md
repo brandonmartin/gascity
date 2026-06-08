@@ -35,6 +35,38 @@ When working here, assume three codebases matter:
   the normal beads abstractions and keep DoltLite-specific read/write behavior
   contained in beads/provider boundaries.
 
+### Branching & merge — Rules of Engagement (READ FIRST)
+
+This is a **fork**: `origin` is the fork (`github.com/brandonmartin/gascity`),
+`upstream` is `github.com/gastownhall/gascity`. The refinery, polecats,
+polekittens, and any automation MUST follow these rules — they are not optional.
+
+1. **Never merge or push to the fork's `main`.** `origin/main` is a clean mirror
+   of `upstream/main`; keep it pristine so upstream stays trivial to track.
+   Merging or pushing work to `origin/main` is a defect — stop and use the
+   correct branch instead.
+2. **Land fork work on `develop`** — the fork's integration branch (this is the
+   "dev" line; the literal name `dev` is reserved by the `dev/*` feature-branch
+   namespace). Create each change on a dedicated feature branch off `develop`,
+   then merge it back to `develop`, never to `main`. The refinery merges to
+   `develop`.
+3. **Contribute upstream via a pull request from a dedicated feature branch**
+   created off `upstream/main` — one branch per PR, never from `main` or
+   `develop`. See `CONTRIBUTING.md`, "Never open a PR from your fork's `main`
+   branch."
+
+```bash
+# fork-internal work
+git fetch origin && git checkout -b feat/<topic> origin/develop
+# … commit … then merge to develop (never to main)
+
+# upstream contribution
+git fetch upstream && git checkout -b fix/<topic> upstream/main
+# … commit … then open a PR to upstream from this branch
+```
+
+Forbidden in all cases: any merge or push to `origin/main`.
+
 ### Upstream alignment rules
 
 - Keep `upstream/main` easy to merge. Prefer new files, small adapters,

@@ -92,6 +92,17 @@ var maintenanceAPIClient = func(cityPath string) (*api.Client, string) {
 	if c := apiClient(cityPath); c != nil {
 		return c, ""
 	}
+	// Maintenance has no local fallback. A supervisor-managed city omits a
+	// standalone [api] port (the supervisor serves the API on its own port via
+	// city-scoped routes), so apiClient returns nil even though the controller
+	// socket is alive; route to the supervisor-managed client directly rather
+	// than reporting controller-down. General commands keep apiClient's
+	// nil→local fallback, so this routing is scoped to maintenance. (gascity ga-tp7)
+	if apiRouteControllerAliveHook(cityPath) != 0 {
+		if c := apiRouteSupervisorClientHook(cityPath); c != nil {
+			return c, ""
+		}
+	}
 	return nil, apiClientFallbackReason(cityPath)
 }
 

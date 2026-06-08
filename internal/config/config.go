@@ -1356,7 +1356,8 @@ type BeadPolicyConfig struct {
 	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
 	// DeleteAfterClose deletes matching GC-owned beads after they have been
 	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
-	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	// units, e.g. "7d" or "1d12h". Empty defers to any controller-managed
+	// default for the policy type (e.g. order_tracking defaults to 7d).
 	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
 }
 
@@ -1930,6 +1931,10 @@ type ChatSessionsConfig struct {
 	// IdleTimeout is the duration after which a detached chat session
 	// is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// GracePeriod is the duration after creation during which a manual
+	// session is protected from idle-sleep scale-to-zero. Duration string
+	// (e.g., "10m"). Empty = use default (10m). "0" = disabled.
+	GracePeriod string `toml:"grace_period,omitempty"`
 }
 
 // SessionSleepConfig configures default idle sleep policies by session class.
@@ -1953,6 +1958,27 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(c.IdleTimeout)
 	if err != nil {
 		return 0
+	}
+	return d
+}
+
+// DefaultManualGracePeriod is the grace period for manual sessions when
+// no explicit grace_period is configured. Protects ad-hoc sessions from
+// idle-sleep scale-to-zero during their initial startup window.
+const DefaultManualGracePeriod = 10 * time.Minute
+
+// GracePeriodDuration parses GracePeriod, returning DefaultManualGracePeriod
+// if unset, 0 if explicitly set to "0", or the parsed duration.
+func (c ChatSessionsConfig) GracePeriodDuration() time.Duration {
+	switch c.GracePeriod {
+	case "":
+		return DefaultManualGracePeriod
+	case "0", "0s":
+		return 0
+	}
+	d, err := time.ParseDuration(c.GracePeriod)
+	if err != nil {
+		return DefaultManualGracePeriod
 	}
 	return d
 }

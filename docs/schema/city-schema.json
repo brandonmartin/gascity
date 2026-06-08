@@ -951,7 +951,7 @@
         },
         "delete_after_close": {
           "type": "string",
-          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty means the policy is not GC-managed."
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty defers to any controller-managed\ndefault for the policy type (e.g. order_tracking defaults to 7d)."
         }
       },
       "additionalProperties": false,
@@ -1014,6 +1014,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout is the duration after which a detached chat session\nis auto-suspended. Duration string (e.g., \"30m\", \"1h\"). 0 = disabled."
+        },
+        "grace_period": {
+          "type": "string",
+          "description": "GracePeriod is the duration after creation during which a manual\nsession is protected from idle-sleep scale-to-zero. Duration string\n(e.g., \"10m\"). Empty = use default (10m). \"0\" = disabled."
         }
       },
       "additionalProperties": false,

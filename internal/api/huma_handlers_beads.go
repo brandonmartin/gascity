@@ -3,15 +3,22 @@ package api
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
+//
+// Bounded reads are a deterministic prefix of one total order: every
+// per-store query and the cross-rig merge sort by (created_at DESC, id DESC),
+// so the same request returns the same page on every call and a truncated
+// response always carries next_cursor for the remainder (#3208).
 func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (*ListOutput[beads.Bead], error) {
 	bp := input.toBlockingParams()
-	if bp.isBlocking() {
+	blocking := bp.isBlocking()
+	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 
@@ -29,7 +36,29 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 	if input.Cursor != "" {
 		pp.Offset = decodeCursor(input.Cursor)
-		pp.IsPaging = true
+	}
+
+	// all=true reads bypass the CachingStore (closed history lives only in
+	// the backing store) and are O(full history) per rig — seconds on a
+	// large city. Key their response cache on a time bucket so polls within
+	// a TTL window reuse the first completed rebuild instead of each
+	// rebuilding (#3208, same lever as /status in gascity#3186; there is no
+	// single-flight, so simultaneous misses on a cold bucket still rebuild
+	// independently). Open-only reads are served from the in-memory cache
+	// and stay uncached here; blocking callers bypass so the body reflects
+	// the event they waited for.
+	cacheKey := ""
+	var bucket uint64
+	if input.All && !blocking {
+		cacheKey = cacheKeyFor("beads", input)
+		bucket = responseCacheTimeBucket(time.Now())
+		if body, ok := cachedResponseAs[ListBody[beads.Bead]](s, cacheKey, bucket); ok {
+			return &ListOutput[beads.Bead]{
+				Index:     s.latestIndex(),
+				CacheAgeS: cacheAgeSeconds(cityStore),
+				Body:      body,
+			}, nil
+		}
 	}
 
 	stores := s.state.BeadStores()
@@ -57,6 +86,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				Assignee:      assignee,
 				IncludeClosed: input.All,
 				Live:          input.Status == "in_progress",
+				// Explicit sort: with SortDefault the CachingStore returns
+				// map-iteration order, so a bounded read truncated an
+				// arbitrary, per-call-different subset (#3208).
+				Sort: beads.SortCreatedDesc,
 			}
 			if !query.HasFilter() {
 				query.AllowScan = true
@@ -93,40 +126,38 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if all == nil {
 		all = []beads.Bead{}
 	}
+	// Per-store results are each (created_at, id)-ordered, but the
+	// concatenation across rigs and assignee terms is not: re-sort so the
+	// merged set has one global total order and a bounded read is a
+	// deterministic prefix of it (#3208). A single (rig, assignee) source is
+	// already in canonical order — skip the redundant hot-path sort.
+	if len(rigNames)*len(assigneeTerms) > 1 {
+		beads.SortBeads(all, beads.SortCreatedDesc)
+	}
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	if !pp.IsPaging {
-		total := len(all)
-		if pp.Limit < len(all) {
-			all = all[:pp.Limit]
-		}
-		return &ListOutput[beads.Bead]{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body: ListBody[beads.Bead]{
-				Items:         all,
-				Total:         total,
-				Partial:       pa.partial(),
-				PartialErrors: pa.messages(),
-			},
-		}, nil
-	}
-
+	// A non-cursor request is offset-0 paging: a truncated first page carries
+	// the continuation cursor too, otherwise the remainder of a limit-bounded
+	// read is unfetchable by design (#3208).
 	page, total, nextCursor := paginate(all, pp)
 	if page == nil {
 		page = []beads.Bead{}
 	}
+	body := ListBody[beads.Bead]{
+		Items:         page,
+		Total:         total,
+		NextCursor:    nextCursor,
+		Partial:       pa.partial(),
+		PartialErrors: pa.messages(),
+	}
+	if cacheKey != "" {
+		s.storeResponse(cacheKey, bucket, body)
+	}
 	return &ListOutput[beads.Bead]{
 		Index:     index,
 		CacheAgeS: cacheAge,
-		Body: ListBody[beads.Bead]{
-			Items:         page,
-			Total:         total,
-			NextCursor:    nextCursor,
-			Partial:       pa.partial(),
-			PartialErrors: pa.messages(),
-		},
+		Body:      body,
 	}, nil
 }
 

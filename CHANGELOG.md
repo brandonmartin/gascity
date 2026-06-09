@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Note: deploying a binary with changed bundled-pack content still requires a
   one-time `gc import install` (or bootstrap materialize) to populate the new
   cache directory; that install is now durable rather than transient (ga-s9p).
+
+- Pool respawn after `gc runtime drain-ack` no longer waits up to a full patrol
   interval (default 60 s) before the replacement session starts. The async kill
   goroutine now pokes the controller once after the session is gone so Phase 2
   (finalize bead + spawn replacement) runs on the next event tick. Fixes the

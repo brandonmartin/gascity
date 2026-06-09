@@ -139,4 +139,18 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 			t.Fatalf("maintenanceAPIClient reason = %q, want empty", reason)
 		}
 	})
+
+	t.Run("escape-hatch-skips-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "1")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := maintenanceAPIClient(dir)
+		if c != nil {
+			t.Fatalf("maintenanceAPIClient client = %p, want nil under GC_NO_API", c)
+		}
+		if reason != "escape-hatch" {
+			t.Fatalf("maintenanceAPIClient reason = %q, want \"escape-hatch\"", reason)
+		}
+	})
 }

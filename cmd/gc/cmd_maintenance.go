@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -98,9 +99,15 @@ var maintenanceAPIClient = func(cityPath string) (*api.Client, string) {
 	// socket is alive; route to the supervisor-managed client directly rather
 	// than reporting controller-down. General commands keep apiClient's
 	// nil→local fallback, so this routing is scoped to maintenance. (gascity ga-tp7)
-	if apiRouteControllerAliveHook(cityPath) != 0 {
-		if c := apiRouteSupervisorClientHook(cityPath); c != nil {
-			return c, ""
+	//
+	// Honor the GC_NO_API escape hatch: apiClient returns nil under it, and the
+	// alive-hook/supervisor client below never re-check it, so without this guard
+	// an explicit operator opt-out would be silently bypassed for maintenance.
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
+		if apiRouteControllerAliveHook(cityPath) != 0 {
+			if c := apiRouteSupervisorClientHook(cityPath); c != nil {
+				return c, ""
+			}
 		}
 	}
 	return nil, apiClientFallbackReason(cityPath)

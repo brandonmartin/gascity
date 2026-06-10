@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -185,11 +184,13 @@ func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool,
 // shared threshold. Always returns 0 — status is purely informational.
 func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonOut bool, stdout io.Writer) int {
 	if jsonOut {
-		envelope := map[string]any{
-			"status":       cr.Body,
-			"_cache_age_s": cr.AgeSeconds,
-		}
-		_ = writeMaintenanceJSON(stdout, envelope)
+		// writeCLIJSONLine adds the ok:true success discriminator and emits
+		// one compact line, matching the rest of the gc --json surface.
+		_ = writeCLIJSONLine(stdout, map[string]any{
+			"schema_version": maintenanceJSONSchemaVersion,
+			"status":         cr.Body,
+			"_cache_age_s":   cr.AgeSeconds,
+		})
 		return 0
 	}
 	v := cr.Body
@@ -203,6 +204,9 @@ func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonO
 	}
 	if v.LastRun != nil {
 		fmt.Fprintf(stdout, "Last run: stage=%s at %s (%.1fs)\n", v.LastRun.Stage, v.LastRun.StartedAt, v.LastRun.DurationSeconds) //nolint:errcheck
+		if line := maintenanceStoreSizeLine(v.LastRun.BeforeBytes, v.LastRun.AfterBytes); line != "" {
+			fmt.Fprintln(stdout, line) //nolint:errcheck
+		}
 		if v.LastRun.Err != "" {
 			fmt.Fprintf(stdout, "  error: %s\n", v.LastRun.Err) //nolint:errcheck
 		}
@@ -216,6 +220,9 @@ func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonO
 		fmt.Fprintf(stdout, "History (%d):\n", len(v.History)) //nolint:errcheck
 		for _, r := range v.History {
 			line := fmt.Sprintf("  %s  stage=%s  duration=%.1fs", r.StartedAt, r.Stage, r.DurationSeconds)
+			if r.BeforeBytes != 0 || r.AfterBytes != 0 {
+				line += "  reclaimed=" + formatMaintenanceBytes(r.BeforeBytes-r.AfterBytes)
+			}
 			if r.Err != "" {
 				line += "  err=" + truncateMaintenance(r.Err, 80)
 			}
@@ -234,10 +241,16 @@ func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonO
 // supervisor accepted the request.
 func renderMaintenanceTrigger(view api.MaintenanceTriggerView, wait, jsonOut bool, stdout io.Writer) int {
 	if jsonOut {
-		_ = writeMaintenanceJSON(stdout, view)
+		_ = writeCLIJSONLine(stdout, map[string]any{
+			"schema_version": maintenanceJSONSchemaVersion,
+			"trigger":        view,
+		})
 	} else {
 		if view.Run != nil {
 			fmt.Fprintf(stdout, "Maintenance run: stage=%s started=%s duration=%.1fs\n", view.Run.Stage, view.Run.StartedAt, view.Run.DurationSeconds) //nolint:errcheck
+			if line := maintenanceStoreSizeLine(view.Run.BeforeBytes, view.Run.AfterBytes); line != "" {
+				fmt.Fprintln(stdout, line) //nolint:errcheck
+			}
 			if view.Run.Err != "" {
 				fmt.Fprintf(stdout, "  error: %s\n", view.Run.Err) //nolint:errcheck
 			}
@@ -262,15 +275,49 @@ func formatDurationSeconds(sec int64) string {
 	return d.String()
 }
 
-func writeMaintenanceJSON(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
-
 func truncateMaintenance(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
 	return s[:limit-1] + "…"
+}
+
+// maintenanceJSONSchemaVersion is the schema_version emitted on the
+// maintenance commands' --json success envelopes. Bump only on a breaking
+// change to the result shape declared in
+// schemas/maintenance/*/result.schema.json.
+const maintenanceJSONSchemaVersion = "1"
+
+// maintenanceStoreSizeLine renders the indented before/after/reclaimed store
+// size summary for a run, or "" when neither size was measured (both zero).
+// Surfacing reclaimed bytes lets an operator spot a zero-reclaim run at a
+// glance instead of trusting a bare stage=done.
+func maintenanceStoreSizeLine(before, after int64) string {
+	if before == 0 && after == 0 {
+		return ""
+	}
+	return fmt.Sprintf("  store: before=%s after=%s reclaimed=%s",
+		formatMaintenanceBytes(before), formatMaintenanceBytes(after), formatMaintenanceBytes(before-after))
+}
+
+// formatMaintenanceBytes renders a byte count in binary units (B/KiB/MiB/…)
+// to one decimal place, preserving sign so a store that grew during a run
+// shows a negative reclaimed value.
+func formatMaintenanceBytes(n int64) string {
+	const unit = 1024
+	sign := ""
+	v := n
+	if v < 0 {
+		sign = "-"
+		v = -v
+	}
+	if v < unit {
+		return fmt.Sprintf("%s%dB", sign, v)
+	}
+	div, exp := int64(unit), 0
+	for rest := v / unit; rest >= unit; rest /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%s%.1f%ciB", sign, float64(v)/float64(div), "KMGTPE"[exp])
 }

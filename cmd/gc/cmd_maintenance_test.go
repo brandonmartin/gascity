@@ -366,9 +366,44 @@ func TestRouteMaintenanceDoltGC_WaitSuccess(t *testing.T) {
 	}
 }
 
+// TestMaintenanceCommandsDeclareJSONSupport is the direct regression guard
+// for ga-ule's second symptom: `gc maintenance dolt-gc --json` was rejected
+// at runtime with json_unsupported even though the flag is advertised in
+// --help. With the result schemas declared, the contract manifest must now
+// report json_supported=true (so the global --json gate passes the flag
+// through to the command instead of rejecting it).
+func TestMaintenanceCommandsDeclareJSONSupport(t *testing.T) {
+	for _, command := range [][]string{
+		{"maintenance", "status"},
+		{"maintenance", "dolt-gc"},
+	} {
+		t.Run(strings.Join(command, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(append(append([]string{}, command...), "--json-schema"), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run(%v --json-schema) = %d; stderr=%q", command, code, stderr.String())
+			}
+			var manifest struct {
+				JSONSupported bool                       `json:"json_supported"`
+				Schemas       map[string]json.RawMessage `json:"schemas"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+				t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
+			}
+			if !manifest.JSONSupported {
+				t.Fatalf("json_supported=false; the advertised --json flag would still be rejected (ga-ule)\nmanifest=%s", stdout.String())
+			}
+			if !json.Valid(manifest.Schemas["result"]) {
+				t.Fatalf("result schema missing/invalid: %s", manifest.Schemas["result"])
+			}
+		})
+	}
+}
+
 // TestRouteMaintenanceStatus_JSONOutput verifies that --json emits a
-// stable envelope with a _cache_age_s field mirroring the read-path
-// contract.
+// stable success envelope (schema_version + ok discriminator) carrying the
+// status body and a _cache_age_s field, and that the payload validates
+// against the declared schema. (gascity ga-ule)
 func TestRouteMaintenanceStatus_JSONOutput(t *testing.T) {
 	srv := httptest.NewServer(okMaintenanceStatusHandler(t))
 	defer srv.Close()
@@ -379,14 +414,47 @@ func TestRouteMaintenanceStatus_JSONOutput(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d; want 0; stderr=%q", code, stderr.String())
 	}
-	var env map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+	payload := validateManagementJSONPayload(t, []string{"maintenance", "status"}, &stdout)
+	if payload["ok"] != true || payload["schema_version"] != "1" {
+		t.Errorf("missing success discriminator: %v", payload)
 	}
-	if _, ok := env["_cache_age_s"]; !ok {
-		t.Errorf("JSON envelope missing _cache_age_s: %v", env)
+	if _, ok := payload["_cache_age_s"]; !ok {
+		t.Errorf("JSON envelope missing _cache_age_s: %v", payload)
 	}
-	if _, ok := env["status"]; !ok {
-		t.Errorf("JSON envelope missing status: %v", env)
+	if _, ok := payload["status"]; !ok {
+		t.Errorf("JSON envelope missing status: %v", payload)
+	}
+}
+
+// TestRouteMaintenanceDoltGC_JSONOutput verifies the trigger --json success
+// envelope validates against the declared schema and exposes the run's
+// before/after bytes so a zero-reclaim run is machine-detectable. (ga-ule)
+func TestRouteMaintenanceDoltGC_JSONOutput(t *testing.T) {
+	srv := httptest.NewServer(okMaintenanceTriggerWaitHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeMaintenanceDoltGC(c, "", true /*wait*/, true /*json*/, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	payload := validateManagementJSONPayload(t, []string{"maintenance", "dolt-gc"}, &stdout)
+	if payload["ok"] != true || payload["schema_version"] != "1" {
+		t.Errorf("missing success discriminator: %v", payload)
+	}
+	trigger, ok := payload["trigger"].(map[string]any)
+	if !ok {
+		t.Fatalf("JSON envelope missing trigger object: %v", payload)
+	}
+	run, ok := trigger["run"].(map[string]any)
+	if !ok {
+		t.Fatalf("trigger missing run object: %v", trigger)
+	}
+	if _, ok := run["before_bytes"]; !ok {
+		t.Errorf("run missing before_bytes: %v", run)
+	}
+	if _, ok := run["after_bytes"]; !ok {
+		t.Errorf("run missing after_bytes: %v", run)
 	}
 }

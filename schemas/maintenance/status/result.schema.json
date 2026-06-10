@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc maintenance status --json result",
+  "description": "Dolt store maintenance loop state and recent run history.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "status",
+    "_cache_age_s"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version for this command output."
+    },
+    "ok": {
+      "const": true
+    },
+    "_cache_age_s": {
+      "type": "number",
+      "description": "Age in seconds of the supervisor status cache that produced this read."
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "interval_seconds",
+        "in_flight",
+        "history"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether [maintenance.dolt] enabled=true in city.toml."
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "description": "Configured scheduling interval in seconds (0 when disabled)."
+        },
+        "in_flight": {
+          "type": "boolean",
+          "description": "True when a maintenance cycle is currently running."
+        },
+        "in_flight_start": {
+          "type": "string",
+          "description": "RFC3339 start time of the in-flight run, when one is running."
+        },
+        "last_run": {
+          "$ref": "#/$defs/run"
+        },
+        "next_scheduled": {
+          "type": "string",
+          "description": "RFC3339 approximate next scheduled run time."
+        },
+        "history": {
+          "type": "array",
+          "description": "Bounded ring of recent run outcomes (oldest first).",
+          "items": {
+            "$ref": "#/$defs/run"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "finished_at",
+        "stage",
+        "before_bytes",
+        "after_bytes",
+        "duration_s"
+      ],
+      "properties": {
+        "started_at": {
+          "type": "string",
+          "description": "RFC3339 timestamp when the run began."
+        },
+        "finished_at": {
+          "type": "string",
+          "description": "RFC3339 timestamp when the run completed."
+        },
+        "stage": {
+          "type": "string",
+          "description": "Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure."
+        },
+        "err": {
+          "type": "string",
+          "description": "Error message when stage names a failing phase; absent on success."
+        },
+        "before_bytes": {
+          "type": "integer",
+          "description": "Store size in bytes before the run (0 when not measured)."
+        },
+        "after_bytes": {
+          "type": "integer",
+          "description": "Store size in bytes after the run (0 when not measured)."
+        },
+        "snapshot_path": {
+          "type": "string",
+          "description": "Absolute path to the snapshot directory created for this run, when any."
+        },
+        "duration_s": {
+          "type": "number",
+          "description": "Elapsed wall-clock seconds between started_at and finished_at."
+        }
+      }
+    }
+  }
+}

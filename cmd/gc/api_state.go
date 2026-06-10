@@ -39,6 +39,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/ssrf"
+	"github.com/gastownhall/gascity/internal/storehealth"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -521,11 +522,21 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		DiskFreeBytes:     doltContainerFreeBytesFunc,
 		DiskMinFreeBytes:  doltDiskMinFreeBytes(),
 		DiskWarnFreeBytes: doltDiskWarnFreeBytes(),
+		// Wire CALL DOLT_GC() (per user database) so a scheduled or manual
+		// run actually reclaims. Leaving this nil was the ga-ule no-op:
+		// runDoltGC returned immediately and the cycle reported stage=done
+		// in 0.0s while the store stayed bloated.
+		OpenDoltOps: newMaintenanceDoltOpsFactory(cityPath),
+		// Sample the store size before/after each cycle so the run record
+		// (and its event) carry before/after bytes, making a zero-reclaim
+		// run detectable from the event log.
+		StoreSizeBytes: func() int64 { return storehealth.WalkSize(storehealth.StorePath(cityPath)) },
 	}
-	active := deps.OpenDoltOps != nil && deps.OpenDoltBackup != nil
+	gcWired := deps.OpenDoltOps != nil
+	snapshotWired := deps.OpenDoltBackup != nil
 	// Always log the loop's startup so operators can confirm initialization
-	// (and its mode) from the supervisor log, not just the observe-only case.
-	fmt.Fprintln(os.Stderr, maintenanceStartupLine(cfg.Maintenance.Dolt.IntervalOrDefault(), active)) //nolint:errcheck // best-effort stderr
+	// (and which stages are wired) from the supervisor log.
+	fmt.Fprintln(os.Stderr, maintenanceStartupLine(cfg.Maintenance.Dolt.IntervalOrDefault(), gcWired, snapshotWired)) //nolint:errcheck // best-effort stderr
 	loop := supervisor.NewStoreMaintenanceLoop(deps)
 	// Retain the handle so the API layer can expose
 	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
@@ -538,14 +549,23 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 
 // maintenanceStartupLine formats the one-line banner emitted when the Dolt
 // store-maintenance loop launches. It always reports the schedule interval
-// and whether the loop is wired for real GC ("active") or only observing
-// ("observe-only") so operators can confirm initialization from the log.
-func maintenanceStartupLine(interval time.Duration, active bool) string {
-	mode := "active"
-	if !active {
-		mode = "observe-only (snapshot and DOLT_GC not yet wired)"
+// and the wiring state of each stage — gc (CALL DOLT_GC reclaim) and
+// snapshot (dolt backup) — as "wired" or "observe-only", so operators can
+// confirm from the supervisor log whether a scheduled run will actually
+// reclaim disk.
+func maintenanceStartupLine(interval time.Duration, gcWired, snapshotWired bool) string {
+	return fmt.Sprintf("store-maintenance: loop started interval=%s gc=%s snapshot=%s",
+		interval, maintenanceWiredLabel(gcWired), maintenanceWiredLabel(snapshotWired))
+}
+
+// maintenanceWiredLabel renders a maintenance stage's wiring state for the
+// startup banner: "wired" when its dependency is injected, "observe-only"
+// when the stage is a no-op.
+func maintenanceWiredLabel(wired bool) string {
+	if wired {
+		return "wired"
 	}
-	return fmt.Sprintf("store-maintenance: loop started interval=%s mode=%s", interval, mode)
+	return "observe-only"
 }
 
 // beadCloseAutocloseDispatch controls how convoy/wisp/molecule autoclose are

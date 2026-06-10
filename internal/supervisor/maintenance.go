@@ -156,6 +156,15 @@ type StoreMaintenanceLoopDeps struct {
 	// threshold (but is still above DiskMinFreeBytes) StoreDiskWarn is
 	// emitted and the GC proceeds.
 	DiskWarnFreeBytes int64
+
+	// StoreSizeBytes measures the on-disk size of the managed Dolt store.
+	// The loop samples it once before the cycle and once after the GC so
+	// the run record carries before/after bytes — making a zero-reclaim
+	// run (before == after) detectable from the event log alone. Nil
+	// disables measurement (both fields stay at the documented
+	// "0 == not measured" sentinel). Production wires this to
+	// storehealth.WalkSize over the store path.
+	StoreSizeBytes func() int64
 }
 
 // StoreMaintenanceLoop runs periodic Dolt store maintenance inside the
@@ -178,6 +187,7 @@ type StoreMaintenanceLoop struct {
 	diskFreeBytes     func(path string) (int64, error)
 	diskMinFreeBytes  int64
 	diskWarnFreeBytes int64
+	storeSizeBytes    func() int64
 
 	// mu is the in-process maintenance lease. runOnce and TriggerNow hold
 	// it for the duration of a single maintenance cycle; each contends on
@@ -247,6 +257,7 @@ func NewStoreMaintenanceLoop(deps StoreMaintenanceLoopDeps) *StoreMaintenanceLoo
 		diskFreeBytes:     deps.DiskFreeBytes,
 		diskMinFreeBytes:  deps.DiskMinFreeBytes,
 		diskWarnFreeBytes: deps.DiskWarnFreeBytes,
+		storeSizeBytes:    deps.StoreSizeBytes,
 		lastRunAt:         deps.LastRunAt,
 		history:           make([]MaintenanceRun, 0, maintenanceHistorySize),
 	}
@@ -397,27 +408,41 @@ func (m *StoreMaintenanceLoop) executeCycleLocked(ctx context.Context) Maintenan
 	m.runStartedAt.Store(&started)
 	defer m.runStartedAt.Store(nil)
 
+	before := m.measureStoreSize()
+
 	snapshotPath, err := m.runSnapshot(ctx)
 	if err != nil {
-		return m.finishCycleLocked(started, snapshotPath, err)
+		return m.finishCycleLocked(started, snapshotPath, before, err)
 	}
 	if m.checkDiskPreflight() {
 		// Disk is critically low — skip CALL DOLT_GC to avoid growing the
 		// store further. The StoreDiskCritical event informs operators.
 		// C1 (hold-on-store-unreachable) handles downstream safety.
-		return m.finishCycleLocked(started, snapshotPath, nil)
+		return m.finishCycleLocked(started, snapshotPath, before, nil)
 	}
 	if err := m.runDoltGC(ctx); err != nil {
-		return m.finishCycleLocked(started, snapshotPath, err)
+		return m.finishCycleLocked(started, snapshotPath, before, err)
 	}
-	return m.finishCycleLocked(started, snapshotPath, nil)
+	return m.finishCycleLocked(started, snapshotPath, before, nil)
 }
 
-func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath string, err error) MaintenanceRun {
+// measureStoreSize samples the managed Dolt store's on-disk size via the
+// injected probe, or returns 0 when no probe is wired (the documented
+// "0 == not measured" sentinel carried on the run record).
+func (m *StoreMaintenanceLoop) measureStoreSize() int64 {
+	if m.storeSizeBytes == nil {
+		return 0
+	}
+	return m.storeSizeBytes()
+}
+
+func (m *StoreMaintenanceLoop) finishCycleLocked(started time.Time, snapshotPath string, before int64, err error) MaintenanceRun {
 	run := MaintenanceRun{
 		StartedAt:    started,
 		FinishedAt:   m.clock(),
 		SnapshotPath: snapshotPath,
+		BeforeBytes:  before,
+		AfterBytes:   m.measureStoreSize(),
 	}
 	if err != nil {
 		run.Stage = "maintenance"

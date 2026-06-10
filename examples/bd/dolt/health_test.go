@@ -1498,6 +1498,116 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 	}
 }
 
+// TestHealthScriptZombieScanExcludesExternalRigLocalServersViaSiteToml
+// verifies that externally-pathed rigs (registered in .gc/site.toml rather
+// than local rigs/ subdirs) have their rig-local Dolt servers identified and
+// excluded from the zombie scan. Regression guard for the bug where
+// metadata_files() invoked `gc rig list --json` which exceeds the 5 s
+// run_bounded timeout on bd-mode hosts, so external rigs were never
+// discovered and their rig-local Dolts were flagged as zombies.
+func TestHealthScriptZombieScanExcludesExternalRigLocalServersViaSiteToml(t *testing.T) {
+	cityPath := t.TempDir()
+	externalRigPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19921"
+	rigPort := "19922"
+	mainPID := "426001"
+	rigPID := "426002"
+	zombiePID := "426003"
+
+	// City .beads directory.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// .gc/site.toml registers the external rig (the fast path in metadata_files).
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	siteToml := fmt.Sprintf("workspace_name = \"test\"\n\n[[rig]]\nname = \"external\"\npath = %q\n", externalRigPath)
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "site.toml"), []byte(siteToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// External rig's .beads directory with a config.yaml dolt.port entry.
+	externalBeads := filepath.Join(externalRigPath, ".beads")
+	if err := os.MkdirAll(externalBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(externalBeads, "metadata.json"),
+		[]byte(`{"dolt_database":"external"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(externalBeads, "config.yaml"),
+		[]byte("dolt.port: "+rigPort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// gc is absent from the fake PATH — site.toml path must not require gc.
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, rigPID, zombiePID))
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID, rigPort, rigPID))
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, rigPID, zombiePID))
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	output := string(out)
+
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+	if strings.Contains(output, rigPID) {
+		t.Errorf("external rig-local Dolt PID %s (found via .gc/site.toml) should not be in zombie_pids; got:\n%s", rigPID, output)
+	}
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
 // TestHealthScriptZombieScanExcludesForeignManagedServers verifies that
 // Dolt servers managed by OTHER cities on the same host are not flagged
 // as zombies. Regression guard for the bug where deacon patrol in every

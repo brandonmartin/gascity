@@ -15,6 +15,22 @@ PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
+  # Prefer reading rig paths directly from .gc/site.toml. This avoids
+  # spawning gc (which exceeds the 5 s run_bounded guard on bd-mode hosts
+  # due to native_store_unavailable WARN messages) and covers
+  # externally-pathed rigs that the find fallback below cannot reach.
+  # site.toml is written by gc start/rig-add and is present in any city
+  # with registered external rigs.
+  _site="$GC_CITY_PATH/.gc/site.toml"
+  if [ -f "$_site" ]; then
+    grep -E '^path[[:space:]]*=' "$_site" \
+      | sed 's/^path[[:space:]]*=[[:space:]]*"//;s/"[[:space:]]*$//' \
+      | while IFS= read -r p; do
+          [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
+        done
+    return
+  fi
+
   if command -v gc >/dev/null 2>&1; then
     # Bound the gc rig list call: if gc is itself in a bad state (the
     # failure mode this patrol is meant to detect) we must not block

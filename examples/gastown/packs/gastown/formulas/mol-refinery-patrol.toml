@@ -169,10 +169,33 @@ needs = ["check-inbox"]
 description = """
 **Config: event_timeout = {{event_timeout}}**
 
-Search for work beads assigned to you with branch metadata:
+Search for work beads assigned to you. Two kinds land in the refinery queue:
+
+- **Branch beads** carry `metadata.branch` — a polecat pushed a feature
+  branch. The rebase and merge-push steps land them (or publish a PR).
+- **Branchless `no_diff` verify-and-close beads** carry `metadata.no_diff=true`
+  and a re-verifiable `metadata.verify_cmd`. Their acceptance is satisfied with
+  NO code diff (environment provisioning, doctor-gated foundations, bootstraps).
+  Before this path existed, the branch-only filter never matched them and they
+  stranded in the queue forever (ga-s69; source th-wisp-b0myd7 / ch-lc8). The
+  verify-no-diff step re-runs the acceptance and closes them.
+
+Look for a branch bead first (real merges take priority):
 ```bash
 WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \
   --exclude-type=epic --has-metadata-key=branch --limit=1 --json | jq -r '.[0].id // empty')
+```
+
+If none, look for a branchless no_diff verify-and-close bead.
+`--has-metadata-key=no_diff` matches on key presence (robust whether the value
+was written as the boolean `true` or the string `"true"`); the jq filter keeps
+only truthy ones that carry no branch:
+```bash
+if [ -z "$WORK" ]; then
+  WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \
+    --exclude-type=epic --has-metadata-key=no_diff --limit=20 --json \
+    | jq -r '[.[] | select(((.metadata.no_diff == true) or (.metadata.no_diff == "true")) and ((.metadata.branch // "") == ""))] | sort_by(.created_at // "") | .[0].id // empty')
+fi
 ```
 
 `${GC_RIG:+--rig="$GC_RIG"}` scopes the query to this refinery's rig
@@ -181,12 +204,17 @@ sees rig-scoped work beads — the `assignee` field alone does not route
 by namespace. For HQ-only refineries `$GC_RIG` is empty and the flag
 expands to nothing.
 
-If found: read the bead metadata to confirm it has a branch:
+If found: read the bead metadata to classify it:
 ```bash
 gc bd show $WORK --json | jq '.[0].metadata'
 ```
-The bead MUST have `metadata.branch`. If `metadata.target` is missing,
-use {{target_branch}} as default. Note the work bead ID and close this step.
+- A **branch bead** has `metadata.branch`. If `metadata.target` is missing,
+  use {{target_branch}} as default. The rebase and merge-push steps handle it.
+- A **no_diff bead** has `metadata.no_diff=true` and no branch. The
+  verify-no-diff step re-verifies and closes it; rebase, run-tests, and
+  merge-push are skipped for it.
+
+Note the work bead ID and close this step.
 
 If NO work found:
 Write exactly:
@@ -197,12 +225,134 @@ Then stop immediately. Do NOT sleep, call ScheduleWakeup, or use Monitor.
 The session_sleep policy will restart this session after the configured idle interval.
 When restarted, re-read formula steps — this step stays open until a work bead is found.
 
-**Do not close this step until you have a work bead with branch metadata.**"""
+**Do not close this step until you have a work bead (branch or no_diff verify-and-close).**"""
+
+[[steps]]
+id = "verify-no-diff"
+title = "Verify-and-close branchless no_diff beads"
+needs = ["find-work"]
+description = """
+Handle the branchless `no_diff` verify-and-close path. This step is a
+**no-op for normal branch beads** — they fall straight through to rebase.
+
+Classify the work bead from find-work. It is a no_diff verify-and-close bead
+when `metadata.no_diff` is truthy AND it carries no branch (a real diff always
+wins — if a branch is present, treat it as a normal merge):
+```bash
+NO_DIFF=$(gc bd show $WORK --json | jq -r 'if (((.[0].metadata.no_diff == true) or (.[0].metadata.no_diff == "true")) and ((.[0].metadata.branch // "") == "")) then "true" else "" end')
+```
+
+**If NO_DIFF is empty (normal branch bead):** this step does not apply. Close
+it and proceed to rebase.
+
+**If NO_DIFF = "true" (branchless verify-and-close bead):**
+
+A no_diff bead asserts "the acceptance is already satisfied; there is no diff
+to merge" (environment provisioning, doctor-gated foundations, bootstraps).
+The refinery is the single completion gate, so it MUST re-verify the acceptance
+itself before closing — never close on the polecat's say-so alone. Define the
+decision predicate:
+```bash
+no_diff_verify() {
+  # Re-verify a branchless no_diff bead's acceptance. The verify command is
+  # operator-supplied (same trust level as test_command) and runs in a subshell
+  # so its output stays visible for the patrol summary.
+  #   exit 0 = verify_cmd present and exited 0 -> acceptance re-verified -> CLOSE
+  #   exit 1 = verify_cmd present but exited non-zero -> NOT satisfied -> reject
+  #   exit 2 = no verify_cmd at all -> cannot auto-verify -> route away to a human
+  ndv_cmd="$1"
+  [ -z "$ndv_cmd" ] && return 2
+  sh -c "$ndv_cmd" || return 1
+  return 0
+}
+```
+
+Read the re-verifiable acceptance command and run the predicate:
+```bash
+VERIFY_CMD=$(gc bd show $WORK --json | jq -r '.[0].metadata.verify_cmd // empty')
+no_diff_verify "$VERIFY_CMD"
+VERIFY_RC=$?
+```
+
+**VERIFY_RC = 0 — acceptance re-verified. Close the bead (no merge, no PR).**
+
+Run as a single chained command so the metadata write cannot be skipped when
+the close-reason already names the verify command. `merge_result=verified` and
+`verified_cmd` are the forensic breadcrumbs tying a closed no_diff bead to the
+command that gated it. `--unset-metadata rejection_reason` clears any stale
+rejection field from an earlier rejected attempt before the successful close.
+```bash
+gc bd update $WORK \
+  --set-metadata merge_result=verified \
+  --set-metadata verified_cmd="$VERIFY_CMD" \
+  --unset-metadata rejection_reason && \
+gc bd close $WORK --reason "Verified no_diff acceptance via verify_cmd (exit 0): $VERIFY_CMD"
+```
+
+**VERIFY_RC = 1 — verify_cmd failed. The acceptance is NOT satisfied** (the
+provisioning/foundation is not actually done). Reject back to the polecat pool
+with a reason so a worker finishes it and resubmits — the same rejection-resume
+contract as a failed merge. Do NOT close:
+```bash
+gc bd update $WORK \
+  --status=open \
+  --assignee="" \
+  --set-metadata rejection_reason="verify_cmd failed (exit $VERIFY_RC): $VERIFY_CMD" \
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+```
+
+**VERIFY_RC = 2 — no verify_cmd. The refinery has nothing to gate on**, so it
+cannot auto-verify. Do NOT close (closing a no_diff bead on no evidence is a
+false completion) and do NOT strand it. Route it away to a human for manual
+verify-and-close, and escalate so the missing acceptance is corrected:
+```bash
+gc bd update $WORK \
+  --status=open \
+  --assignee="" \
+  --set-metadata gc.routed_to=human \
+  --set-metadata blocked_reason="no_diff bead has no verify_cmd; refinery cannot auto-verify. Manual verify-and-close required."
+gc mail send mayor/ -s "ESCALATION: no_diff bead $WORK lacks verify_cmd" -m "Work bead: $WORK
+This bead is marked no_diff=true but carries no verify_cmd, so the refinery
+cannot re-verify its acceptance. Add a verify_cmd and re-route to the refinery,
+or verify-and-close it manually."
+```
+
+**Terminal for all three no_diff outcomes.** The work bead is resolved
+(closed, rejected, or routed away); this wisp is done. Pour the next patrol
+iteration, then burn this wisp — exactly like every other refinery exit path:
+```bash
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+  echo "Could not assign next refinery wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+gc runtime drain-ack
+exit 0
+```
+
+**Do not proceed to rebase for a no_diff bead — it has no branch to rebase.**"""
 
 [[steps]]
 id = "rebase"
 title = "Rebase branch on target"
-needs = ["find-work"]
+needs = ["verify-no-diff"]
 description = """
 **Config: target_branch = {{target_branch}}**
 

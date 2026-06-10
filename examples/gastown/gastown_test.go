@@ -87,7 +87,7 @@ func assertCurrentWispBurnsGuarded(t *testing.T, name, body string) {
 	}
 }
 
-func refineryMergePushDescription(t *testing.T) string {
+func refineryStep(t *testing.T, id string) *formula.Step {
 	t.Helper()
 	parser := formula.NewParser(gastownFormulaSearchPaths()...)
 	f, err := parser.ParseFile(filepath.Join(exampleDir(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml"))
@@ -95,12 +95,28 @@ func refineryMergePushDescription(t *testing.T) string {
 		t.Fatalf("parsing refinery formula: %v", err)
 	}
 	for _, step := range f.Steps {
-		if step.ID == "merge-push" {
-			return step.Description
+		if step.ID == id {
+			return step
 		}
 	}
-	t.Fatal("refinery formula missing merge-push step")
-	return ""
+	t.Fatalf("refinery formula missing %q step", id)
+	return nil
+}
+
+// stepNeeds reports whether step depends on dep via either Needs or DependsOn
+// (the parser merges the two during cooking).
+func stepNeeds(step *formula.Step, dep string) bool {
+	for _, n := range append(append([]string{}, step.Needs...), step.DependsOn...) {
+		if n == dep {
+			return true
+		}
+	}
+	return false
+}
+
+func refineryMergePushDescription(t *testing.T) string {
+	t.Helper()
+	return refineryStep(t, "merge-push").Description
 }
 
 func extractBetween(t *testing.T, body, startMarker, endMarker string) string {
@@ -431,7 +447,8 @@ func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 //
 // The fix chains both commands with `&&` so a refinery agent cannot
 // honor `gc bd close` without also honoring the preceding metadata
-// write. Both the direct-merge path and the mr/pr handoff path use
+// write. All three close paths — the direct-merge path, the mr/pr
+// handoff path, and the no_diff verify-and-close path (ga-s69) — use
 // the same chained shape.
 func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	dir := exampleDir()
@@ -443,8 +460,8 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	body := string(data)
 	normalizedBody := strings.Join(strings.Fields(body), " ")
 	unsetRationale := "`--unset-metadata rejection_reason` clears any stale rejection field"
-	if count := strings.Count(normalizedBody, unsetRationale); count != 2 {
-		t.Fatalf("refinery formula should explain rejection_reason cleanup in both close paths, found %d occurrences", count)
+	if count := strings.Count(normalizedBody, unsetRationale); count != 3 {
+		t.Fatalf("refinery formula should explain rejection_reason cleanup in all three close paths, found %d occurrences", count)
 	}
 
 	// Direct-merge path: metadata write must be chained into the close.
@@ -466,6 +483,15 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		`--set-metadata merged_target="$TARGET"`,
 		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
+	)
+
+	// no_diff verify-and-close path: same chained shape — the verify metadata
+	// write cannot be skipped before the close (ga-s69).
+	assertContainsInOrder(t, body,
+		"--set-metadata merge_result=verified",
+		`--set-metadata verified_cmd="$VERIFY_CMD"`,
+		"--unset-metadata rejection_reason &&",
+		`gc bd close $WORK --reason "Verified no_diff acceptance via verify_cmd`,
 	)
 }
 
@@ -611,6 +637,141 @@ func TestRefineryBranchHasRealChangeExec(t *testing.T) {
 			}
 			if got != c.want {
 				t.Fatalf("branch_has_real_change %q %q exit=%d, want %d", c.base, c.branch, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRefineryFormulaFindsNoDiffVerifyBeads guards the ga-s69 fix: the
+// find-work step's branch-only filter (--has-metadata-key=branch) never
+// matched branchless no_diff verify-and-close beads (environment
+// provisioning, doctor-gated foundations, bootstraps), so they stranded in
+// the refinery queue forever (source th-wisp-b0myd7 / ch-lc8). find-work now
+// looks for branch beads first, then falls back to no_diff beads, so the
+// refinery stays the single completion gate for both.
+func TestRefineryFormulaFindsNoDiffVerifyBeads(t *testing.T) {
+	desc := refineryStep(t, "find-work").Description
+
+	// Branch beads are still searched first (real merges take priority); the
+	// portable rig-scoped query line is unchanged.
+	if !strings.Contains(desc, "--has-metadata-key=branch") {
+		t.Error("find-work no longer searches branch beads")
+	}
+	// Branchless no_diff beads are searched as a fallback so they no longer
+	// strand. --has-metadata-key=no_diff matches on key presence; the jq
+	// filter keeps only truthy, branchless ones.
+	assertContainsInOrder(t, desc,
+		"--has-metadata-key=branch",
+		"--has-metadata-key=no_diff",
+	)
+	for _, want := range []string{
+		`.metadata.no_diff == true`,
+		`.metadata.no_diff == "true"`,
+		`(.metadata.branch // "") == ""`,
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("find-work missing no_diff classification fragment %q", want)
+		}
+	}
+}
+
+// TestRefineryFormulaVerifyNoDiffStep validates the verify-no-diff step that
+// re-verifies and closes branchless no_diff beads. The refinery is the single
+// completion gate, so it MUST re-run the bead's verify_cmd itself rather than
+// close on the polecat's say-so. The decision predicate maps three outcomes:
+// no verify_cmd -> route away to a human (never blind-close, never strand);
+// verify_cmd fails -> reject back to the pool; verify_cmd passes -> close with
+// forensic metadata and no merge/PR.
+func TestRefineryFormulaVerifyNoDiffStep(t *testing.T) {
+	// The step exists and is wired between find-work and rebase.
+	verify := refineryStep(t, "verify-no-diff")
+	if !stepNeeds(verify, "find-work") {
+		t.Errorf("verify-no-diff must depend on find-work, got needs=%v depends_on=%v", verify.Needs, verify.DependsOn)
+	}
+	if rebase := refineryStep(t, "rebase"); !stepNeeds(rebase, "verify-no-diff") {
+		t.Errorf("rebase must depend on verify-no-diff (rewired graph), got needs=%v depends_on=%v", rebase.Needs, rebase.DependsOn)
+	}
+	desc := verify.Description
+
+	// One shared decision predicate, defined exactly once.
+	if count := strings.Count(desc, "no_diff_verify() {"); count != 1 {
+		t.Fatalf("expected exactly one no_diff_verify definition, found %d", count)
+	}
+	// Predicate maps: empty cmd -> 2 (route away), non-zero -> 1 (reject),
+	// zero -> 0 (close).
+	assertContainsInOrder(t, desc,
+		"no_diff_verify() {",
+		`[ -z "$ndv_cmd" ] && return 2`,
+		`sh -c "$ndv_cmd" || return 1`,
+		"return 0",
+	)
+
+	// Pass (RC=0) -> close with no merge/PR; metadata chained into the close.
+	assertContainsInOrder(t, desc,
+		"VERIFY_RC = 0",
+		"--set-metadata merge_result=verified",
+		`--set-metadata verified_cmd="$VERIFY_CMD"`,
+		"--unset-metadata rejection_reason &&",
+		`gc bd close $WORK --reason "Verified no_diff acceptance via verify_cmd`,
+	)
+	// Fail (RC=1) -> reject back to the polecat pool with a reason, never close.
+	assertContainsInOrder(t, desc,
+		"VERIFY_RC = 1",
+		`--set-metadata rejection_reason="verify_cmd failed (exit $VERIFY_RC): $VERIFY_CMD"`,
+		`--set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"`,
+	)
+	// No verify_cmd (RC=2) -> route away to a human + escalate, never strand
+	// and never blind-close.
+	assertContainsInOrder(t, desc,
+		"VERIFY_RC = 2",
+		"--set-metadata gc.routed_to=human",
+		"gc mail send mayor/",
+	)
+
+	// Terminal path pours the next wisp and burns this one under the same
+	// non-empty guard every other refinery exit uses, then drain-acks.
+	if !strings.Contains(desc, `gc bd mol burn "$CURRENT_WISP" --force`) {
+		t.Error("verify-no-diff must pour/burn the next iteration on its terminal path")
+	}
+	assertCurrentWispBurnsGuarded(t, "verify-no-diff", desc)
+	if !strings.Contains(desc, "gc runtime drain-ack") {
+		t.Error("verify-no-diff terminal path must drain-ack")
+	}
+}
+
+// TestRefineryNoDiffVerifyExec runs the extracted no_diff_verify predicate
+// against real commands — the production decision path, not just its formula
+// text. It certifies the three-way contract the refinery relies on: a missing
+// verify_cmd is routed away (2), a failing one is rejected (1), and only a
+// green one (0) is closed.
+func TestRefineryNoDiffVerifyExec(t *testing.T) {
+	fn := extractBetween(t, refineryStep(t, "verify-no-diff").Description,
+		"no_diff_verify() {", "\n```")
+
+	cases := []struct {
+		name, cmd string
+		want      int
+	}{
+		{"empty_routes_away", "", 2},
+		{"true_closes", "true", 0},
+		{"explicit_zero_closes", "exit 0", 0},
+		{"false_rejects", "false", 1},
+		{"nonzero_rejects", "exit 9", 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			script := fn + "\nno_diff_verify \"" + c.cmd + "\"\n"
+			cmd := exec.Command("sh", "-c", script)
+			got := 0
+			if err := cmd.Run(); err != nil {
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) {
+					t.Fatalf("running predicate: %v", err)
+				}
+				got = ee.ExitCode()
+			}
+			if got != c.want {
+				t.Fatalf("no_diff_verify %q exit=%d, want %d", c.cmd, got, c.want)
 			}
 		})
 	}

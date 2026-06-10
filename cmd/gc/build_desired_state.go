@@ -767,9 +767,18 @@ func buildDesiredStateWithSessionBeads(
 	// Raw gc.routed_to metadata is intentionally NOT treated as direct named
 	// demand here. The controller only uses assignment/readiness state; routed
 	// metadata is consumed by the agent-side gc hook path.
+	//
+	// Ephemeral (wisp) assigned work is intentionally NOT treated as direct
+	// named demand: a named on_demand session wakes from its assigned wisps
+	// only through the dedicated patrol-wisp probe below, which applies the
+	// patrol-formula gate. Without this skip a non-patrol wisp assigned to the
+	// identity would wake the session here and pre-empt that probe.
 	for identity, spec := range namedSpecs {
 		for i, wb := range assignedWorkBeads {
 			if wb.Status != "open" && wb.Status != "in_progress" {
+				continue
+			}
+			if wb.Ephemeral {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
@@ -1057,13 +1066,16 @@ func collectAssignedWorkBeadsWithStores(
 			// In-progress beads with an assignee (active work), plus stranded
 			// unassigned pool work that needs to be reopened. This pass runs
 			// across every store before any ready handoff probes, so already
-			// active work never waits behind unrelated ready scans.
+			// active work never waits behind unrelated ready scans. Reads both
+			// tiers so in-progress pool wisps still count toward generic demand;
+			// named-session-owned wake wisps are filtered out below so they stay
+			// the dedicated patrol-wisp probe's responsibility.
 			if inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
-				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
+				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, excludePatrolWakeWisps(inProgress), seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
 				if beads.IsPartialResult(err) && len(inProgress) > 0 {
-					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
+					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, excludePatrolWakeWisps(inProgress), seen, source.store, source.ref)
 				}
 			}
 			// Open pool-routed beads that still carry an assignee. These are
@@ -1077,11 +1089,11 @@ func collectAssignedWorkBeadsWithStores(
 			// openSessionOwnsWork / liveOpenSessionAssignmentExists, so
 			// live-session step beads in the same range are skipped untouched.
 			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
-				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, excludePatrolWakeWisps(openRouted), seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
-					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, excludePatrolWakeWisps(openRouted), seen, source.store, source.ref)
 				}
 			}
 			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, errs: errs}
@@ -1136,7 +1148,7 @@ func collectAssignedWorkBeadsWithStores(
 			var readyStores []beads.Store
 			var readyStoreRefs []string
 			seen := make(map[string]struct{})
-			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, ready, seen, source.store, source.ref)
+			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, excludePatrolWakeWisps(ready), seen, source.store, source.ref)
 			readyResults[idx] = storeAssignedWorkResult{beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, errs: errs}
 		}()
 	}
@@ -1151,6 +1163,27 @@ func collectAssignedWorkBeadsWithStores(
 		}
 	}
 	return result, resultStores, resultStoreRefs, partial
+}
+
+// excludePatrolWakeWisps drops patrol-wake-candidate wisps from a controller
+// demand bead slice. These wisps are owned by namedSessionPatrolWispWakeDemand,
+// which wakes their named on_demand session through a dedicated wisp-tier probe
+// with the patrol-formula gate. Keeping them out of the generic assigned-work
+// set prevents an assigned patrol wisp from leaking into AssignedWorkBeads or
+// counting as generic demand. Non-patrol wisps (for example pool-routed work or
+// control-dispatcher retry handoffs) and all non-ephemeral beads are retained.
+func excludePatrolWakeWisps(beadList []beads.Bead) []beads.Bead {
+	if len(beadList) == 0 {
+		return beadList
+	}
+	filtered := beadList[:0:0]
+	for _, b := range beadList {
+		if isPatrolWispWakeCandidate(b) {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
 }
 
 func namedSessionPatrolWispWakeDemand(
@@ -1664,6 +1697,27 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 	rows, err := handles.Cached.List(query)
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.List(query)
+	}
+	return rows, err
+}
+
+// listForControllerDemand performs a cache-tolerant controller-demand List that
+// honors query.TierMode. Unlike listBothTiersForControllerDemand it reads the
+// backing store directly rather than via the cached/live handle wrappers, which
+// force TierBoth and hide tier selection. That tier fidelity is what lets the
+// named-session wisp-wake probe target the wisp tier (TierMode=TierWisps)
+// explicitly, so it can find an assigned patrol wisp without widening the
+// generic assigned-work scan. The cached read is attempted first; on
+// ErrCacheUnavailable it falls back to a live read, mirroring the both-tiers
+// helper's tolerance.
+func listForControllerDemand(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+	cachedQuery := query
+	cachedQuery.Live = false
+	rows, err := store.List(cachedQuery)
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		liveQuery := query
+		liveQuery.Live = true
+		return store.List(liveQuery)
 	}
 	return rows, err
 }

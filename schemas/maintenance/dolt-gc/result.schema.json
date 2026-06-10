@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc maintenance dolt-gc --json result",
+  "description": "Outcome of a manually triggered Dolt store maintenance run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "trigger"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version for this command output."
+    },
+    "ok": {
+      "const": true
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean",
+          "description": "True when the supervisor accepted the trigger or completed it synchronously."
+        },
+        "started_at": {
+          "type": "string",
+          "description": "RFC3339 start time of the triggered run; doubles as a run identifier for async callers."
+        },
+        "run": {
+          "$ref": "#/$defs/run"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "finished_at",
+        "stage",
+        "before_bytes",
+        "after_bytes",
+        "duration_s"
+      ],
+      "properties": {
+        "started_at": {
+          "type": "string",
+          "description": "RFC3339 timestamp when the run began."
+        },
+        "finished_at": {
+          "type": "string",
+          "description": "RFC3339 timestamp when the run completed."
+        },
+        "stage": {
+          "type": "string",
+          "description": "Outcome stage: 'done' on success or 'backup'/'gc'/'smoke-test'/'prune' on failure."
+        },
+        "err": {
+          "type": "string",
+          "description": "Error message when stage names a failing phase; absent on success."
+        },
+        "before_bytes": {
+          "type": "integer",
+          "description": "Store size in bytes before the run (0 when not measured)."
+        },
+        "after_bytes": {
+          "type": "integer",
+          "description": "Store size in bytes after the run (0 when not measured)."
+        },
+        "snapshot_path": {
+          "type": "string",
+          "description": "Absolute path to the snapshot directory created for this run, when any."
+        },
+        "duration_s": {
+          "type": "number",
+          "description": "Elapsed wall-clock seconds between started_at and finished_at."
+        }
+      }
+    }
+  }
+}

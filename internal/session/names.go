@@ -357,12 +357,17 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 		// stale/legacy bead missing the flag still releases its name (ga-841) —
 		// independent of whether the caller passed a matching selfOwner, since
 		// the configured-named reservation is re-enforced by the cfg-aware check
-		// in ensureConfiguredSessionNameAvailable.
+		// in ensureConfiguredSessionNameAvailable. A pre-ga841 bead can also
+		// carry NO identity at all, holding it only via alias/agent_name/the
+		// template role label; when the reclaiming configured identity is known
+		// (selfOwner), a closed bead whose identity signals match that owner
+		// releases its name too (ga-n2d Gap A) — the owner gate keeps the ad-hoc
+		// permanent-name guarantee intact.
 		if strings.TrimSpace(b.Metadata["session_name"]) == name {
 			if continuityIneligibleConfiguredOwner(b, selfOwner) {
 				continue
 			}
-			if b.Status == "closed" && wasConfiguredNamedSession(b) {
+			if b.Status == "closed" && (wasConfiguredNamedSession(b) || configuredNamedIdentitySignalsMatch(b, selfOwner)) {
 				continue
 			}
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)

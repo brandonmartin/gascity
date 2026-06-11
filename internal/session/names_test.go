@@ -366,6 +366,124 @@ func TestEnsureSessionNameAvailable_RejectsLiveNamedSessionByIdentity(t *testing
 	}
 }
 
+// TestEnsureSessionNameAvailableForSelfAndOwner_AllowsClosedLegacyNamedSessionByAlias
+// covers ga-n2d Gap A: a pre-ga841 configured named-session bead can carry NO
+// configured_named_identity and NO boolean flag, holding its identity only via
+// the alias / agent_name / template (role) label, e.g.
+// "myrig/gastown.refinery". ga-841 keyed release solely on
+// wasConfiguredNamedSession (flag OR identity), so such a stale CLOSED bead
+// still permanently reserved its runtime name and blocked on-demand respawn —
+// the kg4uh4-class phantom confirmed live blocking gp-q3g on 2026-06-11. When
+// the same configured identity reclaims the name (selfOwner set), a CLOSED bead
+// whose identity signals match that owner must release the name.
+func TestEnsureSessionNameAvailableForSelfAndOwner_AllowsClosedLegacyNamedSessionByAlias(t *testing.T) {
+	store := beads.NewMemStore()
+
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "myrig--gastown__refinery",
+			// Identity carried ONLY via the alias/template role label —
+			// no configured_named_identity, no configured_named_session flag.
+			"alias":    "myrig/gastown.refinery",
+			"template": "myrig/gastown.refinery",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A fresh refinery reclaiming its configured identity (selfOwner) must be
+	// allowed to take the runtime name the closed legacy bead still holds.
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, "myrig--gastown__refinery", "", "myrig/gastown.refinery"); err != nil {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(closed legacy named, owner reclaim) = %v, want nil", err)
+	}
+}
+
+// TestEnsureSessionNameAvailableForSelfAndOwner_AllowsClosedLegacyNamedSessionByAgentName
+// is the same Gap A case but with the identity carried via agent_name only,
+// exercising the full signal set the release recognizes.
+func TestEnsureSessionNameAvailableForSelfAndOwner_AllowsClosedLegacyNamedSessionByAgentName(t *testing.T) {
+	store := beads.NewMemStore()
+
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "myrig--gastown__witness",
+			"agent_name":   "myrig/gastown.witness",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, "myrig--gastown__witness", "", "myrig/gastown.witness"); err != nil {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(closed legacy named by agent_name) = %v, want nil", err)
+	}
+}
+
+// TestEnsureSessionNameAvailableForSelfAndOwner_RejectsClosedLegacyNamedSessionWithoutOwner
+// guards the ad-hoc permanent-name guarantee. The Gap A signal-set release is
+// gated on a non-empty configured owner (the reclaiming identity). An ownerless
+// availability check — the path an ad-hoc session takes — must NOT release a
+// closed bead just because it carries an alias/template, since those signals
+// cannot be confirmed configured-named without the reclaiming owner.
+func TestEnsureSessionNameAvailableForSelfAndOwner_RejectsClosedLegacyNamedSessionWithoutOwner(t *testing.T) {
+	store := beads.NewMemStore()
+
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "myrig--gastown__refinery",
+			"alias":        "myrig/gastown.refinery",
+			"template":     "myrig/gastown.refinery",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, "myrig--gastown__refinery", "", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(closed legacy named, no owner) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
+// TestEnsureSessionNameAvailableForSelfAndOwner_RejectsLiveLegacyNamedSession
+// guards the no-regression requirement: the Gap A release only applies to
+// CLOSED beads. A LIVE (open) legacy named bead must still own its runtime name
+// even when the reclaiming owner matches, so two live sessions cannot collide.
+func TestEnsureSessionNameAvailableForSelfAndOwner_RejectsLiveLegacyNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "myrig--gastown__refinery",
+			"alias":        "myrig/gastown.refinery",
+			"template":     "myrig/gastown.refinery",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, "myrig--gastown__refinery", "", "myrig/gastown.refinery"); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(live legacy named) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
 func TestEnsureAliasAvailableWithConfig_AllowsLiveAliasHistoryReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{

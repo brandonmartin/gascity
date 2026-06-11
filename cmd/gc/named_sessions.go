@@ -62,6 +62,10 @@ func namedSessionMode(b beads.Bead) string {
 	return session.NamedSessionMode(b)
 }
 
+func recyclableDeadConfiguredNamePhantom(b beads.Bead, cfg *config.City, cityName string) (string, bool) {
+	return session.RecyclableDeadConfiguredNamePhantom(b, cfg, cityName)
+}
+
 func namedSessionContinuityEligible(b beads.Bead) bool {
 	return session.NamedSessionContinuityEligible(b)
 }

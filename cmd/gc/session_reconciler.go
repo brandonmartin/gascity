@@ -1395,6 +1395,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if storeQueryPartial {
 						continue
 					}
+					// ga-n2d Gap B: a process-dead bead squatting a configured
+					// named-session runtime name without being that identity's
+					// canonical owner is a phantom. The guarded close below
+					// refuses it because work is assigned to the squatted
+					// identity — but that work belongs to the configured
+					// identity, not this dead bead, so closing frees the runtime
+					// name and a fresh canonical bead re-adopts the work and
+					// respawns (restart-free). Healthy asleep canonical sessions
+					// are preserved upstream and excluded by the predicate.
+					if identity, ok := recyclableDeadConfiguredNamePhantom(*session, cfg, cityName); ok {
+						if closeBead(store, session.ID, reason, clk.Now().UTC(), stderr) {
+							session.Status = "closed"
+							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
+							if trace != nil {
+								trace.recordDecision("reconciler.session.recycle_named_phantom", template, name, reason, "recycled", traceRecordPayload{
+									"identity": identity,
+								}, nil, "")
+							}
+						}
+						continue
+					}
 					if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, reason, clk.Now().UTC(), stderr) {
 						session.Status = "closed"
 					}

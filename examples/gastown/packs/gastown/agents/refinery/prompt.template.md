@@ -69,7 +69,7 @@ external observers (witness, mayor) only catch on a slow patrol cycle.
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')
 fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
@@ -114,7 +114,7 @@ assign the next wisp, burn the current wisp, THEN request restart**:
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')
 fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
@@ -158,6 +158,13 @@ name when no alias is configured. `$GC_ALIAS` can be empty or stale, which
 is how a refinery once self-polled for 13h42m with seven queued beads
 without catching the mismatch (upstream #1833).
 
+Your patrol wisps are ephemeral molecules on the **town ledger** (`th-wisp-*`),
+poured and assigned with `gc bd`. Find them the same way — with `gc bd`, never
+bare `bd`. Bare `bd` resolves to the rig ledger from your CWD and never sees
+your wisps, so every restart would pour a fresh one while the prior wisp leaks.
+Wisp roots are `issue_type=molecule`; never filter `--type=wisp` (not a valid
+bd type — the query errors and matches nothing).
+
 ```bash
 # Step 0: Orphan-merge scan (mail-loss fallback).
 # Polecats sometimes die between commit and MERGE_READY mail
@@ -173,12 +180,21 @@ for ORPHAN in $ORPHANS; do
   # surfaces beads the inbox missed.
 done
 
-# Step 1: Check for an in-progress patrol wisp
-{{ .AssignedInProgressQuery }}
+# Step 1: Reconcile your patrol wisps to exactly one (town ledger, via gc bd).
+WISP_IDS=$(
+  gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=0 --json | jq -r '.[].id'
+  gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id'
+)
+WISP=$(printf '%s\n' $WISP_IDS | sed -n '1p')           # keep one (prefers in_progress)
+for extra in $(printf '%s\n' $WISP_IDS | sed '1d'); do  # burn any surplus
+  gc bd mol burn "$extra" --force
+done
 
-# If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
-gc bd update "$WISP" --assignee="$GC_AGENT"
+# Step 2: Existing wisp → resume it. None → pour one and assign it.
+if [ -z "$WISP" ]; then
+  WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
+  gc bd update "$WISP" --assignee="$GC_AGENT"
+fi
 ```
 
 Then follow the formula. The step descriptions below are your instructions —

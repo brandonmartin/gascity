@@ -2265,35 +2265,15 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 			rig:     "gastown",
 			binding: "gastown.",
 		},
-		{
-			rel:     "packs/gastown/agents/deacon/prompt.template.md",
-			start:   "## Startup Protocol",
-			end:     "**Hook ->",
-			want:    "{{ .AssignedInProgressQuery }}",
-			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
-			render:  true,
-			agent:   "gastown/deacon",
-			tmpl:    "deacon",
-			rig:     "gastown",
-			binding: "gastown.",
-		},
-		// The witness Startup Protocol deliberately does NOT use the shared
+		// The deacon Startup Protocol deliberately does NOT use the shared
 		// AssignedInProgressQuery: its patrol wisps live on the town ledger
 		// and must be found with `gc bd`, not the bare-bd shared query that
-		// resolves to the rig ledger. Its startup/no-idle wisp reconciliation
-		// is covered by TestWitnessStartupAndNoIdleReconcileWisps.
-		{
-			rel:     "packs/gastown/agents/refinery/prompt.template.md",
-			start:   "# Step 1: Check for an in-progress patrol wisp",
-			end:     "Then follow the formula.",
-			want:    "{{ .AssignedInProgressQuery }}",
-			forbid:  []string{`gc bd list --assignee="$GC_AGENT" --status=in_progress`},
-			render:  true,
-			agent:   "gastown/refinery",
-			tmpl:    "refinery",
-			rig:     "gastown",
-			binding: "gastown.",
-		},
+		// resolves to the rig ledger. Its startup wisp reconciliation is
+		// covered by TestDeaconStartupReconcileWisps.
+		// The refinery Startup deliberately does NOT use the shared
+		// AssignedInProgressQuery for the same reason: its patrol wisps live
+		// on the town ledger. Its startup wisp reconciliation is covered by
+		// TestRefineryStartupReconcileWisps.
 	}
 	for _, check := range checks {
 		t.Run(check.rel+"/"+check.start, func(t *testing.T) {
@@ -2379,6 +2359,82 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 	} {
 		if !strings.Contains(noIdle, want) {
 			t.Errorf("witness no-idle guard missing %q", want)
+		}
+	}
+}
+
+// TestDeaconStartupReconcileWisps is the regression guard for ga-88s (same
+// bug class as ga-7c6). The deacon's patrol wisps are ephemeral molecules on
+// the town ledger, poured/assigned with `gc bd`. Its startup work-check must
+// therefore (1) look them up with `gc bd`, not the bare-bd shared query that
+// resolves to the rig ledger and never sees them; (2) filter `--type=molecule`,
+// never the invalid `--type=wisp`; and (3) reconcile duplicates to exactly one
+// by burning the surplus.
+func TestDeaconStartupReconcileWisps(t *testing.T) {
+	rendered := renderGastownPromptForPack(t,
+		"packs/gastown/agents/deacon/prompt.template.md",
+		"gastown/deacon", "deacon", "demo", "gastown", "gastown.")
+
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "gc bd") && strings.Contains(line, "--type=wisp") {
+			t.Errorf("deacon prompt runs a gc bd command with invalid --type=wisp (matches nothing -> duplicate wisps): %q", line)
+		}
+	}
+
+	startup := sectionBetween(t, rendered, "## Startup Protocol", "**Hook ->")
+	for _, bare := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
+		"{{ .AssignedInProgressQuery }}",
+	} {
+		if strings.Contains(startup, bare) {
+			t.Errorf("deacon startup must not use the bare-bd shared query %q; patrol wisps live on the town ledger via gc bd", bare)
+		}
+	}
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
+		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		"gc bd mol burn",
+	} {
+		if !strings.Contains(startup, want) {
+			t.Errorf("deacon startup missing %q", want)
+		}
+	}
+}
+
+// TestRefineryStartupReconcileWisps is the regression guard for ga-88s (same
+// bug class as ga-7c6). The refinery's patrol wisps are ephemeral molecules on
+// the town ledger, poured/assigned with `gc bd`. Its startup work-check must
+// therefore (1) look them up with `gc bd`, not the bare-bd shared query that
+// resolves to the rig ledger and never sees them; (2) filter `--type=molecule`,
+// never the invalid `--type=wisp`; and (3) reconcile duplicates to exactly one
+// by burning the surplus.
+func TestRefineryStartupReconcileWisps(t *testing.T) {
+	rendered := renderGastownPromptForPack(t,
+		"packs/gastown/agents/refinery/prompt.template.md",
+		"gastown/refinery", "refinery", "demo", "gastown", "gastown.")
+
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "gc bd") && strings.Contains(line, "--type=wisp") {
+			t.Errorf("refinery prompt runs a gc bd command with invalid --type=wisp (matches nothing -> duplicate wisps): %q", line)
+		}
+	}
+
+	startup := sectionBetween(t, rendered, "## Startup", "Then follow the formula.")
+	for _, bare := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
+		"{{ .AssignedInProgressQuery }}",
+	} {
+		if strings.Contains(startup, bare) {
+			t.Errorf("refinery startup must not use the bare-bd shared query %q; patrol wisps live on the town ledger via gc bd", bare)
+		}
+	}
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
+		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		"gc bd mol burn",
+	} {
+		if !strings.Contains(startup, want) {
+			t.Errorf("refinery startup missing %q", want)
 		}
 	}
 }
@@ -2887,8 +2943,8 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 				`run ` + "`gc hook`" + ` immediately`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
+				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
 				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -2979,7 +3035,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			wantOrder: []string{
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`fi`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -3005,7 +3061,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			wantOrder: []string{
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`fi`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -3045,7 +3101,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 	assertContainsInOrder(t, patrolLifecycle,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
 		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 		`fi`,
 		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
@@ -3980,7 +4036,7 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit(t *testing.T) {
 	assertContainsInOrder(t, section,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
 		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 		`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,

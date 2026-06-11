@@ -1701,7 +1701,7 @@ func TestClose_NamedSessionByIdentityRetiresIdentifiers(t *testing.T) {
 func TestCreateNamedSession_RespawnsPastClosedLegacyPhantom(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManager(store, sp)
+	mgr := NewManagerWithOptions(store, sp)
 
 	// Seed the legacy phantom: a closed session bead reserving the runtime name
 	// with its identity carried only by alias/template — no identity metadata,
@@ -1724,26 +1724,21 @@ func TestCreateNamedSession_RespawnsPastClosedLegacyPhantom(t *testing.T) {
 
 	// A fresh refinery materializes for the same configured identity. This is
 	// the on-demand respawn path that previously failed with ErrSessionNameExists.
-	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
-		context.Background(),
-		"myrig/gastown.refinery",
-		"myrig--gastown__refinery",
-		"refinery",
-		"Refinery",
-		"claude",
-		"/tmp",
-		"claude",
-		"",
-		nil,
-		ProviderResume{},
-		runtime.Config{},
-		map[string]string{
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Alias:        "myrig/gastown.refinery",
+		ExplicitName: "myrig--gastown__refinery",
+		Template:     "refinery",
+		Title:        "Refinery",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+		ExtraMeta: map[string]string{
 			"configured_named_session":  "true",
 			"configured_named_identity": "myrig/gastown.refinery",
 		},
-	)
+	})
 	if err != nil {
-		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata (respawn past phantom): %v", err)
+		t.Fatalf("CreateSession (respawn past phantom): %v", err)
 	}
 
 	fresh, err := store.Get(info.ID)

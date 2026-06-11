@@ -1690,6 +1690,74 @@ func TestClose_NamedSessionByIdentityRetiresIdentifiers(t *testing.T) {
 	}
 }
 
+// TestCreateNamedSession_RespawnsPastClosedLegacyPhantom is the ga-n2d Gap A
+// acceptance test. A pre-ga841 phantom bead can hold its configured named
+// identity ONLY via the alias / template (role) label, with an EMPTY
+// configured_named_identity and no boolean flag (the kg4uh4-class entry
+// confirmed live blocking gp-q3g). Even closed, ga-841's identity-keyed release
+// skipped it, so its reserved runtime name stayed claimed and a fresh refinery
+// could not respawn. With Gap A, materializing a fresh configured named session
+// for the same identity reclaims the runtime name the closed legacy bead holds.
+func TestCreateNamedSession_RespawnsPastClosedLegacyPhantom(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	// Seed the legacy phantom: a closed session bead reserving the runtime name
+	// with its identity carried only by alias/template — no identity metadata,
+	// no configured_named_session flag (predates both).
+	phantom, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "myrig--gastown__refinery",
+			"alias":        "myrig/gastown.refinery",
+			"template":     "myrig/gastown.refinery",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create phantom: %v", err)
+	}
+	if err := store.Close(phantom.ID); err != nil {
+		t.Fatalf("Close phantom: %v", err)
+	}
+
+	// A fresh refinery materializes for the same configured identity. This is
+	// the on-demand respawn path that previously failed with ErrSessionNameExists.
+	info, err := mgr.CreateAliasedNamedWithTransportAndMetadata(
+		context.Background(),
+		"myrig/gastown.refinery",
+		"myrig--gastown__refinery",
+		"refinery",
+		"Refinery",
+		"claude",
+		"/tmp",
+		"claude",
+		"",
+		nil,
+		ProviderResume{},
+		runtime.Config{},
+		map[string]string{
+			"configured_named_session":  "true",
+			"configured_named_identity": "myrig/gastown.refinery",
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateAliasedNamedWithTransportAndMetadata (respawn past phantom): %v", err)
+	}
+
+	fresh, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if fresh.ID == phantom.ID {
+		t.Fatalf("respawn reused the phantom bead %s instead of materializing a fresh one", phantom.ID)
+	}
+	if got := fresh.Metadata["session_name"]; got != "myrig--gastown__refinery" {
+		t.Fatalf("fresh session_name = %q, want %q", got, "myrig--gastown__refinery")
+	}
+}
+
 func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

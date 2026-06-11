@@ -182,6 +182,43 @@ func wasConfiguredNamedSession(b beads.Bead) bool {
 	return IsNamedSessionBead(b) || NamedSessionIdentity(b) != ""
 }
 
+// configuredNamedIdentitySignalsMatch reports whether any of a bead's
+// configured-named identity signals — the recorded identity, alias,
+// agent_name, or template/role label — resolve to the given configured owner
+// identity (the qualified named-session identity reclaiming a runtime name).
+//
+// This broadens wasConfiguredNamedSession recognition for ga-n2d Gap A. A
+// pre-ga841 named-session bead (the kg4uh4-class phantom) can carry an EMPTY
+// configured_named_identity and no boolean flag, holding its identity only via
+// alias / agent_name / a template (role) label such as
+// "<rig>/gastown.refinery". Keyed solely on configured_named_identity, ga-841's
+// release skips such legacy beads, so a stale CLOSED entry reserves its runtime
+// name forever and blocks on-demand respawn (confirmed live blocking gp-q3g on
+// 2026-06-11).
+//
+// Recognition is gated on a non-empty owner — the configured identity the
+// caller is materializing — so the ad-hoc permanent-name guarantee is
+// preserved: an ownerless availability check (the path ad-hoc sessions take)
+// never matches, and a bead only releases its name to the SAME configured
+// identity that is reclaiming it.
+func configuredNamedIdentitySignalsMatch(b beads.Bead, owner string) bool {
+	owner = NormalizeNamedSessionTarget(owner)
+	if owner == "" {
+		return false
+	}
+	for _, signal := range []string{
+		b.Metadata[NamedSessionIdentityMetadata],
+		b.Metadata["alias"],
+		b.Metadata["agent_name"],
+		b.Metadata["template"],
+	} {
+		if NormalizeNamedSessionTarget(strings.TrimSpace(signal)) == owner {
+			return true
+		}
+	}
+	return false
+}
+
 // NamedSessionMode returns the configured named session mode stored on a bead.
 func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])

@@ -2329,6 +2329,12 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 		stderr = io.Discard
 	}
 
+	// The owning pool/agent route, recovered from the closing session's own
+	// template metadata. ZFC-safe: derived from configuration carried on the
+	// session bead, never a hardcoded role name. Used below to re-route work
+	// that lost its routing mid-handoff so it stays discoverable.
+	fallbackRoute := retiredSessionFallbackRoute(sessionBead)
+
 	seenAssignees := make(map[string]struct{}, 3)
 	addAssignee := func(val string) {
 		val = strings.TrimSpace(val)
@@ -2362,6 +2368,27 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 				update := beads.UpdateOpts{Assignee: &empty}
 				if item.Status == "in_progress" {
 					update.Status = &openStatus
+				}
+				// Restore the owning pool route when the work lost its routing.
+				// A polecat that pushed its branch but died before completing
+				// the refinery handoff can leave work whose gc.routed_to was
+				// cleared. Clearing the assignee here without restoring a route
+				// would strand it open+unassigned+unrouted — invisible to BOTH
+				// the pool demand probe (which keys on gc.routed_to) and
+				// releaseOrphanedPoolAssignments (which skips empty-routed
+				// beads), defeating this function's own goal of letting the
+				// pool reconciler re-pick the work. Workflow-kind beads
+				// re-claim via the legacy gc.run_target queue (see #2860), so
+				// keep that key for them; everything else routes via the
+				// canonical gc.routed_to.
+				if fallbackRoute != "" &&
+					strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == "" &&
+					strings.TrimSpace(item.Metadata[beadmeta.RunTargetMetadataKey]) == "" {
+					routeKey := beadmeta.RoutedToMetadataKey
+					if strings.TrimSpace(item.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow {
+						routeKey = beadmeta.RunTargetMetadataKey
+					}
+					update.Metadata = map[string]string{routeKey: fallbackRoute}
 				}
 				if err := store.Update(item.ID, update); err != nil {
 					fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck

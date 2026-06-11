@@ -527,6 +527,11 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		// runDoltGC returned immediately and the cycle reported stage=done
 		// in 0.0s while the store stayed bloated.
 		OpenDoltOps: newMaintenanceDoltOpsFactory(cityPath),
+		// Wire the snapshot stage (dolt backup to cityPath/.beads/dolt-backups).
+		// The disk pre-flight runs before the snapshot, so a CRITICAL disk
+		// skips both stages rather than attempting a backup that would fail
+		// for lack of space. (ga-euu)
+		OpenDoltBackup: supervisor.NewExecDoltBackupRunner(storehealth.StorePath(cityPath)),
 		// Sample the store size before/after each cycle so the run record
 		// (and its event) carry before/after bytes, making a zero-reclaim
 		// run detectable from the event log.

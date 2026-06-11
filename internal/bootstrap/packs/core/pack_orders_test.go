@@ -331,3 +331,64 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 		t.Error("renudge-stale-human-gates.sh must exit non-zero when a re-nudge failed, or the loud-fail message is never logged (#4543)")
 	}
 }
+
+// TestStudioPipelineAdvanceOrder pins the studio-pipeline-advance order: a
+// cooldown exec order (no LLM/agent/pool) that runs the studio-pipeline-advance
+// script. The order is the studio pipeline engine — route a gated phase bead
+// once its gate-blocker closes — so shipping it with the wrong trigger or a
+// missing script would silently stall every phase handoff.
+func TestStudioPipelineAdvanceOrder(t *testing.T) {
+	o := readOrder(t, "studio-pipeline-advance.toml")
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("studio-pipeline-advance.toml failed validation: %v", err)
+	}
+	if o.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", o.Trigger, "cooldown")
+	}
+	if o.Interval != "10m" {
+		t.Errorf("interval = %q, want %q", o.Interval, "10m")
+	}
+	if !o.IsExec() {
+		t.Errorf("want exec dispatch, got formula %q", o.Formula)
+	}
+	if o.Pool != "" {
+		t.Errorf("exec orders must not set a pool, got %q", o.Pool)
+	}
+	const scriptBase = "studio-pipeline-advance.sh"
+	if !strings.HasSuffix(o.Exec, "assets/scripts/"+scriptBase) {
+		t.Errorf("exec = %q, want suffix assets/scripts/%s", o.Exec, scriptBase)
+	}
+	if _, err := fs.ReadFile(PackFS, "assets/scripts/"+scriptBase); err != nil {
+		t.Errorf("referenced script not embedded: %v", err)
+	}
+}
+
+// TestStudioPipelineAdvanceRoutesCrossLedger guards the pipeline engine's
+// load-bearing invariants. The script is mechanical and soft-fails per scope
+// (`|| continue`, `|| return 0`, stderr hidden), so a regression is invisible
+// at runtime — it just silently stops advancing phases. Pin: (1) `gc bd show`
+// output is array-normalized before field extraction — the CLI returns a
+// single-element array, so a bare `.status` / `.metadata[...]` errors and every
+// gate reads as "not closed"; (2) the rig fan-out excludes the HQ pseudo-rig
+// (`select(.hq == false)`), matching the orphan-sweep / cross-rig-deps
+// convention; (3) on advance the script both slings the bead and clears
+// gc.pipeline_gate, so the order fires exactly once.
+func TestStudioPipelineAdvanceRoutesCrossLedger(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/studio-pipeline-advance.sh")
+	if err != nil {
+		t.Fatalf("reading studio-pipeline-advance.sh: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, `if type == "array" then .[0] else . end`) {
+		t.Error("script must array-normalize `gc bd show` output before extraction; missing the `if type == \"array\"` guard")
+	}
+	if !strings.Contains(body, "select(.hq == false)") {
+		t.Error("script must exclude the HQ pseudo-rig from the rig fan-out; missing `select(.hq == false)`")
+	}
+	if !strings.Contains(body, "gc sling") {
+		t.Error("script must sling the gated bead to its route; missing `gc sling`")
+	}
+	if !strings.Contains(body, "--unset-metadata gc.pipeline_gate") {
+		t.Error("script must clear gc.pipeline_gate after routing for fire-once idempotence; missing `--unset-metadata gc.pipeline_gate`")
+	}
+}

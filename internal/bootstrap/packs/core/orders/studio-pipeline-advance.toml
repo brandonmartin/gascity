@@ -1,0 +1,18 @@
+# studio-pipeline-advance — durable phase->phase dispatch for a multi-phase
+# pipeline such as an AI game-dev studio (epic th-q1h).
+#
+# A staged phase bead opts in by carrying metadata gc.pipeline_gate=<blocker> and
+# gc.pipeline_route=<rig>/<target> while left OPEN and UNROUTED. Each tick this
+# routes the bead once <blocker> closes, then clears the gate so it fires exactly
+# once. Covers the cross-rig-dependency fail-open gap: a native cross-ledger
+# `blocks` dep does not gate a routed bead (the dependent ledger cannot resolve
+# the blocker's status across rigs), so gating is an explicit closed-status check
+# in the exec script. Generic — any future phase chains in via the two metadata
+# keys, no code change. See assets/scripts/studio-pipeline-advance.sh.
+#
+# Mechanical (status comparison + sling) — no LLM, no agent, no wisp.
+[order]
+description = "Advance a studio pipeline: route a gated phase bead when its gate-blocker closes"
+trigger = "cooldown"
+interval = "10m"
+exec = "$PACK_DIR/assets/scripts/studio-pipeline-advance.sh"

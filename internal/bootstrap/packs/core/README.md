@@ -16,6 +16,7 @@ none requires per-city configuration.
 | `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) |
 | `orphan-sweep` | cooldown 5m | Reset beads assigned to dead agents back to the work pool |
 | `cross-rig-deps` | cooldown 5m | Convert satisfied cross-rig `blocks` deps to `related` |
+| **`studio-pipeline-advance`** | **cooldown 10m** | **Route a gated phase bead to its `gc.pipeline_route` once its `gc.pipeline_gate` blocker closes** |
 | `order-tracking-sweep` | cooldown | Close stale order-tracking beads and prune expired tracking history |
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
@@ -25,7 +26,7 @@ none requires per-city configuration.
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
 
-The **event-driven nudge orders** are documented in detail below.
+The **bold** orders above are documented in detail below.
 
 ## `nudge-on-route`
 
@@ -112,9 +113,35 @@ Entries older than the retention window are pruned on each run.
 | `GC_CASCADE_NUDGE_LOOKBACK` | `5m` | Event lookback window |
 | `GC_CASCADE_NUDGE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
 
+## `studio-pipeline-advance`
+
+**Why.** Phase-to-phase handoff in a multi-rig pipeline (e.g. an AI game-dev
+studio, epic th-q1h) cannot lean on a native bead dependency: a cross-ledger
+`blocks` dep **fails open** — the dependent rig's ledger cannot resolve a
+blocker's status in another rig, so a gated phase shows `READY` while its
+blocker is still open. `cross-rig-deps` only *cleans up* deps after they are
+satisfied; it does not gate while the blocker is open. This order expresses the
+gate as metadata plus an explicit closed-status check instead.
+
+**Opt-in contract.** Stage the next phase as an **open, unrouted** bead carrying:
+
+| Metadata key | Value |
+| ------------ | ----- |
+| `gc.pipeline_gate` | the blocker bead id — the prior phase to wait on |
+| `gc.pipeline_route` | `<rig>/<target>` — where to sling once the gate closes |
+
+**Behavior.** Each tick (cooldown 10m) the order scans HQ and every rig for
+such beads. When `gc.pipeline_gate`'s bead is `closed`, it slings the bead to
+`gc.pipeline_route` and clears `gc.pipeline_gate`. Because sling also sets
+`gc.routed_to` and the gate is cleared, an advanced bead is never reconsidered
+— the order fires exactly once per phase and is safe to re-run. `gc bd show` is
+prefix-routed, so the gate-blocker may live in a different rig than the gated
+bead. Generic by design: any future phase chains in by setting the two keys,
+with no change to the script.
+
 ## Dependencies
 
-Both nudge scripts use only `gc`, `bd`, and `jq` — already required by the
+These scripts use only `gc`, `bd`, and `jq` — already required by the
 other core-pack scripts. `gc bd` routes the request, then delegates to the
 underlying `bd` binary. `jq` is a hard dependency and the scripts fail loud
 at startup if it is missing.

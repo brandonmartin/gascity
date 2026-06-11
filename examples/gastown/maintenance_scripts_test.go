@@ -6926,6 +6926,110 @@ exit 0
 	return doltLog, gcLog
 }
 
+// studioPipelineAdvanceGCStub is a fake `gc` for the studio-pipeline-advance
+// script: HQ has no gated beads, rig "project" stages ga-phase2 (gated on
+// ga-phase1, routed to project/gastown.polecat) as open + unrouted, and the gate
+// bead ga-phase1 reports $GATE_STATUS. `gc bd show` deliberately returns a
+// single-element JSON array — the real CLI shape — so the script's array
+// normalization is exercised; the un-normalized form would extract empty gate /
+// route strings and silently skip the advance. Every call is appended to
+// $GC_CALL_LOG.
+const studioPipelineAdvanceGCStub = `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  rig)
+    [ "$2" = "list" ] && { printf '{"rigs":[{"name":"hq","hq":true},{"name":"project","hq":false}]}\n'; exit 0; }
+    ;;
+  sling)
+    exit 0
+    ;;
+  bd)
+    case "$2" in
+      list)
+        case "$*" in
+          *"--rig project"*) printf '[{"id":"ga-phase2","status":"open","metadata":{"gc.pipeline_gate":"ga-phase1","gc.pipeline_route":"project/gastown.polecat"}}]\n' ;;
+          *) printf '[]\n' ;;
+        esac
+        exit 0
+        ;;
+      show)
+        case "$3" in
+          ga-phase2) printf '[{"id":"ga-phase2","status":"open","metadata":{"gc.pipeline_gate":"ga-phase1","gc.pipeline_route":"project/gastown.polecat"}}]\n'; exit 0 ;;
+          ga-phase1) printf '[{"id":"ga-phase1","status":"%s"}]\n' "$GATE_STATUS"; exit 0 ;;
+        esac
+        ;;
+      update)
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+exit 1
+`
+
+// runStudioPipelineAdvance runs the real studio-pipeline-advance.sh against the
+// fake gc above with the gate bead reporting gateStatus, returning the script's
+// combined output and the recorded gc call log.
+func runStudioPipelineAdvance(t *testing.T, gateStatus string) (stdout, callLog string) {
+	t.Helper()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	writeExecutable(t, filepath.Join(binDir, "gc"), studioPipelineAdvanceGCStub)
+
+	env := map[string]string{
+		"GC_CALL_LOG": gcLog,
+		"GATE_STATUS": gateStatus,
+		"PATH":        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	script := coreScriptPath("studio-pipeline-advance.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	data, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	return string(out), string(data)
+}
+
+// TestStudioPipelineAdvanceNoOpWhileGateOpen verifies the order is a no-op while
+// the gate bead is still open: the script must evaluate the gate (proving the
+// array-normalized extraction found the gate id) yet neither sling the bead nor
+// clear its gate.
+func TestStudioPipelineAdvanceNoOpWhileGateOpen(t *testing.T) {
+	_, callLog := runStudioPipelineAdvance(t, "open")
+	if !strings.Contains(callLog, "bd show ga-phase1") {
+		t.Fatalf("script did not evaluate the gate bead (array-norm extraction may have failed):\n%s", callLog)
+	}
+	if strings.Contains(callLog, "sling") {
+		t.Fatalf("script slung a bead while its gate was open:\n%s", callLog)
+	}
+	if strings.Contains(callLog, "--unset-metadata") {
+		t.Fatalf("script cleared the gate while it was still open:\n%s", callLog)
+	}
+}
+
+// TestStudioPipelineAdvanceRoutesWhenGateCloses verifies that once the gate bead
+// is closed the script slings the gated bead to its route and clears
+// gc.pipeline_gate so the order fires exactly once. The gate id and route are
+// read from a single-element `gc bd show` array, so this also locks in the array
+// normalization against regression.
+func TestStudioPipelineAdvanceRoutesWhenGateCloses(t *testing.T) {
+	stdout, callLog := runStudioPipelineAdvance(t, "closed")
+	if !strings.Contains(callLog, "sling project/gastown.polecat ga-phase2") {
+		t.Fatalf("script did not sling the gated bead to its route:\n%s", callLog)
+	}
+	if !strings.Contains(callLog, "bd update ga-phase2 --unset-metadata gc.pipeline_gate") {
+		t.Fatalf("script did not clear gc.pipeline_gate after routing:\n%s", callLog)
+	}
+	if !strings.Contains(stdout, "routed ga-phase2 -> project/gastown.polecat") {
+		t.Fatalf("script did not log the route:\n%s", stdout)
+	}
+}
+
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {

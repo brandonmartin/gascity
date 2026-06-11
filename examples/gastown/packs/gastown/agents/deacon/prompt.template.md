@@ -53,23 +53,39 @@ Your formula: `mol-deacon-patrol`
 
 > **The Universal Propulsion Principle: If you find something on your hook, YOU RUN IT.**
 
+Your patrol wisps are ephemeral molecules on the **town ledger** (`th-wisp-*`),
+poured and assigned with `gc bd`. Find them the same way — with `gc bd`, never
+bare `bd`. Bare `bd` resolves to the rig ledger from your CWD and never sees
+your wisps, so every restart would pour a fresh one while the prior wisp leaks.
+Wisp roots are `issue_type=molecule`; never filter `--type=wisp` (not a valid
+bd type — the query errors and matches nothing).
+
 ```bash
-# Step 1: Check for assigned work
-{{ .AssignedInProgressQuery }}
+# Step 1: Reconcile your patrol wisps to exactly one (town ledger, via gc bd).
+WISP_IDS=$(
+  gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=0 --json | jq -r '.[].id'
+  gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id'
+)
+WISP=$(printf '%s\n' $WISP_IDS | sed -n '1p')           # keep one (prefers in_progress)
+for extra in $(printf '%s\n' $WISP_IDS | sed '1d'); do  # burn any surplus
+  gc bd mol burn "$extra" --force
+done
 
-# Step 2: Nothing? Check mail for attached work
-gc mail inbox
+# Step 2: Existing wisp → resume it. None → check mail, then pour ONE.
+if [ -n "$WISP" ]; then
+  echo "Resuming patrol wisp $WISP"
+else
+  gc mail inbox
+  WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
+  gc bd update "$WISP" --assignee="$GC_AGENT"
+fi
 
-# Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
-NEW_WISP=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
-gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
-
-# Step 4: Read the formula recipe — these are the steps to execute
+# Step 3: Read the formula recipe — these are the steps to execute
 # (Use 'gc bd formula show' for the recipe on disk; 'gc bd mol show' is
 #  for poured molecule instances, not formulas, and will say 'not found'.)
 gc bd formula show mol-deacon-patrol
 
-# Step 5: Execute — work through the steps in order
+# Step 4: Execute — work through the steps in order
 ```
 
 **Hook -> Read formula steps (`gc bd formula show <name>`) -> Follow in order -> pour next iteration -> run `gc hook`.**
@@ -89,9 +105,9 @@ If `next-iteration` already ran, do not pour again; run `gc hook`.
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')
 fi
-ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=1 --json | jq -r '.[0].id // empty')
 if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then
   NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
   if [ -z "$NEXT" ]; then

@@ -243,3 +243,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/steveyegge/beads => github.com/brandonmartin/beads v1.0.6-0.20260612160515-4e88ad9e5437

@@ -10427,3 +10427,89 @@ func TestBuildDesiredState_NamedSessionWorkQueryDoesNotDriveControllerDemand(t *
 		t.Fatal("NamedSessionDemand[alpha/dog] came from controller-side work_query")
 	}
 }
+
+// TestIsPatrolFormulaSignal pins the patrol-formula naming convention that
+// couples the dedicated wisp-wake probe (namedSessionPatrolWispWakeDemand) to
+// the generic-demand exclusion (excludePatrolWakeWisps). Both consult
+// isPatrolWispWakeCandidate, which consults this predicate, so the set of wisps
+// the probe owns equals the set excluded from generic demand only as long as
+// every configured patrol formula matches one of the recognized forms. A patrol
+// formula named outside these forms would be neither woken by the probe nor
+// excluded from generic demand (audit risk R1: a more-eager-wake false
+// negative) — this test fails fast if the recognized forms regress.
+func TestIsPatrolFormulaSignal(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		// Recognized forms: bare token, hyphen suffix, dot suffix. The
+		// configured fork patrol formulas (mol-refinery-patrol, mol-mayor-patrol)
+		// are the hyphen-suffix case and MUST keep matching.
+		{name: "bare patrol token", value: "patrol", want: true},
+		{name: "configured refinery patrol formula", value: "mol-refinery-patrol", want: true},
+		{name: "configured mayor patrol formula", value: "mol-mayor-patrol", want: true},
+		{name: "dot suffix", value: "refinery.patrol", want: true},
+		{name: "whitespace is trimmed", value: "  mol-refinery-patrol  ", want: true},
+
+		// Non-patrol formulas and R1 nonconforming names must not match.
+		{name: "empty", value: "", want: false},
+		{name: "whitespace only", value: "   ", want: false},
+		{name: "non-patrol work formula", value: "mol-refinery-work", want: false},
+		{name: "prefix not suffix", value: "patrol-refinery", want: false},
+		{name: "substring not boundary", value: "patrolling", want: false},
+		{name: "underscore separator (R1 nonconforming)", value: "refinery_patrol", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPatrolFormulaSignal(tc.value); got != tc.want {
+				t.Fatalf("isPatrolFormulaSignal(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsPatrolWispWakeCandidate pins the full candidate gate: a bead is a
+// patrol-wake candidate iff it is ephemeral, open or in_progress, and carries a
+// patrol-formula signal in any of the six checked fields (Title, Ref, and the
+// formula / wisp_type metadata keys with and without the gc. prefix). This is
+// the single predicate both namedSessionPatrolWispWakeDemand and
+// excludePatrolWakeWisps consult, so its contract is what keeps the woken set
+// equal to the excluded set with no gap or overlap.
+func TestIsPatrolWispWakeCandidate(t *testing.T) {
+	patrolWisp := func(b beads.Bead) beads.Bead {
+		b.Ephemeral = true
+		if b.Status == "" {
+			b.Status = "in_progress"
+		}
+		return b
+	}
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want bool
+	}{
+		{name: "title signal", bead: patrolWisp(beads.Bead{Title: "mol-refinery-patrol"}), want: true},
+		{name: "ref signal", bead: patrolWisp(beads.Bead{Ref: "mol-mayor-patrol"}), want: true},
+		{name: "formula metadata signal", bead: patrolWisp(beads.Bead{Metadata: map[string]string{"formula": "x-patrol"}}), want: true},
+		{name: "gc.formula metadata signal", bead: patrolWisp(beads.Bead{Metadata: map[string]string{"gc.formula": "x.patrol"}}), want: true},
+		{name: "wisp_type metadata signal", bead: patrolWisp(beads.Bead{Metadata: map[string]string{"wisp_type": "patrol"}}), want: true},
+		{name: "gc.wisp_type metadata signal", bead: patrolWisp(beads.Bead{Metadata: map[string]string{"gc.wisp_type": "patrol"}}), want: true},
+		{name: "open status", bead: patrolWisp(beads.Bead{Status: "open", Ref: "mol-refinery-patrol"}), want: true},
+
+		{name: "not ephemeral", bead: beads.Bead{Status: "in_progress", Ref: "mol-refinery-patrol"}, want: false},
+		{name: "closed status", bead: patrolWisp(beads.Bead{Status: "closed", Ref: "mol-refinery-patrol"}), want: false},
+		{name: "non-patrol formula", bead: patrolWisp(beads.Bead{Ref: "mol-refinery-work"}), want: false},
+		{name: "no signal fields", bead: patrolWisp(beads.Bead{Title: "candidate wisp"}), want: false},
+		{name: "nonconforming patrol name (R1)", bead: patrolWisp(beads.Bead{Metadata: map[string]string{"formula": "refinery_patrol"}}), want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPatrolWispWakeCandidate(tc.bead); got != tc.want {
+				t.Fatalf("isPatrolWispWakeCandidate(%+v) = %v, want %v", tc.bead, got, tc.want)
+			}
+		})
+	}
+}

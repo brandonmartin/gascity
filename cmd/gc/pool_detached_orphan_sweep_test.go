@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -380,5 +381,55 @@ func TestSweepDetachedHandoffOrphans_NilStore(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("restored=%d, want 0 for nil store", n)
+	}
+}
+
+// A detached handoff orphan can live in a RIG store while its closing session
+// bead lives in the CITY store — the common case sweepDetachedHandoffOrphansAcross
+// Stores exists for. The route index must be built from the city store too, or
+// the rig-stored orphan's session bead is never found and it is never recovered.
+// Cross-store round-trip through the public entry point.
+func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	// Session bead lives in the CITY store (where session beads live).
+	if _, err := cityStore.Create(beads.Bead{
+		Title:  "polecat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "gastown__polecat-th-xyz",
+			"template":     "gascity/gastown.polecat",
+		},
+	}); err != nil {
+		t.Fatalf("create city session bead: %v", err)
+	}
+
+	// Detached orphan lives in the RIG store, referencing the city-stored session.
+	work, err := rigStore.Create(beads.Bead{
+		Title:  "orphaned rig work",
+		Status: "open",
+		Metadata: map[string]string{
+			"branch":                        "polecat/ga-xyz",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-xyz",
+			// gc.routed_to and assignee left empty by the failed done sequence
+		},
+	})
+	if err != nil {
+		t.Fatalf("create rig work bead: %v", err)
+	}
+
+	n := sweepDetachedHandoffOrphansAcrossStores(cityStore, map[string]beads.Store{"ga": rigStore}, "test", io.Discard)
+	if n != 1 {
+		t.Fatalf("restored=%d, want 1 (rig orphan recovered via city-stored session bead)", n)
+	}
+
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get rig work bead: %v", err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "gascity/gastown.polecat" {
+		t.Fatalf("gc.routed_to=%q, want gascity/gastown.polecat", got.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }

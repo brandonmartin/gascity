@@ -27,6 +27,18 @@ import (
 // re-enters pool demand; the formula re-evaluates it from there. No role names
 // appear in this function.
 func sweepDetachedHandoffOrphans(store beads.Store) (int, error) {
+	return sweepDetachedHandoffOrphansWithRouteStore(store, nil)
+}
+
+// sweepDetachedHandoffOrphansWithRouteStore is sweepDetachedHandoffOrphans that
+// additionally resolves pool routes from routeStore. Session beads (which carry
+// the template/route) are city-stored, while a detached orphan can live in a rig
+// store — so when sweeping a rig store, routeStore is the city store, and a
+// rig-stored orphan whose closing session bead lives in the city store is
+// recovered (the cross-store case sweepDetachedHandoffOrphansAcrossStores exists
+// for). routeStore may be nil to resolve routes from store alone. Beads are only
+// re-stamped in store; routeStore is read-only.
+func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (int, error) {
 	if store == nil {
 		return 0, nil
 	}
@@ -55,10 +67,25 @@ func sweepDetachedHandoffOrphans(store beads.Store) (int, error) {
 		return 0, nil
 	}
 
-	// Build a session_name → pool-route index once for all candidates.
+	// Build a session_name → pool-route index once for all candidates, from this
+	// store and (for cross-store recovery) routeStore. A detached orphan in a rig
+	// store has its session bead in the city store, so without routeStore its
+	// route is never found and it is never recovered. store wins on conflict; the
+	// city store backfills session names absent here.
 	routeIndex, indexErr := buildDetachedOrphanRouteIndex(store)
 	if indexErr != nil {
 		return 0, fmt.Errorf("building session route index: %w", indexErr)
+	}
+	if routeStore != nil {
+		crossIndex, crossErr := buildDetachedOrphanRouteIndex(routeStore)
+		if crossErr != nil {
+			return 0, fmt.Errorf("building cross-store session route index: %w", crossErr)
+		}
+		for sn, route := range crossIndex {
+			if _, exists := routeIndex[sn]; !exists {
+				routeIndex[sn] = route
+			}
+		}
 	}
 
 	var (
@@ -152,7 +179,7 @@ func sweepDetachedHandoffOrphansAcrossStores(cityStore beads.Store, rigStores ma
 		if sc.store == nil {
 			continue
 		}
-		n, err := sweepDetachedHandoffOrphans(sc.store)
+		n, err := sweepDetachedHandoffOrphansWithRouteStore(sc.store, cityStore)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: detached handoff orphan sweep (%s): %v\n", logPrefix, sc.label, err) //nolint:errcheck
 		}

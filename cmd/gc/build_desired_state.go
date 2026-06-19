@@ -1123,6 +1123,13 @@ func collectAssignedWorkBeadsWithStores(
 	// iterates (identity).
 	stores := coordClassStoreCandidates(cfg, cityStore, rigStores, suspendedRigPaths, "")
 
+	// Configured named-session identities (read-only; shared across the
+	// per-store goroutines). An open bead assigned directly to one of these is
+	// a coordination-session handoff — the canonical-target assignment IS the
+	// wake demand, independent of gc.routed_to and of the per-assignee Ready()
+	// probe. See appendOpenRoutedWorkUnique and ga-3p5.
+	namedIdentities := configuredNamedSessionIdentities(cfg)
+
 	type storeAssignedWorkResult struct {
 		ref       string // store ref these beads came from (empty = city store)
 		beads     []beads.Bead
@@ -1168,12 +1175,12 @@ func collectAssignedWorkBeadsWithStores(
 			// live-session step beads in the same range are skipped untouched.
 			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
 				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
-				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref, namedIdentities)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
 					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
-					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref, namedIdentities)
 				}
 			}
 			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
@@ -2179,22 +2186,73 @@ func isOpenAssignedMoleculeWork(b beads.Bead) bool {
 	return b.Ephemeral || b.NoHistory || strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) == "workflow"
 }
 
-// appendOpenRoutedWorkUnique includes open beads that are still releasably
-// pool-routed AND still carry an assignee. This is the narrow input
-// releaseOrphanedPoolAssignments needs to clear step beads abandoned by a
-// dead session (graph.v2 wisps where the root depends on the finalize
-// step, so the root never enters ready and the step assignee remains a
-// long-form dead-session identity invisible to readyAssignedWorkAssignees).
-func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+// appendOpenRoutedWorkUnique includes open beads that still carry an assignee
+// AND are either (a) releasably pool-routed or (b) a direct handoff to a
+// configured named-session identity.
+//
+// Case (a) is the narrow input releaseOrphanedPoolAssignments needs to clear
+// step beads abandoned by a dead session (graph.v2 wisps where the root depends
+// on the finalize step, so the root never enters ready and the step assignee
+// remains a long-form dead-session identity invisible to
+// readyAssignedWorkAssignees).
+//
+// Case (b) closes the wake-on-demand gap behind ga-3p5: a polecat's done
+// sequence reassigns the work bead to the refinery's canonical identity and
+// CLEARS gc.routed_to ("direct assignment IS the handoff"). Such a bead is
+// invisible to the routed filter, and the per-assignee Ready() probe only
+// enumerates on_demand named sessions plus live session beads — so an
+// always-mode or asleep/drained coordination session's handoff is never probed
+// and the merge strands. Collecting it here from the plain open list makes the
+// canonical-target assignment itself the wake demand, independent of routed
+// metadata and of the store's readiness model (deferred/ready-excluded handoffs
+// included). The named-identity scope keeps pool-release semantics untouched.
+//
+// Case (b) is restricted to non-ephemeral beads: ephemeral (wisp) work assigned
+// to a named identity is already collected by
+// appendOpenAssignedMoleculeWorkUnique, which admits assigned root-only
+// molecule wisps and marks them ready. Excluding them here keeps that pass the
+// single owner of ephemeral assigned work and matches the namedWorkReady policy
+// that also skips it. Ephemeral routed work still flows through case (a)
+// unchanged.
+func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, namedIdentities map[string]struct{}) {
 	for _, b := range beadList {
-		if strings.TrimSpace(b.Assignee) == "" {
+		assignee := strings.TrimSpace(b.Assignee)
+		if assignee == "" {
 			continue
 		}
-		if routedToOrLegacyWorkflowTarget(b) == "" {
+		routed := routedToOrLegacyWorkflowTarget(b) != ""
+		namedHandoff := !b.Ephemeral && isConfiguredNamedSessionAssignee(assignee, namedIdentities)
+		if !routed && !namedHandoff {
 			continue
 		}
 		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
 	}
+}
+
+// configuredNamedSessionIdentities returns the set of qualified named-session
+// identities declared in cfg (all modes). A bead assigned directly to one of
+// these is a coordination-session handoff to that session's canonical target.
+func configuredNamedSessionIdentities(cfg *config.City) map[string]struct{} {
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		if id := strings.TrimSpace(cfg.NamedSessions[i].QualifiedName()); id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	return set
+}
+
+// isConfiguredNamedSessionAssignee reports whether assignee names a configured
+// named-session identity.
+func isConfiguredNamedSessionAssignee(assignee string, namedIdentities map[string]struct{}) bool {
+	if assignee == "" || len(namedIdentities) == 0 {
+		return false
+	}
+	_, ok := namedIdentities[assignee]
+	return ok
 }
 
 // appendWorkUnique appends b to the aligned dst/stores/storeRefs slices unless

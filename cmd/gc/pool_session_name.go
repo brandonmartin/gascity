@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -140,6 +141,19 @@ func releaseOrphanedPoolAssignments(
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
 		template := routedToOrLegacyWorkflowTarget(wb)
+		restampRoute := ""
+		if template == "" {
+			// A pool route consumed on claim leaves gc.routed_to cleared but
+			// retains the route as the gc.run_target anchor (see
+			// claimConsumingRoute), so a dead owner's in-progress work is
+			// recovered via that anchor rather than stranded. Re-stamp
+			// gc.routed_to on reopen (restampRoute) so the recovered work
+			// re-enters pool demand, which keys on gc.routed_to.
+			if anchor := consumedPoolRouteAnchor(wb); anchor != "" {
+				template = anchor
+				restampRoute = anchor
+			}
+		}
 		if template == "" {
 			continue
 		}
@@ -187,7 +201,7 @@ func releaseOrphanedPoolAssignments(
 		if !allowsRelease {
 			continue
 		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID, clearDetached) {
+		if !releaseOrphanedPoolAssignment(ownerStore, wb.ID, clearDetached, restampRoute) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -327,7 +341,7 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
 }
 
-func releaseOrphanedPoolAssignment(store beads.Store, id string, clearDetached bool) bool {
+func releaseOrphanedPoolAssignment(store beads.Store, id string, clearDetached bool, restampRoute string) bool {
 	if store == nil || id == "" {
 		return false
 	}
@@ -338,6 +352,14 @@ func releaseOrphanedPoolAssignment(store beads.Store, id string, clearDetached b
 	}
 	if clearDetached {
 		opts.Metadata[detachedProbeMetadataKey] = ""
+	}
+	if restampRoute != "" {
+		// ga-sa0: this bead's gc.routed_to was consumed on claim and recovered
+		// from the gc.run_target anchor (consumedPoolRouteAnchor). Re-stamp
+		// gc.routed_to on reopen so the recovered work re-enters pool demand —
+		// the autoscaler keys on gc.routed_to, so without this the reopened bead
+		// would be invisible to demand and never re-dispatched.
+		opts.Metadata[beadmeta.RoutedToMetadataKey] = restampRoute
 	}
 	if err := store.Update(id, opts); err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", id, err)

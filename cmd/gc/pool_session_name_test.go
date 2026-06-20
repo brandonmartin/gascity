@@ -1819,6 +1819,84 @@ func TestReleaseOrphanedPoolAssignments_KeepsCrossStoreEligibleHolderRigWork(t *
 	}
 }
 
+// TestReleaseOrphanedPoolAssignments_SkipsLiveRigStoreOwnedSession is the
+// cross-store live-owner guard (ga-3cg, option (b) follow-up to ga-sa0). A
+// live rig polecat keeps both its session bead AND its in-progress work in the
+// rig store. The orphan-release scan runs from the city store: the open-session
+// snapshot it receives is city-only (so openSessionOwnsWork misses the owner)
+// and liveOpenSessionAssignmentExists(cityStore, ...) cannot see a session bead
+// that lives in the rig store. Without consulting the work bead's owner store,
+// the periodic liveness guess judges the live owner dead and re-pools its work
+// out from under it. The guard must consult the owner store and keep the work.
+func TestReleaseOrphanedPoolAssignments_SkipsLiveRigStoreOwnedSession(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	// The live owner's session bead lives in the rig store, not the city
+	// store — invisible to the city-only snapshot and to a city-store query.
+	if _, err := rigStore.Create(beads.Bead{
+		Title:  "rig worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker-live",
+			"template":             "worker",
+			"agent_name":           "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatalf("Create rig session bead: %v", err)
+	}
+	work, err := rigStore.Create(beads.Bead{
+		Title:    "live rig pool work",
+		Assignee: "worker-live",
+		Metadata: map[string]string{"gc.routed_to": "repo/worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	work, err = rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		&config.City{
+			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
+			Agents: []config.Agent{
+				{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				{Name: "worker", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			},
+		},
+		cityPath,
+		// City-only open-session snapshot: the rig owner is not in it.
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{rigStore},
+		[]string{"repo"},
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none for live rig-store-owned session", released)
+	}
+
+	got, err := rigStore.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "worker-live" {
+		t.Fatalf("assignee = %q, want worker-live", got.Assignee)
+	}
+}
+
 func TestStoreForPoolAssignment_UsesConfiguredHyphenatedIDPrefix(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()

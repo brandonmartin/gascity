@@ -173,6 +173,26 @@ func releaseOrphanedPoolAssignments(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
+		// Resolve the work bead's owner store up front: both the cross-store
+		// live-owner guard below and the stale-snapshot re-check need it. The
+		// city store and the city-only open-session snapshot cannot see a
+		// session bead that lives in a rig store, so a live rig polecat whose
+		// session and work both live in the rig store would otherwise be
+		// judged dead and its in-progress work re-pooled.
+		var ownerStore beads.Store
+		if storeAware {
+			if i >= len(assignedWorkStores) || assignedWorkStores[i] == nil {
+				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)
+				continue
+			}
+			ownerStore = assignedWorkStores[i]
+		} else {
+			ownerStore = storeForPoolAssignment(cfg, store, rigStores, wb)
+			if ownerStore == nil {
+				continue
+			}
+		}
+
 		if assignee == "" {
 			if wb.Status != "in_progress" {
 				continue
@@ -191,18 +211,10 @@ func releaseOrphanedPoolAssignments(
 			if liveOpenSessionAssignmentExists(store, assignee) {
 				continue
 			}
-		}
-
-		var ownerStore beads.Store
-		if storeAware {
-			if i >= len(assignedWorkStores) || assignedWorkStores[i] == nil {
-				log.Printf("releaseOrphanedPoolAssignments: missing owner store for assigned work %q at index %d", wb.ID, i)
-				continue
-			}
-			ownerStore = assignedWorkStores[i]
-		} else {
-			ownerStore = storeForPoolAssignment(cfg, store, rigStores, wb)
-			if ownerStore == nil {
+			// Cross-store live-owner guard: the owner session bead may live in
+			// the work bead's rig store, invisible to the city `store` query
+			// above. Consult the owner store before re-pooling live-owned work.
+			if ownerStore != store && liveOpenSessionAssignmentExists(ownerStore, assignee) {
 				continue
 			}
 		}

@@ -11662,3 +11662,77 @@ func TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle(t *testing.T) {
 		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
 	}
 }
+
+// TestCollectAssignedWorkBeads_IncludesOpenHandoffToConfiguredNamedSession
+// reproduces the wake-on-demand gap behind ga-3p5. A polecat's done-sequence
+// reassigns the work bead directly to the refinery's canonical identity AND
+// clears gc.routed_to ("direct assignment IS the handoff"). In a populated city
+// the assignee enumeration is non-empty, so the unfiltered Ready() fallback
+// never runs; and readyAssignedWorkAssignees only enumerates on_demand named
+// sessions plus live session beads, so an always-mode coordination session with
+// no live bead is never probed. Without collecting open beads directly assigned
+// to a configured named identity, the handoff never becomes wake demand and the
+// merge strands — the controller leaves the refinery asleep until a human does
+// close+re-assign. The direct named-assignee collection closes that gap.
+func TestCollectAssignedWorkBeads_IncludesOpenHandoffToConfiguredNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	handoff, err := store.Create(beads.Bead{
+		Title:    "merge me",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+
+	cfg := &config.City{NamedSessions: []config.NamedSession{
+		{Name: "refinery", Dir: "repo", Mode: "always"},
+		// A second on_demand named session keeps readyAssignedWorkAssignees
+		// non-empty so the unfiltered Ready() fallback does not run — mirroring a
+		// populated city where this bug actually manifests.
+		{Name: "witness", Dir: "repo", Mode: "on_demand"},
+	}}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 1 || got[0].ID != handoff.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want open handoff %s assigned to repo/refinery", got, handoff.ID)
+	}
+	if got[0].Assignee != "repo/refinery" || got[0].Status != "open" {
+		t.Fatalf("assigned handoff bead = assignee %q status %q, want repo/refinery open", got[0].Assignee, got[0].Status)
+	}
+}
+
+// TestCollectAssignedWorkBeads_IgnoresOpenUnroutedWorkForUnconfiguredAssignee
+// guards the blast radius of the ga-3p5 fix: an open bead with a cleared
+// gc.routed_to whose assignee is NOT a configured named session must stay
+// invisible to assigned-work demand (the original appendOpenRoutedWorkUnique
+// contract — only routed pool work and named-session handoffs qualify). Here the
+// only enumerated assignee is an unrelated on_demand session, so the per-assignee
+// Ready() probe runs (not the unfiltered fallback) and the stray bead is dropped.
+func TestCollectAssignedWorkBeads_IgnoresOpenUnroutedWorkForUnconfiguredAssignee(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "stray open assignment",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/some-dead-session",
+	}); err != nil {
+		t.Fatalf("create stray bead: %v", err)
+	}
+
+	cfg := &config.City{NamedSessions: []config.NamedSession{
+		{Name: "witness", Dir: "repo", Mode: "on_demand"},
+	}}
+
+	got, partial := collectAssignedWorkBeads(cfg, store)
+	if partial {
+		t.Fatal("collectAssignedWorkBeads reported partial results")
+	}
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want no demand for unconfigured assignee", got)
+	}
+}

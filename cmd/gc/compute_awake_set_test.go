@@ -921,6 +921,40 @@ func TestDrained_PinnedStaysAsleepUntilUndrained(t *testing.T) {
 	assertAsleep(t, result, "polecat-mc-1")
 }
 
+// TestNamedOnDemand_DrainedPinnedWakesOnOpenAssignedMerge locks the wake-on-
+// demand decision for ga-3p5: a pinned, drained on_demand refinery (state
+// asleep) must wake when a fresh OPEN ready merge bead is assigned to its
+// canonical identity — no manual close+re-assign. The pin keeps it exempt from
+// idle-sleep churn while warm; the durable assigned-work demand is what re-wakes
+// it once drained. Complements TestDrained_WithAssignedWork_Wakes (in_progress)
+// and TestDrained_PinnedStaysAsleepUntilUndrained (no work → stays asleep): the
+// fix that makes the open handoff reach AwakeWorkBead lives in the collection
+// layer (collectAssignedWorkBeads), but this guards the decision contract.
+func TestNamedOnDemand_DrainedPinnedWakesOnOpenAssignedMerge(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "repo/refinery"}},
+		NamedSessions: []AwakeNamedSession{{
+			Identity:    "repo/refinery",
+			Template:    "repo/refinery",
+			Mode:        "on_demand",
+			RuntimeName: "repo--refinery",
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "repo--refinery",
+			Template:      "repo/refinery",
+			State:         "asleep",
+			Drained:       true,
+			Pinned:        true,
+			NamedIdentity: "repo/refinery",
+		}},
+		WorkBeads: []AwakeWorkBead{{ID: "rb-1", Assignee: "repo/refinery", Status: "open", Ready: true}},
+		Now:       now,
+	})
+	assertAwake(t, result, "repo--refinery")
+	assertReason(t, result, "repo--refinery", "assigned-work")
+}
+
 // ---------------------------------------------------------------------------
 // Hold
 // ---------------------------------------------------------------------------

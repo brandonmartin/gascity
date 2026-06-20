@@ -194,6 +194,12 @@ func preserveTestControlEnv(key string) bool {
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
+		// Harness-level city-discovery ceiling installed by TestMain. It pins
+		// findCity() inside the hermetic temp root; clearing it would let
+		// clearGCEnv-using tests escape to ambient /tmp/.gc or the live town
+		// tree (gascity ga-r0i). Tests that need a different ceiling override
+		// it with t.Setenv.
+		key == "GC_CEILING_DIRECTORIES" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
 		strings.HasPrefix(key, "GC_TEST_")

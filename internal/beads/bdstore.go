@@ -1363,7 +1363,39 @@ func bdSQLStringLiteral(value string) string {
 // The caller controls the claim actor through the store's CommandRunner
 // environment, typically BEADS_ACTOR.
 func (s *BdStore) Claim(id string) (Bead, bool, error) {
-	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
+	return s.ClaimWithMetadata(id, nil, nil)
+}
+
+// ClaimWithMetadata atomically claims a bead (open->in_progress, assignee set to
+// the store actor) while setting and/or unsetting the given metadata keys in the
+// SAME bd update. Folding the metadata mutation into the claim keeps both
+// observable as a single transition: a caller that consumes a routing key on
+// claim cannot be interrupted between claiming the bead and clearing the key.
+// The set and unset mutations are applied in addition to the claim; pass nil for
+// either to skip it. set keys are emitted in sorted order for deterministic
+// command construction. Like Claim, it returns ok=false with a nil error on a
+// claim conflict (the bead was already claimed by another actor), in which case
+// no metadata mutation is applied.
+func (s *BdStore) ClaimWithMetadata(id string, set map[string]string, unset []string) (Bead, bool, error) {
+	args := []string{"update", id, "--claim"}
+	if len(set) > 0 {
+		keys := make([]string, 0, len(set))
+		for k := range set {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "--set-metadata", k+"="+set[k])
+		}
+	}
+	for _, k := range unset {
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		args = append(args, "--unset-metadata", k)
+	}
+	args = append(args, "--json")
+	out, err := s.runBDTransientWriteOutput(args...)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {

@@ -159,6 +159,14 @@ func releaseOrphanedPoolAssignments(
 		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
+			// A pool route consumed on claim leaves gc.routed_to cleared but
+			// retains the route as gc.run_target (see claimConsumingRoute), so a
+			// dead owner's in-progress work is recovered via that carried anchor
+			// rather than stranded; restoreCarriedWorkRoutes re-stamps
+			// gc.routed_to once the bead is reopened here.
+			template = carriedPoolRoute(wb)
+		}
+		if template == "" {
 			continue
 		}
 		agentCfg := findAgentByTemplate(cfg, template)

@@ -68,7 +68,7 @@ type hookClaimOps struct {
 }
 
 type (
-	hookClaimFunc              func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookClaimFunc              func(context.Context, string, []string, string, string, string) (beads.Bead, bool, error)
 	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
 	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc           func(io.Writer) error
@@ -229,7 +229,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// next tick (NDI).
 			break
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee, strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]))
 		if err != nil {
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
@@ -464,9 +464,28 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	return assigned, nil
 }
 
-func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+// claimConsumingRoute claims a bead and, when consumeRoute is non-empty,
+// consumes the pool route in the same atomic bd update: it clears gc.routed_to
+// so a live-owned, in-progress bead is no longer pool demand and cannot be
+// re-pooled by the reconciler/claim hook (gastownhall/gascity ga-sa0), and
+// records the route as gc.run_target so a dead owner's in-progress work is still
+// recoverable into the pool (carriedPoolRoute / restoreCarriedWorkRoutes
+// re-stamp gc.routed_to once the bead is reopened). When consumeRoute is empty
+// (e.g. a workflow root claimed via gc.run_target, which carries no gc.routed_to
+// to consume) it is a plain claim that leaves routing metadata untouched.
+func claimConsumingRoute(store *beads.BdStore, beadID, consumeRoute string) (beads.Bead, bool, error) {
+	consumeRoute = strings.TrimSpace(consumeRoute)
+	if consumeRoute == "" {
+		return store.Claim(beadID)
+	}
+	return store.ClaimWithMetadata(beadID,
+		map[string]string{beadmeta.RunTargetMetadataKey: consumeRoute},
+		[]string{beadmeta.RoutedToMetadataKey})
+}
+
+func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee, consumeRoute string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
-	claimed, ok, err := store.Claim(beadID)
+	claimed, ok, err := claimConsumingRoute(store, beadID, consumeRoute)
 	if err != nil {
 		return beads.Bead{}, false, err
 	}

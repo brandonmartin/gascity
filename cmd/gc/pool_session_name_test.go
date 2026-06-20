@@ -2105,6 +2105,123 @@ func TestReleaseOrphanedPoolAssignments_PreservesCrossStoreEligibleNamedIdentity
 	}
 }
 
+// TestReleaseOrphanedPoolAssignments_ConsumedRouteKeepsLiveOwnership asserts
+// single ownership after the dispatch double-claim fix (ga-sa0). A claimed pool
+// bead has its route consumed: gc.routed_to is cleared and the route survives
+// only as the gc.run_target anchor. The reconciler must still recognize the live
+// owner and NOT re-pool the bead — the bead stays with its single owner, and the
+// route is not re-advertised (gc.routed_to stays empty) so no second polecat can
+// be handed the same work.
+func TestReleaseOrphanedPoolAssignments_ConsumedRouteKeepsLiveOwnership(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   "session",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":         "worker-live",
+			"template":             "worker",
+			"agent_name":           "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	// Post-consumption shape: gc.run_target anchor retained, gc.routed_to gone.
+	work, err := store.Create(beads.Bead{
+		Title:    "claimed pool work",
+		Assignee: "worker-live",
+		Metadata: map[string]string{"gc.run_target": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{session},
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none (live owner must keep the work)", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-live" {
+		t.Fatalf("work = (status %q, assignee %q), want single ownership (in_progress, worker-live)", got.Status, got.Assignee)
+	}
+	if rt := strings.TrimSpace(got.Metadata["gc.routed_to"]); rt != "" {
+		t.Fatalf("gc.routed_to = %q, want empty (claimed work must not re-advertise as pool demand)", rt)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ConsumedRouteRecoversDeadOwner asserts the
+// dispatch double-claim fix (ga-sa0) does not regress crash recovery. After the
+// route is consumed on claim (gc.routed_to cleared, gc.run_target anchor kept), a
+// DEAD owner's in-progress work must still be reopened via that carried anchor —
+// otherwise clearing gc.routed_to would strand it. The anchor is preserved on the
+// reopened bead so restoreCarriedWorkRoutes can re-stamp gc.routed_to and the
+// work re-enters pool demand.
+func TestReleaseOrphanedPoolAssignments_ConsumedRouteRecoversDeadOwner(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "claimed pool work, owner died",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{"gc.run_target": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil,
+		[]beads.Bead{work},
+		nil,
+		nil,
+		nil,
+	)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s] (dead owner's consumed-route work must be recoverable)", released, work.ID)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("work = (status %q, assignee %q), want reopened (open, unassigned)", got.Status, got.Assignee)
+	}
+	if rt := strings.TrimSpace(got.Metadata["gc.run_target"]); rt != "worker" {
+		t.Fatalf("gc.run_target = %q, want \"worker\" retained so restoreCarriedWorkRoutes can re-stamp gc.routed_to", rt)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

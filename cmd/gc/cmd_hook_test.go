@@ -341,7 +341,7 @@ func TestDoHookClaimReturnsExistingAssignment(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+		Claim: func(context.Context, string, []string, string, string, string) (beads.Bead, bool, error) {
 			t.Fatal("claim must not run for existing assigned in-progress work")
 			return beads.Bead{}, false, nil
 		},
@@ -380,7 +380,7 @@ func TestDoHookClaimClaimsRoutedUnassignedWork(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee, _ string) (beads.Bead, bool, error) {
 			claimedID = beadID
 			// bd update --claim may return only a partial metadata projection.
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
@@ -416,6 +416,71 @@ func TestDoHookClaimClaimsRoutedUnassignedWork(t *testing.T) {
 	}
 }
 
+func TestDoHookClaimPassesRoutedToAsConsumeRoute(t *testing.T) {
+	var gotConsumeRoute string
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-5","status":"open","metadata":{"gc.routed_to":"rig/pool"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee, consumeRoute string) (beads.Bead, bool, error) {
+			gotConsumeRoute = consumeRoute
+			// Mirror the production claim: the route is consumed (gc.routed_to
+			// cleared) and retained as the gc.run_target recovery anchor.
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.run_target": "rig/pool"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"rig/pool"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotConsumeRoute != "rig/pool" {
+		t.Fatalf("consumeRoute passed to claim = %q, want the candidate's gc.routed_to %q", gotConsumeRoute, "rig/pool")
+	}
+}
+
+// TestDoHookClaim_DoesNotClaimConsumedRouteWork is the claim-hook half of the
+// double-claim fix (ga-sa0). Once a polecat claims a routed bead the route is
+// consumed — gc.routed_to is cleared and the route is retained only as the
+// gc.run_target recovery anchor. A SECOND polecat's claim hook must NOT treat
+// that bead as pool demand: with gc.routed_to gone, hookClaimMatchesRoute no
+// longer matches it, so it is never handed out a second time. Contrast with
+// TestDoHookClaimClaimsRoutedUnassignedWork, where gc.routed_to is still set and
+// the bead IS claimed.
+func TestDoHookClaim_DoesNotClaimConsumedRouteWork(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		// Post-consumption shape: route retained only as gc.run_target, no
+		// gc.routed_to. (A plain, kind-less work bead — not a workflow root.)
+		return `[{"id":"hw-consumed","status":"open","metadata":{"gc.run_target":"rig/pool"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _, _ string) (beads.Bead, bool, error) {
+			t.Fatalf("claim attempted on consumed-route bead %q; want it skipped as non-demand", beadID)
+			return beads.Bead{}, false, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-2",
+		IdentityCandidates: []string{"worker-2"},
+		RouteTargets:       []string{"rig/pool"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookClaim = %d, want 1 (no claimable work); stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+}
+
 func TestDoHookClaimRetriesAfterClaimConflict(t *testing.T) {
 	var attempts []string
 	runner := func(string, string) (string, error) {
@@ -426,7 +491,7 @@ func TestDoHookClaimRetriesAfterClaimConflict(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee, _ string) (beads.Bead, bool, error) {
 			attempts = append(attempts, beadID)
 			if beadID == "hw-raced" {
 				return beads.Bead{}, false, nil
@@ -587,7 +652,7 @@ func TestDoHookClaimClaimsLegacyRunTargetWorkflowRoot(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee, _ string) (beads.Bead, bool, error) {
 			claimedID = beadID
 			return beads.Bead{
 				ID:       beadID,
@@ -898,7 +963,7 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee, _ string) (beads.Bead, bool, error) {
 			return beads.Bead{
 				ID:       beadID,
 				Status:   "in_progress",
@@ -1330,8 +1395,8 @@ name = "worker"
 	script := fmt.Sprintf(`#!/bin/sh
 printf 'actor=%%s args=%%s\n' "${BEADS_ACTOR:-}" "$*" >> %q
 case "$*" in
-  *"update hw-claim --claim --json"*)
-    printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
+  *"update hw-claim --claim --set-metadata gc.run_target=worker --unset-metadata gc.routed_to --json"*)
+    printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.run_target":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
     ;;
   *"show --json hw-claim"*)
     printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
@@ -1389,8 +1454,8 @@ esac
 		t.Fatalf("ReadFile(%s): %v", logPath, err)
 	}
 	logText := string(logData)
-	if !strings.Contains(logText, "actor=worker-1 args=update hw-claim --claim --json") {
-		t.Fatalf("bd claim did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
+	if !strings.Contains(logText, "actor=worker-1 args=update hw-claim --claim --set-metadata gc.run_target=worker --unset-metadata gc.routed_to --json") {
+		t.Fatalf("bd claim did not consume the route under session BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
 	if !strings.Contains(logText, "actor=worker-1 args=show --json hw-claim") {
 		t.Fatalf("bd canonical read did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)

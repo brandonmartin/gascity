@@ -207,6 +207,18 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
+	// Bound implicit city discovery to the hermetic temp root. Because TMPDIR
+	// now points here, every t.TempDir() lives under testTempRoot, so capping
+	// the upward findCity() walk at testTempRoot keeps it from escaping into
+	// ambient city/runtime state — a stray /tmp/.gc, or the live Gas Town tree
+	// this binary runs inside when the suite executes from a town worktree.
+	// Without this cap, "expect no city" tests resolve an ancestor city and
+	// fail environmentally (gascity ga-r0i). Tests that exercise specific
+	// ceiling or $HOME-fallback behavior override GC_CEILING_DIRECTORIES via
+	// t.Setenv, which restores this value afterward.
+	if err := os.Setenv("GC_CEILING_DIRECTORIES", testTempRoot); err != nil {
+		panic(err)
+	}
 	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(testTempRoot, "tmux")); err != nil {
 		panic(err)
 	}
@@ -451,16 +463,14 @@ func TestFindCity(t *testing.T) {
 	})
 
 	t.Run("not_found", func(t *testing.T) {
-		// Use an explicit /tmp-rooted dir so the upward walk cannot
-		// accidentally hit a real .gc/ directory on the host (e.g.
-		// a running city under $HOME).
-		dir, err := os.MkdirTemp("/tmp", "gc-test-notfound-*")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = os.RemoveAll(dir) }()
+		// t.TempDir() lives under the hermetic testTempRoot, which TestMain
+		// also installs as the GC_CEILING_DIRECTORIES discovery ceiling. That
+		// caps the upward walk at testTempRoot so it cannot reach ambient
+		// city/runtime state — a stray /tmp/.gc, or the live town tree this
+		// binary may run inside (gascity ga-r0i).
+		dir := t.TempDir()
 
-		_, err = findCity(dir)
+		_, err := findCity(dir)
 		if err == nil {
 			t.Fatal("findCity() should fail without city.toml or .gc/")
 		}
@@ -568,6 +578,11 @@ func TestFindCity(t *testing.T) {
 		if err := os.MkdirAll(homeDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
+		// Exercise the implicit $HOME-fallback ceiling, so clear the
+		// harness-level explicit GC_CEILING_DIRECTORIES that TestMain installs;
+		// otherwise the cap sits at testTempRoot (above root) and the walk
+		// would reach the city at root that this test expects to stay hidden.
+		t.Setenv("GC_CEILING_DIRECTORIES", "")
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 

@@ -157,10 +157,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if !workQueryHasReadyWork(normalized) {
 		return hookClaimResult{}
 	}
-	candidates, err := decodeHookClaimBeads(normalized)
+	candidates, skipped, err := decodeHookClaimBeads(normalized)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: requires JSON work_query output to identify claim candidates: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
+	}
+	for _, skip := range skipped {
+		fmt.Fprintf(stderr, "gc hook --claim: skipping bead %s with malformed metadata: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
 	if len(candidates) == 0 {
 		return hookClaimResult{}
@@ -1174,24 +1177,73 @@ func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {
 	return out
 }
 
-func decodeHookClaimBeads(output string) ([]beads.Bead, error) {
+// hookClaimSkip records a work_query element that parsed as JSON but could not
+// be unmarshaled into a claim candidate — e.g. a bead a buggy filer wrote with
+// a non-string metadata value (Bead.metadata is typed map[string]string). The
+// scan reports these so the caller can log and skip them instead of failing
+// wholesale: one malformed bead must not halt dispatch city-wide
+// (gastownhall/gascity ga-ljf).
+type hookClaimSkip struct {
+	ID  string
+	Err error
+}
+
+// decodeHookClaimBeads parses work_query output into claim candidates. It is
+// resilient to individual malformed beads: the array is split into raw
+// elements first, then each is typed-decoded independently, so a single
+// undecodable bead (e.g. nested-object metadata) is collected into skipped
+// rather than failing the whole scan. A top-level value that is not a JSON
+// array still returns an error, preserving the "requires JSON work_query
+// output" contract for non-JSON command output.
+func decodeHookClaimBeads(output string) ([]beads.Bead, []hookClaimSkip, error) {
 	output = strings.TrimSpace(output)
 	if output == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if !json.Valid([]byte(output)) {
 		extracted, ok := firstHookJSONValue(output)
 		if !ok {
-			return nil, errors.New("output is not JSON")
+			return nil, nil, errors.New("output is not JSON")
 		}
 		output = extracted
 	}
 	output = normalizeWorkQueryOutput(output)
-	var candidates []beads.Bead
-	if err := json.Unmarshal([]byte(output), &candidates); err != nil {
-		return nil, err
+	// Split into raw elements before typed decoding so one malformed bead
+	// cannot fail the whole batch. json.RawMessage accepts any valid JSON
+	// value, so the array split never trips on a nested-object metadata value
+	// the way a direct []beads.Bead unmarshal does.
+	var raws []json.RawMessage
+	if err := json.Unmarshal([]byte(output), &raws); err != nil {
+		return nil, nil, err
 	}
-	return candidates, nil
+	candidates := make([]beads.Bead, 0, len(raws))
+	var skipped []hookClaimSkip
+	for _, raw := range raws {
+		var bead beads.Bead
+		if err := json.Unmarshal(raw, &bead); err != nil {
+			skipped = append(skipped, hookClaimSkip{ID: hookClaimBeadIDForLog(raw), Err: err})
+			continue
+		}
+		candidates = append(candidates, bead)
+	}
+	return candidates, skipped, nil
+}
+
+// hookClaimBeadIDForLog best-effort extracts a bead id from a raw work_query
+// element for skip diagnostics. A malformed bead is typically malformed only
+// in its metadata; its id remains a decodable string, so logging it keeps the
+// skip actionable (the offending bead can be traced to fix the upstream
+// filer). Returns "<unknown>" when even the id cannot be read.
+func hookClaimBeadIDForLog(raw json.RawMessage) string {
+	var probe struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err == nil {
+		if id := strings.TrimSpace(probe.ID); id != "" {
+			return id
+		}
+	}
+	return "<unknown>"
 }
 
 func firstHookJSONValue(output string) (string, bool) {

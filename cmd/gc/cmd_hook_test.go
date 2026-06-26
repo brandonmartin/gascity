@@ -686,6 +686,94 @@ func TestDoHookClaimClaimsLegacyRunTargetWorkflowRoot(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimToleratesMalformedMetadataBead is the ga-ljf regression guard:
+// a single bead carrying a non-string metadata value (e.g. cashtuner's filer
+// wrote a nested object into Bead.metadata, which is typed map[string]string)
+// must NOT fail the whole work_query scan and break the claim/dispatch path
+// city-wide. The malformed bead is skipped and logged by id; the OTHER
+// claimable work in the same scan is still claimed.
+func TestDoHookClaimToleratesMalformedMetadataBead(t *testing.T) {
+	var claimedID string
+	runner := func(string, string) (string, error) {
+		// First element has a nested-object metadata value (the poison the
+		// upstream filer bug emits); second is plain, claimable pool work.
+		return `[
+			{"id":"poison-1","status":"open","metadata":{"gc.routed_to":"worker","cashtuner":{"boot_health":"degraded","n":3}}},
+			{"id":"good-1","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee, _ string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(malformed+good) = %d, want 0 (poison skipped, good claimed); stderr=%s", code, stderr.String())
+	}
+	if claimedID != "good-1" {
+		t.Fatalf("claimed ID = %q, want good-1 (the well-formed bead)", claimedID)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "good-1" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	// The skip must be observable (logged) and name the offending bead — a
+	// silently-dropped bead would mask the upstream filer bug.
+	if !strings.Contains(stderr.String(), "poison-1") {
+		t.Fatalf("stderr = %q, want it to log the skipped malformed bead id poison-1", stderr.String())
+	}
+}
+
+func TestDecodeHookClaimBeadsSkipsMalformedMetadata(t *testing.T) {
+	// Middle element carries a non-string metadata value; the well-formed
+	// beads on either side (including one with no metadata at all) must still
+	// decode.
+	output := `[
+		{"id":"ok-1","status":"open","metadata":{"gc.routed_to":"worker"}},
+		{"id":"bad-1","status":"open","metadata":{"cashtuner":{"nested":"object"}}},
+		{"id":"ok-2","status":"open"}
+	]`
+	candidates, skipped, err := decodeHookClaimBeads(output)
+	if err != nil {
+		t.Fatalf("decodeHookClaimBeads returned error %v, want nil (one malformed bead must be skipped, not fatal)", err)
+	}
+	gotIDs := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	if got, want := strings.Join(gotIDs, ","), "ok-1,ok-2"; got != want {
+		t.Fatalf("decoded candidate ids = %q, want %q", got, want)
+	}
+	if len(skipped) != 1 || skipped[0].ID != "bad-1" {
+		t.Fatalf("skipped = %+v, want exactly one skip naming bad-1", skipped)
+	}
+	if skipped[0].Err == nil {
+		t.Fatal("skipped[0].Err = nil, want the underlying decode error for diagnostics")
+	}
+}
+
+func TestDecodeHookClaimBeadsNonJSONStillErrors(t *testing.T) {
+	// Plain command text (not JSON at all) must remain a hard error — the
+	// per-element tolerance only relaxes decoding within a valid JSON array.
+	if _, _, err := decodeHookClaimBeads("hw-1  open  Fix the bug"); err == nil {
+		t.Fatal("decodeHookClaimBeads(text) = nil error, want a non-JSON error")
+	}
+}
+
 func TestDoHookClaimRejectsNonJSONWorkQueryOutput(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	ops := hookClaimOps{Runner: runner}

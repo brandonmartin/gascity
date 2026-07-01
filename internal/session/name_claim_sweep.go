@@ -74,9 +74,22 @@ func ReleaseStaleConfiguredNameClaims(store beads.Store, cfg *config.City, cityN
 			continue
 		}
 		// Confirm the closed bead belongs to the configured named session that
-		// owns this runtime name before releasing the claim, so an unrelated
-		// bead that merely persisted the name is left alone.
-		if !wasConfiguredNamedSession(b) && !configuredNamedIdentitySignalsMatch(b, identity) {
+		// OWNS this runtime name before releasing the claim, so an unrelated bead
+		// that merely persisted the name is left alone (sjarmak review, #3373).
+		//
+		// Ownership must be scoped to identity — the configured identity whose
+		// runtime name this bead reserves. wasConfiguredNamedSession(b) is owner-
+		// AGNOSTIC (it only asks "is this bead SOME configured named session?"),
+		// so a bead recorded for a DIFFERENT configured identity B that merely
+		// persisted identity A's runtime session_name would wrongly clear A's
+		// claim. Gate solely on the owner-scoped recognizer:
+		// configuredNamedIdentitySignalsMatch already matches the recorded
+		// identity, alias, agent_name, or template/role signal against THIS
+		// identity, covering every legacy/pre-ga841 phantom shape this sweep
+		// targets. The flag-only path is intentionally dropped — the boolean flag
+		// alone cannot attribute the bead to a specific identity, and a
+		// recorded-identity match is already one of the signals checked here.
+		if !configuredNamedIdentitySignalsMatch(b, identity) {
 			continue
 		}
 		update := beads.UpdateOpts{Metadata: map[string]string{"session_name": ""}}

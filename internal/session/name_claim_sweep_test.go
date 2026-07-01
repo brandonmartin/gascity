@@ -175,3 +175,62 @@ func TestReleaseStaleConfiguredNameClaims_IgnoresUnconfiguredName(t *testing.T) 
 		t.Fatalf("session_name = %q, want unchanged", sn)
 	}
 }
+
+// TestReleaseStaleConfiguredNameClaims_IgnoresMismatchedOwner is the ownership
+// negative case for the sjarmak review on #3373. A CLOSED bead reserves identity
+// A's (gastown.refinery) configured runtime name, but its own metadata records it
+// as a DIFFERENT configured identity B (flag + configured_named_identity =
+// gastown.witness). The sweep must NOT clear A's claim: recognizing the bead as
+// merely *some* configured named session (the owner-agnostic
+// wasConfiguredNamedSession path) would release it — exactly the "unrelated bead
+// that merely persisted the name" the doc-comment promises to leave alone.
+func TestReleaseStaleConfiguredNameClaims_IgnoresMismatchedOwner(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", BindingName: "gastown"},
+			{Name: "witness", BindingName: "gastown"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", BindingName: "gastown"},
+			{Template: "witness", BindingName: "gastown"},
+		},
+	}
+	// Identity A's runtime name is the one the bead reserves...
+	runtimeNameA := config.NamedSessionRuntimeName("test-city", cfg.Workspace, "gastown.refinery")
+	if runtimeNameA == "" {
+		t.Fatal("precondition: empty runtime name for gastown.refinery")
+	}
+	// ...but the bead identifies itself as a different configured identity B.
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":              runtimeNameA,
+			"configured_named_session":  "true",
+			"configured_named_identity": "gastown.witness",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	released, err := ReleaseStaleConfiguredNameClaims(store, cfg, "test-city")
+	if err != nil {
+		t.Fatalf("ReleaseStaleConfiguredNameClaims: %v", err)
+	}
+	if released != 0 {
+		t.Fatalf("released = %d, want 0 (bead owned by a different identity must not clear A's name)", released)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if sn := got.Metadata["session_name"]; sn != runtimeNameA {
+		t.Fatalf("session_name = %q, want %q (unchanged)", sn, runtimeNameA)
+	}
+}

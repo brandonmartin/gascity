@@ -60,6 +60,11 @@ func carriedPoolRoute(b beads.Bead) string {
 // which pool ad-hoc work belongs to is the owner's judgment, not the
 // controller's. Idempotent: an already-routed bead yields no route and is
 // skipped.
+//
+// Concurrency-safe: the open-bead List is a snapshot, so before writing each
+// bead is re-read live and skipped unless it is still open, unassigned, and
+// carries the same recoverable route. This prevents the re-stamp from clobbering
+// a route a polecat consumed by claiming the bead after the snapshot (ga-bgu).
 func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 	if store == nil {
 		return 0, nil
@@ -88,6 +93,24 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 		// holds regardless of store-level filtering semantics.)
 		if b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
 			continue
+		}
+		// Re-read the live bead immediately before writing. The open-bead List is
+		// a snapshot; a polecat may have claimed this bead in the window since,
+		// which atomically flips it open->in_progress, records gc.run_target, and
+		// consumes gc.routed_to in one update (ga-sa0). A blind SetMetadata keyed
+		// on the stale snapshot would re-stamp gc.routed_to onto the now-claimed
+		// bead, undoing that consumption and handing the dispatcher a phantom
+		// pool-demand bead that flaps open<->in_progress and thrashes owners
+		// (ga-bgu). Recomputing carriedPoolRoute on the live bead also yields ""
+		// once another restore has already re-stamped it, so concurrent passes
+		// stay idempotent.
+		live, getErr := store.Get(b.ID)
+		if getErr != nil {
+			errs = append(errs, fmt.Errorf("bead %s: re-reading before route restore: %w", b.ID, getErr))
+			continue
+		}
+		if live.Status != "open" || strings.TrimSpace(live.Assignee) != "" || carriedPoolRoute(live) != route {
+			continue // claimed, closed, or already routed since the snapshot — don't clobber
 		}
 		if setErr := store.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, route); setErr != nil {
 			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", b.ID, route, setErr))

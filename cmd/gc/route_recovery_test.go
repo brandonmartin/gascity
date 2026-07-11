@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -111,6 +112,70 @@ func TestRestoreCarriedWorkRoutesNilStore(t *testing.T) {
 	}
 	if restored != 0 {
 		t.Errorf("restored = %d, want 0 for nil store", restored)
+	}
+}
+
+// staleOpenListStore returns a fixed open-bead snapshot from List while
+// delegating every live read/write (Get, SetMetadata, …) to an embedded store.
+// It reproduces the reconcile TOCTOU: restoreCarriedWorkRoutes captures the open
+// snapshot, but a polecat claims the bead before the per-bead re-stamp runs, so
+// the live store already holds the claimed (in_progress) bead.
+type staleOpenListStore struct {
+	beads.Store
+	openSnapshot []beads.Bead
+}
+
+func (s staleOpenListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return append([]beads.Bead(nil), s.openSnapshot...), nil
+}
+
+// TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead covers ga-bgu: restore must
+// not re-stamp gc.routed_to onto a bead that a polecat claimed after the
+// open-bead List snapshot. The claim atomically consumes the pool route
+// (open->in_progress, assignee set, gc.routed_to cleared, gc.run_target recorded
+// — ga-sa0). A blind SetMetadata keyed on the stale snapshot resurrects
+// gc.routed_to on the now-in_progress bead, feeding the dispatcher a phantom
+// pool-demand bead that flaps open<->in_progress. Restore must re-read the live
+// bead and skip the write when it is no longer open+unassigned.
+func TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead(t *testing.T) {
+	const pool = "gascity/gastown.polecat"
+	// Live store: the bead has ALREADY been claimed — open->in_progress, assignee
+	// set, gc.routed_to consumed, gc.run_target carrying the route (ga-sa0 claim).
+	live := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "T-1", Title: "work", Type: "task", Status: "in_progress",
+			Assignee: pool + "/th-abc", Metadata: map[string]string{
+				"gc.run_target": pool,
+			}},
+	}, nil)
+	// Stale snapshot: List captured T-1 BEFORE the claim — open, unassigned,
+	// unrouted, carrying gc.run_target, so carriedPoolRoute(snapshot) == pool.
+	store := staleOpenListStore{
+		Store: live,
+		openSnapshot: []beads.Bead{
+			{ID: "T-1", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{
+				"gc.run_target": pool,
+			}},
+		},
+	}
+
+	restored, err := restoreCarriedWorkRoutes(store)
+	if err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0 (must not re-stamp a bead claimed since the snapshot)", restored)
+	}
+	// The claim's route consumption must survive: gc.routed_to stays empty.
+	if got := mustRoutedTo(t, live, "T-1"); got != "" {
+		t.Fatalf("T-1 gc.routed_to = %q, want empty (claim consumed the route; restore must not re-stamp)", got)
+	}
+	// And the bead must remain claimed, not silently mutated back toward demand.
+	b, err := live.Get("T-1")
+	if err != nil {
+		t.Fatalf("get T-1: %v", err)
+	}
+	if b.Status != "in_progress" || strings.TrimSpace(b.Assignee) == "" {
+		t.Fatalf("T-1 status=%q assignee=%q, want in_progress + assigned (untouched)", b.Status, b.Assignee)
 	}
 }
 

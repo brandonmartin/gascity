@@ -142,10 +142,12 @@ func TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead(t *testing.T) {
 	// Live store: the bead has ALREADY been claimed — open->in_progress, assignee
 	// set, gc.routed_to consumed, gc.run_target carrying the route (ga-sa0 claim).
 	live := beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "T-1", Title: "work", Type: "task", Status: "in_progress",
+		{
+			ID: "T-1", Title: "work", Type: "task", Status: "in_progress",
 			Assignee: pool + "/th-abc", Metadata: map[string]string{
 				"gc.run_target": pool,
-			}},
+			},
+		},
 	}, nil)
 	// Stale snapshot: List captured T-1 BEFORE the claim — open, unassigned,
 	// unrouted, carrying gc.run_target, so carriedPoolRoute(snapshot) == pool.

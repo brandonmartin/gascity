@@ -181,6 +181,84 @@ func TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead(t *testing.T) {
 	}
 }
 
+// staleCacheStore models a CachingStore-wrapped production store whose plain Get
+// returns a STALE cached bead — a cross-process claim not yet absorbed into this
+// process's cache — while its authoritative Live handle bypasses the cache to the
+// backing store and sees the claim. List likewise serves the stale open snapshot.
+// It reproduces the production hazard restoreCarriedWorkRoutes must survive: both
+// the List snapshot and a plain store.Get show the pre-claim bead, so only a
+// cache-bypassing live read (HandlesFor(store).Live.Get) catches the race.
+type staleCacheStore struct {
+	beads.Store            // backing/live store: authoritative, already holds the claim
+	cached      beads.Bead // stale cached view returned by plain Get and List
+}
+
+// Get returns the stale cached bead (a cache hit that predates the claim).
+func (s staleCacheStore) Get(string) (beads.Bead, error) {
+	return s.cached, nil
+}
+
+// List returns the stale open snapshot.
+func (s staleCacheStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return []beads.Bead{s.cached}, nil
+}
+
+// Handles exposes a Live reader that bypasses the stale cache to the backing
+// store, mirroring CachingStore.Handles().Live.
+func (s staleCacheStore) Handles() beads.StoreHandles {
+	h := beads.HandlesFor(s.Store)
+	return beads.StoreHandles{Cached: h.Cached, Live: h.Live, Writer: s.Store}
+}
+
+// TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead covers the CachingStore
+// leg of ga-bgu: on production stores a plain Get can return a cached bead that
+// predates a cross-process claim, so restore must re-read through the
+// authoritative cache-bypassing live handle. With a stale-cache Get the bead
+// still looks open+unassigned+unrouted; only the live backing read shows the
+// claim (in_progress, assigned, route consumed). Restore must skip the re-stamp.
+// It fails against a plain store.Get re-read and passes with handles.Live.Get.
+func TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead(t *testing.T) {
+	const pool = "gascity/gastown.polecat"
+	// Backing/live store: T-1 has ALREADY been claimed (ga-sa0).
+	live := beads.NewMemStoreFrom(0, []beads.Bead{
+		{
+			ID: "T-1", Title: "work", Type: "task", Status: "in_progress",
+			Assignee: pool + "/th-abc", Metadata: map[string]string{
+				"gc.run_target": pool,
+			},
+		},
+	}, nil)
+	// Stale cache: both List and plain Get still return the pre-claim T-1 — open,
+	// unassigned, unrouted, carrying gc.run_target — so a plain re-read would
+	// clobber the claim. Only HandlesFor(store).Live.Get sees the live claim.
+	store := staleCacheStore{
+		Store: live,
+		cached: beads.Bead{
+			ID: "T-1", Title: "work", Type: "task", Status: "open",
+			Metadata: map[string]string{"gc.run_target": pool},
+		},
+	}
+
+	restored, err := restoreCarriedWorkRoutes(store)
+	if err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0 (stale-cache Get must not defeat the claim guard)", restored)
+	}
+	// The claim's route consumption must survive in the live store.
+	if got := mustRoutedTo(t, live, "T-1"); got != "" {
+		t.Fatalf("T-1 gc.routed_to = %q, want empty (claim consumed the route; restore must not re-stamp)", got)
+	}
+	b, err := live.Get("T-1")
+	if err != nil {
+		t.Fatalf("get T-1: %v", err)
+	}
+	if b.Status != "in_progress" || strings.TrimSpace(b.Assignee) == "" {
+		t.Fatalf("T-1 status=%q assignee=%q, want in_progress + assigned (untouched)", b.Status, b.Assignee)
+	}
+}
+
 // TestCityRuntimeRecoverUnroutedWorkRoutes confirms the controller method
 // sweeps both the city store and every rig store, and recovers both carried-route
 // shapes (workflow root and plain work bead).

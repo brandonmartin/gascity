@@ -695,10 +695,17 @@ func TestDoHookClaimClaimsLegacyRunTargetWorkflowRoot(t *testing.T) {
 func TestDoHookClaimToleratesMalformedMetadataBead(t *testing.T) {
 	var claimedID string
 	runner := func(string, string) (string, error) {
-		// First element has a nested-object metadata value (the poison the
-		// upstream filer bug emits); second is plain, claimable pool work.
+		// First element is undecodable — "status" is a number where beads.Bead
+		// declares a string — so it is skipped; second is plain, claimable pool
+		// work and must still be claimed.
+		//
+		// Deliberately NOT a nested-object metadata value: normalizeWorkQueryOutput
+		// coerces those to strings before the decode, so such a bead decodes fine
+		// and is claimed normally rather than skipped (the stronger upstream
+		// outcome). The skip path this test guards is for type errors outside
+		// metadata, which normalization does not repair.
 		return `[
-			{"id":"poison-1","status":"open","metadata":{"gc.routed_to":"worker","cashtuner":{"boot_health":"degraded","n":3}}},
+			{"id":"poison-1","status":5,"metadata":{"gc.routed_to":"worker"}},
 			{"id":"good-1","status":"open","metadata":{"gc.routed_to":"worker"}}
 		]`, nil
 	}

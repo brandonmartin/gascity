@@ -109,22 +109,28 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 // session beads are included because the worker session is typically gone by
 // the time this sweep runs.
 func buildDetachedOrphanRouteIndex(store beads.Store) (map[string]string, error) {
-	all, listErr := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+	// Routed through the sessions class front door rather than reading session
+	// beads raw, per the typed-class edge guard.
+	all, listErr := sessionFrontDoor(store).ListAll(session.ListAllOptions{IncludeClosed: true})
 	// Hard errors return nil rows; surface them to the caller.
 	// Partial results still yield rows we can use — don't propagate.
 	if listErr != nil && !beads.IsPartialResult(listErr) {
 		return nil, fmt.Errorf("listing session beads: %w", listErr)
 	}
 	index := make(map[string]string, len(all))
-	for _, sb := range all {
-		sn := strings.TrimSpace(sb.Metadata["session_name"])
+	for _, si := range all {
+		// SessionNameMetadata is the RAW session_name, matching the previous
+		// bead-level read. Info.SessionName must NOT be used here: it applies a
+		// sessionNameFor(ID) fallback that would synthesize a name for every
+		// session bead and defeat the empty-name skip below.
+		sn := strings.TrimSpace(si.SessionNameMetadata)
 		if sn == "" {
 			continue
 		}
 		if _, exists := index[sn]; exists {
 			continue // keep first match; duplicate session names are rare edge cases
 		}
-		if route := retiredSessionFallbackRoute(sb); route != "" {
+		if route := retiredSessionFallbackRouteInfo(si); route != "" {
 			index[sn] = route
 		}
 	}

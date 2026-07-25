@@ -738,13 +738,21 @@ func TestDoHookClaimToleratesMalformedMetadataBead(t *testing.T) {
 	}
 }
 
-func TestDecodeHookClaimBeadsSkipsMalformedMetadata(t *testing.T) {
-	// Middle element carries a non-string metadata value; the well-formed
-	// beads on either side (including one with no metadata at all) must still
-	// decode.
+func TestDecodeHookClaimBeadsSkipsUndecodableBead(t *testing.T) {
+	// Middle element is undecodable: "status" is a number where beads.Bead
+	// declares a string. The well-formed beads on either side must still
+	// decode, so one bad bead cannot halt dispatch city-wide (ga-ljf).
+	//
+	// Deliberately NOT a non-string *metadata* value: normalizeWorkQueryOutput
+	// coerces those to strings before this decode runs, so such a bead decodes
+	// successfully and is never skipped — pinned by
+	// TestDecodeHookClaimBeadsToleratesNonStringMetadata and
+	// TestDecodeHookClaimBeadsOneBadBeadDoesNotPoisonBatch. The per-element
+	// split this test covers is what protects the batch from type errors
+	// OUTSIDE metadata, which normalization does not repair.
 	output := `[
 		{"id":"ok-1","status":"open","metadata":{"gc.routed_to":"worker"}},
-		{"id":"bad-1","status":"open","metadata":{"cashtuner":{"nested":"object"}}},
+		{"id":"bad-1","status":5},
 		{"id":"ok-2","status":"open"}
 	]`
 	candidates, skipped, err := decodeHookClaimBeads(output)

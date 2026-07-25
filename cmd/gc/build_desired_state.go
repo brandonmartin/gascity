@@ -2207,12 +2207,16 @@ func isOpenAssignedMoleculeWork(b beads.Bead) bool {
 // metadata and of the store's readiness model (deferred/ready-excluded handoffs
 // included). The named-identity scope keeps pool-release semantics untouched.
 //
-// Case (b) is restricted to non-ephemeral beads: ephemeral (wisp) work assigned
-// to a named identity is already collected by
-// appendOpenAssignedMoleculeWorkUnique, which admits assigned root-only
-// molecule wisps and marks them ready. Excluding them here keeps that pass the
-// single owner of ephemeral assigned work and matches the namedWorkReady policy
-// that also skips it. Ephemeral routed work still flows through case (a)
+// Case (b) is restricted to non-ephemeral, non-molecule beads. Molecule-typed
+// work assigned to a named identity belongs to
+// appendOpenAssignedMoleculeWorkUnique, which is the single owner of that
+// decision: it admits assigned ROOT-ONLY wisp/workflow molecules (the executable
+// turn) and deliberately ignores a plain multi-step molecule CONTAINER, whose
+// child steps — not the root — are the actionable work. Admitting containers
+// here would resurrect them as phantom wake demand and regress
+// TestCollectAssignedWorkBeadsIgnoresOpenAssignedMoleculeContainer. The handoff
+// case (b) exists for is a real work bead (type=task), so the narrower scope
+// loses nothing. Ephemeral and molecule routed work still flows through case (a)
 // unchanged.
 func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, namedIdentities map[string]struct{}) {
 	for _, b := range beadList {
@@ -2221,7 +2225,8 @@ func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeR
 			continue
 		}
 		routed := routedToOrLegacyWorkflowTarget(b) != ""
-		namedHandoff := !b.Ephemeral && isConfiguredNamedSessionAssignee(assignee, namedIdentities)
+		namedHandoff := !b.Ephemeral && !beads.IsMoleculeType(b.Type) &&
+			isConfiguredNamedSessionAssignee(assignee, namedIdentities)
 		if !routed && !namedHandoff {
 			continue
 		}

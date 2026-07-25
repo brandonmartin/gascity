@@ -1,5 +1,30 @@
 # Gap-1 wisp-wake fix: completeness audit
 
+> **SUPERSEDED — retained as historical evidence, not as a description of
+> current code (ga-lwk / ga-zme forward-port, 2026-07-25).**
+>
+> The mechanism this audit reviews no longer exists in this tree. Upstream
+> solved the same problem independently in `c4003d89b` ("fix: wake assigned
+> root-only molecule wisps"), which added `appendOpenAssignedMoleculeWorkUnique`
+> — its doc names this exact case: *"an assigned root-only wisp is the
+> executable turn for on-demand named sessions such as the Gas Town refinery
+> patrol — so these beads contribute to readyIDs"*.
+>
+> The two approaches are opposite and cannot coexist: upstream **includes**
+> assigned root-only molecule wisps in demand, whereas the fork's
+> `excludePatrolWakeWisps` **excluded** them and relied on a separate bounded
+> probe (`namedSessionPatrolWispWakeDemand`). Applying the fork's filter on top
+> of upstream would strip precisely the beads upstream's fix exists to include.
+>
+> The forward-port therefore dropped the fork's wisp-wake commits
+> (`c2a521b0e`, `885af760a`, and `95334e485` which only tested them) and kept
+> upstream's mechanism. **Every symbol referenced below —
+> `excludePatrolWakeWisps`, `namedSessionPatrolWispWakeDemand`,
+> `isPatrolWispWakeCandidate`, `isPatrolFormulaSignal`,
+> `namedSessionWispWakeProbeLimit`, `listForControllerDemand` — is absent from
+> this tree and from `upstream/main`.** Finding F1's "restore the core" ask is
+> resolved by upstream's mechanism, not by re-porting the fork's.
+
 **Bead:** ga-082 (follow-up) · **Parent:** ga-n2d (still open) · **Date:** 2026-06-11
 
 This audit answers the two reviewable asks on ga-082 — (1) review the

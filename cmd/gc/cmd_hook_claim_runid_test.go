@@ -33,7 +33,7 @@ func claimOpsForRunMap(beadID string, claimedMeta map[string]string, spy *publis
 		Runner: func(string, string) (string, error) {
 			return `[{"id":"` + beadID + `","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
 		},
-		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string, _ string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
 		ResolveWorkBranch: func(string) string { return "" },
@@ -156,7 +156,7 @@ func TestDoHookClaimPublishesRunMapOnExistingAssignment(t *testing.T) {
 	ops.Runner = func(string, string) (string, error) {
 		return `[{"id":"hw-existing","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-existing"}}]`, nil
 	}
-	ops.Claim = func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+	ops.Claim = func(context.Context, string, []string, string, string, string) (beads.Bead, bool, error) {
 		t.Fatal("Claim must not run for an existing assignment")
 		return beads.Bead{}, false, nil
 	}

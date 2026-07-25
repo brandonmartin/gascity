@@ -537,7 +537,7 @@ func TestDoHookClaimEmitsRejectedOnLostClaim(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			if beadID == "hw-lost" {
 				// Lost the race: the re-read shows the bead owned by worker-2.
 				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
@@ -585,7 +585,7 @@ func TestDoHookClaimStampsWorkBranch(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
 		ResolveWorkBranch: func(string) string { return "bd-hw-stamp" },
@@ -620,7 +620,7 @@ func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem"}}, true, nil
 		},
 		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
@@ -884,7 +884,7 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 	}
 	var claimDir string
 	ops := hookClaimOps{
-		Claim: func(_ context.Context, dir string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, dir string, _ []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			if beadID == "hw-city" {
 				// Lost the race: a different worker already owns the city row.
 				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
@@ -946,7 +946,7 @@ func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *test
 		}
 	}
 	ops := hookClaimOps{
-		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string, _ string) (beads.Bead, bool, error) {
 			// Lost the race: a different worker already owns the only city row.
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
 		},
@@ -1011,7 +1011,7 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 	var claimDir string
 	var claimEnv []string
 	ops := hookClaimOps{
-		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			claimDir, claimEnv = dir, env
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
@@ -1891,7 +1891,7 @@ func TestPoolWorkerIdentityCandidatesExcludeBareTemplate(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+		Claim: func(context.Context, string, []string, string, string, string) (beads.Bead, bool, error) {
 			t.Fatal("store.Claim ran: a foreign in_progress bead must never reach the CAS")
 			return beads.Bead{}, false, nil
 		},
@@ -1942,7 +1942,7 @@ func TestHookClaimSkipsMessageBeadsAheadOfRoutedWork(t *testing.T) {
 	claimed := false
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string, _ string) (beads.Bead, bool, error) {
 			if id != workID {
 				t.Fatalf("store.Claim called for %q, want the routed work bead %q (a mail bead must never reach the claim mutation)", id, workID)
 			}
@@ -2664,7 +2664,7 @@ func TestDoHookClaimSkipsUnclaimableCandidateError(t *testing.T) {
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			attempts = append(attempts, beadID)
 			if beadID == "hw-unresolvable" {
 				return beads.Bead{}, false, errors.New(`Error resolving hw-unresolvable: no issue found matching "hw-unresolvable"`)
@@ -2717,7 +2717,7 @@ func TestDoHookClaimDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) {
 	drained := false
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string, _ string) (beads.Bead, bool, error) {
 			attempts = append(attempts, beadID)
 			return beads.Bead{}, false, fmt.Errorf("claiming %s: store write timeout", beadID)
 		},
@@ -2769,7 +2769,7 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 		return `[{"id":"hw-city","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
 	}
 	ops := hookClaimOps{
-		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string, _ string) (beads.Bead, bool, error) {
 			return beads.Bead{}, false, fmt.Errorf("claiming %s: store write timeout", beadID)
 		},
 		EmitClaimRejected: func(string, string, string) {},

@@ -36,7 +36,7 @@ func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing
 		}
 	}
 
-	claimed, ok, err := hookClaimWithBdStore(context.Background(), "/rig", nil, "work-1", "worker-1")
+	claimed, ok, err := hookClaimWithBdStore(context.Background(), "/rig", nil, "work-1", "worker-1", "")
 	if err != nil {
 		t.Fatalf("hookClaimWithBdStore: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestDoHookClaimStopsAfterCommittedClaimReadbackFailure(t *testing.T) {
 	drained := false
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			attempts = append(attempts, beadID)
 			return beads.Bead{ID: beadID, Assignee: assignee}, true, errors.New("canonical read failed")
 		},
@@ -120,7 +120,7 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) { return string(output), nil },
-		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, dir string, env []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			claimedDir = dir
 			claimedEnv = append([]string(nil), env...)
 			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress", Metadata: candidates[0].Metadata}, true, nil
@@ -196,7 +196,7 @@ func TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt(t *testing.T) {
 	var claimedBead string
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) { return string(output), nil },
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string, _ string) (beads.Bead, bool, error) {
 			claimedBead = beadID
 			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
 		},

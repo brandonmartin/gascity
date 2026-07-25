@@ -204,7 +204,7 @@ func TestCanonicalizeLegacyBoundAssignedWorkWokenSessionClaimsRehomedWork(t *tes
 	}
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) { return string(workQueryOutput), nil },
-		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+		Claim: func(context.Context, string, []string, string, string, string) (beads.Bead, bool, error) {
 			t.Fatal("claim must not run: in-progress work already assigned to the canonical identity is an existing assignment")
 			return beads.Bead{}, false, nil
 		},
@@ -348,7 +348,7 @@ func TestCanonicalizeLegacyBoundUnassignedRoutedWorkCanonicalWorkerClaims(t *tes
 	claimInvoked := false
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) { return string(workQueryOutput), nil },
-		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string, _ string) (beads.Bead, bool, error) {
 			claimInvoked = true
 			claimed := rehomed
 			claimed.ID = id

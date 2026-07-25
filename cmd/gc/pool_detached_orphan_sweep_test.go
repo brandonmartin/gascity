@@ -33,8 +33,8 @@ func TestSweepDetachedHandoffOrphans_RestoresRoute(t *testing.T) {
 		Title:  "orphaned work",
 		Status: "open",
 		Metadata: map[string]string{
-			"branch":                          "polecat/ga-abc",
-			beadmeta.SessionNameMetadataKey:   sessionBead.Metadata["session_name"],
+			"branch":                        "polecat/ga-abc",
+			beadmeta.SessionNameMetadataKey: sessionBead.Metadata["session_name"],
 			// gc.routed_to and assignee left empty by failed done sequence
 		},
 	})
@@ -73,9 +73,9 @@ func TestSweepDetachedHandoffOrphans_SkipsAlreadyRouted(t *testing.T) {
 		Title:  "routed work",
 		Status: "open",
 		Metadata: map[string]string{
-			"branch":                          "polecat/ga-routed",
-			beadmeta.SessionNameMetadataKey:   "some-session",
-			beadmeta.RoutedToMetadataKey:      "gascity/gastown.polecat",
+			"branch":                        "polecat/ga-routed",
+			beadmeta.SessionNameMetadataKey: "some-session",
+			beadmeta.RoutedToMetadataKey:    "gascity/gastown.polecat",
 		},
 	})
 	if err != nil {

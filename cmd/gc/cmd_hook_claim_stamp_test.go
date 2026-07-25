@@ -52,7 +52,7 @@ func noopStampWorkMeta(context.Context, string, []string, string, string, map[st
 func poolClaimOps(runner string, claimedMeta map[string]string, branch string, spy *stampMetaSpy) hookClaimOps {
 	return hookClaimOps{
 		Runner: func(string, string) (string, error) { return runner, nil },
-		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string, _ string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: claimedMeta}, true, nil
 		},
 		ResolveWorkBranch: func(string) string { return branch },
@@ -117,7 +117,7 @@ func TestDoHookClaimStampsSessionIdentityOnAdoption(t *testing.T) {
 		Runner: func(string, string) (string, error) {
 			return `[{"id":"hw-adopt","status":"in_progress","assignee":"gc__role-mc-sess1","metadata":{"gc.routed_to":"worker"}}]`, nil
 		},
-		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+		Claim: func(context.Context, string, []string, string, string, string) (beads.Bead, bool, error) {
 			t.Error("Claim must not be called on the existing-assignment path")
 			return beads.Bead{}, false, nil
 		},

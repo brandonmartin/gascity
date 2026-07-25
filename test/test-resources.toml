@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 535
+baseline_calls = 537
 baseline_files = 163
 reported_calls = 495
 reported_files = 135
@@ -51,7 +51,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 396
+baseline_calls = 398
 baseline_files = 112
 reported_calls = 380
 reported_files = 98
@@ -77,7 +77,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4323
+baseline_calls = 4325
 baseline_files = 202
 reported_calls = 3960
 reported_files = 184
@@ -116,7 +116,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 255
 reported_files = 56
@@ -333,7 +333,7 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 391
+baseline_calls = 393
 baseline_files = 109
 reported_calls = 394
 reported_files = 105
@@ -359,7 +359,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4317
+baseline_calls = 4318
 baseline_files = 202
 reported_calls = 4348
 reported_files = 200
@@ -398,7 +398,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 300
 reported_files = 66

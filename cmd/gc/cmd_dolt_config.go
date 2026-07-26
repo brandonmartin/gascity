@@ -201,6 +201,13 @@ listener:
   # (200-460 idle Sleep conns observed), burning Dolt CPU managing the swarm.
   # The managed default reaps idle sockets promptly; city.toml [dolt]
   # overrides can raise it for cities with slower live operations.
+  #
+  # That same churn sets max_connections: live connections track the operation
+  # arrival rate times read_timeout, so a busy fleet sits at several hundred
+  # with nothing wrong. The cap is sized above the expected peak because
+  # exhausting it is not useful backpressure — it fails every reader and writer
+  # at once and triggers recovery. Override via city.toml [dolt]
+  # max_connections.
   max_connections: %d
   back_log: 50
   max_connections_timeout_millis: 5000

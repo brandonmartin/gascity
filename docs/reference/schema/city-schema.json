@@ -1449,7 +1449,7 @@
         "max_connections": {
           "type": "integer",
           "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",
-          "default": 256
+          "default": 1024
         },
         "read_timeout_millis": {
           "type": "integer",

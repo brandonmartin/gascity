@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -389,14 +390,17 @@ backend = "dolt"
 }
 
 func TestRecoverManagedDoltObservedRebindPossible(t *testing.T) {
+	alive := func(int) bool { return true }
+	dead := func(int) bool { return false }
+
 	t.Run("empty port always possible", func(t *testing.T) {
-		if !recoverManagedDoltObservedRebindPossible(t.TempDir(), "") {
+		if !recoverManagedDoltObservedRebindPossible(t.TempDir(), "", alive) {
 			t.Error("empty requestedPort should return true")
 		}
 	})
 
 	t.Run("no state files returns false", func(t *testing.T) {
-		if recoverManagedDoltObservedRebindPossible(t.TempDir(), "3306") {
+		if recoverManagedDoltObservedRebindPossible(t.TempDir(), "3306", alive) {
 			t.Error("missing state files should return false")
 		}
 	})
@@ -411,7 +415,7 @@ func TestRecoverManagedDoltObservedRebindPossible(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("writeDoltRuntimeStateFile: %v", err)
 		}
-		if !recoverManagedDoltObservedRebindPossible(cityPath, "3306") {
+		if !recoverManagedDoltObservedRebindPossible(cityPath, "3306", alive) {
 			t.Error("different port should return true")
 		}
 	})
@@ -426,8 +430,78 @@ func TestRecoverManagedDoltObservedRebindPossible(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("writeDoltRuntimeStateFile: %v", err)
 		}
-		if recoverManagedDoltObservedRebindPossible(cityPath, "3306") {
+		if recoverManagedDoltObservedRebindPossible(cityPath, "3306", alive) {
 			t.Error("same port should return false")
+		}
+	})
+
+	// ga-oigp: dolt-state.json advertised a long-dead pid as running:true for
+	// the whole outage window. A dead pid is not evidence that some other
+	// generation rebound a different port, and trusting it sent one recovery
+	// racer at a port nobody was serving.
+	t.Run("dead pid on a different port returns false", func(t *testing.T) {
+		cityPath := t.TempDir()
+		statePath := providerManagedDoltStatePath(cityPath)
+		if err := writeDoltRuntimeStateFile(statePath, doltRuntimeState{
+			Running: true,
+			PID:     1234,
+			Port:    3307,
+		}); err != nil {
+			t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+		}
+		if recoverManagedDoltObservedRebindPossible(cityPath, "3306", dead) {
+			t.Error("dead pid should not be treated as an observed rebind")
+		}
+	})
+
+	t.Run("nil liveness probe falls back to real pid check", func(t *testing.T) {
+		cityPath := t.TempDir()
+		statePath := providerManagedDoltStatePath(cityPath)
+		if err := writeDoltRuntimeStateFile(statePath, doltRuntimeState{
+			Running: true,
+			PID:     os.Getpid(),
+			Port:    3307,
+		}); err != nil {
+			t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+		}
+		if !recoverManagedDoltObservedRebindPossible(cityPath, "3306", nil) {
+			t.Error("live pid should return true with the default liveness probe")
+		}
+	})
+}
+
+// TestRecoverManagedDoltPopulateReportFromRuntimeState covers ga-oigp defect
+// D2: recovery must not echo a pid it has not confirmed alive.
+func TestRecoverManagedDoltPopulateReportFromRuntimeState(t *testing.T) {
+	writeState := func(t *testing.T, cityPath string, pid int) {
+		t.Helper()
+		if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
+			Running: true,
+			PID:     pid,
+			Port:    3306,
+			DataDir: filepath.Join(cityPath, ".beads", "dolt"),
+		}); err != nil {
+			t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+		}
+	}
+
+	t.Run("live pid is reported", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeState(t, cityPath, os.Getpid())
+		var report managedDoltRecoverReport
+		recoverManagedDoltPopulateReportFromRuntimeState(cityPath, "3306", &report, func(int) bool { return true })
+		if !report.HadPID || report.PID != os.Getpid() || report.Port != 3306 {
+			t.Fatalf("report = %+v, want HadPID=true PID=%d Port=3306", report, os.Getpid())
+		}
+	})
+
+	t.Run("dead pid is not reported", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeState(t, cityPath, 1234)
+		var report managedDoltRecoverReport
+		recoverManagedDoltPopulateReportFromRuntimeState(cityPath, "3306", &report, func(int) bool { return false })
+		if report.HadPID || report.PID != 0 {
+			t.Fatalf("report = %+v, want a dead pid to be ignored", report)
 		}
 	})
 }
@@ -463,7 +537,9 @@ func writeRecoveryRuntimeState(t *testing.T, cityPath string, pid, port int) {
 
 func TestRecoverManagedDolt_SkipsRestartWhenProbeHealthy(t *testing.T) {
 	cityPath := setupRecoveryTestCity(t)
-	writeRecoveryRuntimeState(t, cityPath, 4321, 3306)
+	// A live pid: recovery only echoes a pid it has confirmed alive (ga-oigp D2).
+	livePID := os.Getpid()
+	writeRecoveryRuntimeState(t, cityPath, livePID, 3306)
 
 	oldProbe := managedDoltQueryProbeDirectFn
 	oldReadOnly := managedDoltReadOnlyStateDirectFn
@@ -494,8 +570,8 @@ func TestRecoverManagedDolt_SkipsRestartWhenProbeHealthy(t *testing.T) {
 	if !report.HadPID {
 		t.Error("expected HadPID=true from runtime state")
 	}
-	if report.PID != 4321 {
-		t.Errorf("expected PID=4321 from runtime state, got %d", report.PID)
+	if report.PID != livePID {
+		t.Errorf("expected PID=%d from runtime state, got %d", livePID, report.PID)
 	}
 	if report.Port != 3306 {
 		t.Errorf("expected Port=3306 from runtime state, got %d", report.Port)
@@ -626,5 +702,234 @@ func TestRecoverManagedDolt_ProceedsWhenHealthCheckErrors(t *testing.T) {
 	}
 	if report.Ready {
 		t.Error("expected Ready=false when health check errors")
+	}
+}
+
+// settleTestOps builds a recovery op set whose query probe fails for the first
+// failures calls and succeeds afterwards, simulating a freshly started dolt
+// server that is still opening its databases.
+func settleTestOps(t *testing.T, failures int, gotOps *[]string) (managedDoltRecoveryOps, *int) {
+	t.Helper()
+	probes := 0
+	return managedDoltRecoveryOps{
+		queryProbe: func(_, _, _ string) error {
+			probes++
+			if probes <= failures {
+				return errors.New("dolt is still opening databases")
+			}
+			return nil
+		},
+		healthCheck: func(_, _, _ string) (managedDoltSQLHealthReport, error) {
+			return managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "false"}, nil
+		},
+		stop: func(_, _ string) (managedDoltStopReport, error) {
+			*gotOps = append(*gotOps, "stop")
+			return managedDoltStopReport{}, nil
+		},
+		preflightCleanup: func(string) error {
+			*gotOps = append(*gotOps, "preflight")
+			return nil
+		},
+		start: func(_, _, _, _, _ string, _ time.Duration) (managedDoltStartReport, error) {
+			*gotOps = append(*gotOps, "start")
+			return managedDoltStartReport{Ready: true, PID: 999, Port: 3306}, nil
+		},
+		publish:       func(string) error { return nil },
+		failedCleanup: func(_ string, _, _ int, cause error) error { return cause },
+	}, &probes
+}
+
+// TestRecoverManagedDoltAdoptRunningServer covers ga-oigp defect D1: a recovery
+// that only got the lifecycle lock because another gc process just released it
+// must wait for that process's replacement server instead of killing it.
+func TestRecoverManagedDoltAdoptRunningServer(t *testing.T) {
+	t.Run("settles while the listener warms up", func(t *testing.T) {
+		var gotOps []string
+		ops, probes := settleTestOps(t, 2, &gotOps)
+
+		oldReachable := managedDoltRecoverListenerReachableFn
+		t.Cleanup(func() { managedDoltRecoverListenerReachableFn = oldReachable })
+		managedDoltRecoverListenerReachableFn = func(_, _ string) bool { return true }
+
+		var report managedDoltRecoverReport
+		adopted, err := recoverManagedDoltAdoptRunningServer(
+			t.TempDir(), "127.0.0.1", "3306", "root",
+			time.Now().Add(10*time.Second), true, ops, &report,
+		)
+		if err != nil {
+			t.Fatalf("recoverManagedDoltAdoptRunningServer: %v", err)
+		}
+		if !adopted {
+			t.Fatal("adopted = false, want the warming server to be adopted")
+		}
+		if *probes != 3 {
+			t.Errorf("query probes = %d, want 3 (two warm-up failures then success)", *probes)
+		}
+		if len(gotOps) != 0 {
+			t.Errorf("lifecycle ops = %v, want none — the warming server must not be restarted", gotOps)
+		}
+		if !report.Ready || !report.Healthy {
+			t.Errorf("report = %+v, want Ready and Healthy", report)
+		}
+	})
+
+	t.Run("does not settle without a concurrent lifecycle", func(t *testing.T) {
+		var gotOps []string
+		ops, probes := settleTestOps(t, 2, &gotOps)
+
+		oldReachable := managedDoltRecoverListenerReachableFn
+		t.Cleanup(func() { managedDoltRecoverListenerReachableFn = oldReachable })
+		managedDoltRecoverListenerReachableFn = func(_, _ string) bool { return true }
+
+		var report managedDoltRecoverReport
+		adopted, err := recoverManagedDoltAdoptRunningServer(
+			t.TempDir(), "127.0.0.1", "3306", "root",
+			time.Now().Add(10*time.Second), false, ops, &report,
+		)
+		if err != nil {
+			t.Fatalf("recoverManagedDoltAdoptRunningServer: %v", err)
+		}
+		if adopted {
+			t.Fatal("adopted = true, want a first-arrival recovery to probe once and restart")
+		}
+		if *probes != 1 {
+			t.Errorf("query probes = %d, want exactly 1 for a first-arrival recovery", *probes)
+		}
+	})
+
+	t.Run("stops settling once the listener is gone", func(t *testing.T) {
+		var gotOps []string
+		ops, probes := settleTestOps(t, 100, &gotOps)
+
+		oldReachable := managedDoltRecoverListenerReachableFn
+		t.Cleanup(func() { managedDoltRecoverListenerReachableFn = oldReachable })
+		managedDoltRecoverListenerReachableFn = func(_, _ string) bool { return false }
+
+		var report managedDoltRecoverReport
+		start := time.Now()
+		adopted, err := recoverManagedDoltAdoptRunningServer(
+			t.TempDir(), "127.0.0.1", "3306", "root",
+			time.Now().Add(30*time.Second), true, ops, &report,
+		)
+		if err != nil {
+			t.Fatalf("recoverManagedDoltAdoptRunningServer: %v", err)
+		}
+		if adopted {
+			t.Fatal("adopted = true, want no adoption when nothing is listening")
+		}
+		if *probes != 1 {
+			t.Errorf("query probes = %d, want 1 — a dead listener must restart immediately", *probes)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("elapsed = %v, want an immediate return when nothing is listening", elapsed)
+		}
+	})
+
+	t.Run("read-only server restarts instead of settling", func(t *testing.T) {
+		var gotOps []string
+		ops, probes := settleTestOps(t, 0, &gotOps)
+		ops.healthCheck = func(_, _, _ string) (managedDoltSQLHealthReport, error) {
+			return managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "true"}, nil
+		}
+
+		oldReachable := managedDoltRecoverListenerReachableFn
+		t.Cleanup(func() { managedDoltRecoverListenerReachableFn = oldReachable })
+		managedDoltRecoverListenerReachableFn = func(_, _ string) bool { return true }
+
+		var report managedDoltRecoverReport
+		adopted, err := recoverManagedDoltAdoptRunningServer(
+			t.TempDir(), "127.0.0.1", "3306", "root",
+			time.Now().Add(10*time.Second), true, ops, &report,
+		)
+		if err != nil {
+			t.Fatalf("recoverManagedDoltAdoptRunningServer: %v", err)
+		}
+		if adopted {
+			t.Fatal("adopted = true, want a read-only server to be restarted")
+		}
+		if !report.DiagnosedReadOnly {
+			t.Error("DiagnosedReadOnly = false, want the read-only diagnosis retained")
+		}
+		if *probes != 1 {
+			t.Errorf("query probes = %d, want 1 — read-only is not a warm-up state", *probes)
+		}
+	})
+
+	t.Run("gives up at the deadline", func(t *testing.T) {
+		var gotOps []string
+		ops, probes := settleTestOps(t, 100, &gotOps)
+
+		oldReachable := managedDoltRecoverListenerReachableFn
+		t.Cleanup(func() { managedDoltRecoverListenerReachableFn = oldReachable })
+		managedDoltRecoverListenerReachableFn = func(_, _ string) bool { return true }
+
+		var report managedDoltRecoverReport
+		adopted, err := recoverManagedDoltAdoptRunningServer(
+			t.TempDir(), "127.0.0.1", "3306", "root",
+			time.Now().Add(300*time.Millisecond), true, ops, &report,
+		)
+		if err != nil {
+			t.Fatalf("recoverManagedDoltAdoptRunningServer: %v", err)
+		}
+		if adopted {
+			t.Fatal("adopted = true, want no adoption when the server never becomes ready")
+		}
+		if *probes < 2 {
+			t.Errorf("query probes = %d, want more than one attempt before the deadline", *probes)
+		}
+	})
+}
+
+// TestRecoverManagedDolt_WaiterDoesNotRestartWarmingServer is the end-to-end
+// form of ga-oigp defect D1: five queued recoveries each took the lifecycle
+// lock in turn and killed the server its predecessor had just started, so no
+// generation survived long enough to open all nine databases. A recovery that
+// waited behind another lifecycle holder must adopt the replacement instead.
+func TestRecoverManagedDolt_WaiterDoesNotRestartWarmingServer(t *testing.T) {
+	cityPath := setupRecoveryTestCity(t)
+
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	holder, err := os.OpenFile(layout.LockFile, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	defer holder.Close() //nolint:errcheck // test cleanup
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("hold lifecycle lock: %v", err)
+	}
+	// Release the "winner's" lock shortly after the recovery under test starts
+	// waiting, exactly as a finishing recover-managed would.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = syscall.Flock(int(holder.Fd()), syscall.LOCK_UN)
+	}()
+
+	var gotOps []string
+	ops, probes := settleTestOps(t, 2, &gotOps)
+
+	oldReachable := managedDoltRecoverListenerReachableFn
+	t.Cleanup(func() { managedDoltRecoverListenerReachableFn = oldReachable })
+	managedDoltRecoverListenerReachableFn = func(_, _ string) bool { return true }
+
+	report, err := recoverManagedDoltProcessWithOps(
+		cityPath, "127.0.0.1", "3306", "root", "warning", 30*time.Second, ops,
+	)
+	if err != nil {
+		t.Fatalf("recoverManagedDoltProcessWithOps: %v", err)
+	}
+	if len(gotOps) != 0 {
+		t.Fatalf("lifecycle ops = %v, want none — a queued recovery must not restart the winner's server", gotOps)
+	}
+	if report.Restarted {
+		t.Error("Restarted = true, want the queued recovery to adopt the running server")
+	}
+	if !report.Ready || !report.Healthy {
+		t.Errorf("report = %+v, want Ready and Healthy", report)
+	}
+	if *probes < 2 {
+		t.Errorf("query probes = %d, want the queued recovery to re-probe while the server warms up", *probes)
 	}
 }

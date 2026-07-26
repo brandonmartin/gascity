@@ -4762,7 +4762,7 @@ func TestDoctorScriptUsesServerMaxConnections(t *testing.T) {
 		{
 			name:      "malformed server value fallback",
 			extraEnv:  []string{"GC_FAKE_MAX_CONNECTIONS=not-a-number", "GC_FAKE_CONN_COUNT=220"},
-			want:      "conns: 220/256",
+			want:      "conns: 220/1024",
 			wantQuery: true,
 		},
 	} {

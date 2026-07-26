@@ -3181,7 +3181,7 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"listener": map[string]any{
 			"port":                           "3307",
 			"host":                           "127.0.0.1",
-			"max_connections":                256,
+			"max_connections":                config.DefaultDoltMaxConnections,
 			"back_log":                       50,
 			"max_connections_timeout_millis": 5000,
 			"read_timeout_millis":            15000,

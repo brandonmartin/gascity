@@ -1254,10 +1254,14 @@ write_config_yaml() {
             auto_gc_sysvar=OFF
             ;;
     esac
-    max_connections=${GC_DOLT_MAX_CONNECTIONS:-256}
+    # Keep this fallback equal to config.DefaultDoltMaxConnections: gc only
+    # exports GC_DOLT_MAX_CONNECTIONS when city.toml sets it explicitly, so
+    # this literal is the managed default whenever the shell path writes the
+    # config itself.
+    max_connections=${GC_DOLT_MAX_CONNECTIONS:-1024}
     case "$max_connections" in
         ''|*[!0-9]*|0)
-            max_connections=256
+            max_connections=1024
             ;;
     esac
     read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-15000}

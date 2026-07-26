@@ -22,9 +22,9 @@ not describe a target as an existing gate.
 | Sleep/process/listener/tmux/env/CWD growth | Checked by the source-resource ledger below |
 | Runtime constructor and `runtime.Fake` conformance binding | Checked by the runtime provider ledger below; several explicit waivers remain |
 | Other provider conformance | Shared suites exist, but exact production-constructor coverage is still a manual audit with known gaps |
-| Sub-five-minute PR feedback and timing ratchets | Target; current Go timing artifacts measure test execution, not workflow queue/bootstrap/graph time (`ga-80po0c.4`) |
-| Large/E2E ownership and cadence | Target; the executable manifest is owned by `ga-80po0c.6` |
-| First-attempt flake and quarantine policy | Target; required Playwright retry and legacy unledgered skips remain noncompliant debt under `ga-80po0c` |
+| Sub-five-minute PR feedback and timing ratchets | Target; current Go timing artifacts measure test execution, not workflow queue/bootstrap/graph time (`ga-q7zh`) |
+| Large/E2E ownership and cadence | Target; the executable manifest is owned by `ga-q7zh` |
+| First-attempt flake and quarantine policy | Target; required Playwright retry and legacy unledgered skips remain noncompliant debt under `ga-q7zh` |
 
 ## The outcome: protected PR feedback in under five minutes
 
@@ -36,7 +36,7 @@ attempts, and exclude only obsolete-SHA concurrency cancellations. Queueing is
 part of the developer-visible metric and is also reported separately. The
 execution sub-budget, from the first required job entering `in_progress` until
 `CI / required` completes, is p95 at most 4m30s. Current telemetry does not yet
-enforce this SLO; `ga-80po0c.4` owns that gap.
+enforce this SLO; `ga-q7zh` owns that gap.
 
 The budget changes where a proof runs, never whether an important risk is
 proved:
@@ -219,7 +219,7 @@ same regression, keep the clearer and faster one.
 
 Record the journey, unique risk, lower-layer owners, path triggers, lane,
 budget, diagnostics, and owner in the checked E2E/provider manifest owned by
-`ga-80po0c.6`. Until that manifest lands, put the same fields in the PR
+`ga-q7zh`. Until that manifest lands, put the same fields in the PR
 description. On-demand coverage does not count as a release proof without a
 freshness gate for the exact release SHA.
 
@@ -1189,7 +1189,7 @@ routes/assertions by editing `e2e/render-smoke.spec.ts`; keep
 are kept in sync by convention).
 
 The current CI Playwright configuration retries once. That is legacy,
-noncompliant debt under `ga-80po0c`; do not copy it or treat a retry-pass as
+noncompliant debt under `ga-q7zh`; do not copy it or treat a retry-pass as
 first-attempt reliability.
 
 #### Live worker inference tests (`//go:build acceptance_c`)
@@ -1405,7 +1405,7 @@ for these packages, including legacy overlap that later consolidation may
 remove case by case. The default subprocess constructor remains a separate
 H5-owned gap because its reachable empty-city-path branch uses shared temporary
 state. The default ACP constructor is also an H5-owned gap because it always
-uses shared `os.TempDir()/gc-acp` state. E1 (`ga-80po0c.6`) owns the Large
+uses shared `os.TempDir()/gc-acp` state. E1 (`ga-q7zh`) owns the Large
 provider/E2E manifest and required lane/cadence execution; it does not own
 constructor-to-contract source binding.
 
@@ -1414,20 +1414,20 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-1uud through 2026-08-12: NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
-| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-1uud through 2026-08-12: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
-| `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips in short mode or when the herdr executable is absent |
-| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
-| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the actual K8s production composition has no full shared runtime contract |
-| `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production SSH composition has no full shared runtime contract |
-| `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition |
+| `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-1uud through 2026-08-12: the existing full conformance run skips in short mode or when the herdr executable is absent |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-1uud through 2026-08-12: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
+| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-1uud through 2026-08-12: the actual K8s production composition has no full shared runtime contract |
+| `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | waived by ga-1uud through 2026-08-12: the production SSH composition has no full shared runtime contract |
+| `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | waived by ga-1uud through 2026-08-12: NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
-| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the production T3 bridge composition has focused tests but no full shared runtime contract |
-| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-08-12: the existing full conformance run skips when the tmux executable is absent |
+| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-1uud through 2026-08-12: the production T3 bridge composition has focused tests but no full shared runtime contract |
+| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-1uud through 2026-08-12: the existing full conformance run skips when the tmux executable is absent |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 

@@ -413,13 +413,34 @@ type failNudgeProvider struct {
 }
 
 func (p *failNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
-	if err := p.Fake.Nudge(name, content); err != nil {
-		return err
+	_, err := p.NudgeConfirm(name, content)
+	return err
+}
+
+func (p *failNudgeProvider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	_, err := p.NudgeNowConfirm(name, content)
+	return err
+}
+
+// The Confirm pair must be overridden alongside Nudge/NudgeNow: the embedded
+// *runtime.Fake supplies them too, and a confirm-preferring caller would
+// otherwise promote the embedded methods and never see this provider's failure.
+func (p *failNudgeProvider) NudgeConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	return p.applyErr(p.Fake.NudgeConfirm(name, content))
+}
+
+func (p *failNudgeProvider) NudgeNowConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	return p.applyErr(p.Fake.NudgeNowConfirm(name, content))
+}
+
+func (p *failNudgeProvider) applyErr(submitted bool, err error) (bool, error) {
+	if err != nil {
+		return false, err
 	}
 	if p.err != nil {
-		return p.err
+		return false, p.err
 	}
-	return nil
+	return submitted, nil
 }
 
 type transportCapableProvider struct {
@@ -457,14 +478,39 @@ type blockingNudgeProvider struct {
 	*runtime.Fake
 	started chan struct{}
 	unblock chan struct{}
+	once    sync.Once
 }
 
 func (p *blockingNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	_, err := p.NudgeConfirm(name, content)
+	return err
+}
+
+func (p *blockingNudgeProvider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	_, err := p.NudgeNowConfirm(name, content)
+	return err
+}
+
+// The Confirm pair must be overridden alongside Nudge/NudgeNow: the embedded
+// *runtime.Fake supplies them too, and a confirm-preferring caller would
+// otherwise promote the embedded methods and never block here at all.
+func (p *blockingNudgeProvider) NudgeConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	p.block()
+	return p.Fake.NudgeConfirm(name, content)
+}
+
+func (p *blockingNudgeProvider) NudgeNowConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	p.block()
+	return p.Fake.NudgeNowConfirm(name, content)
+}
+
+func (p *blockingNudgeProvider) block() {
 	if p.started != nil {
-		close(p.started)
+		p.once.Do(func() {
+			close(p.started)
+		})
 	}
 	<-p.unblock
-	return p.Fake.Nudge(name, content)
 }
 
 type pendingSessionMissingProvider struct {

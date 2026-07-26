@@ -269,10 +269,12 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		result = NudgeResult{Delivered: true}
 		return result, nil
 	case NudgeDeliveryImmediate:
-		if err := h.nudgeNow(req.Text); err != nil {
+		submitted, nudgeErr := h.nudgeNow(req.Text)
+		if nudgeErr != nil {
+			err = nudgeErr
 			return NudgeResult{}, err
 		}
-		result = NudgeResult{Delivered: true}
+		result = NudgeResult{Delivered: submitted}
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		result, err = h.nudgeWaitIdle(ctx, req)
@@ -384,12 +386,18 @@ func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) erro
 
 const runtimeHandleWaitIdleTimeout = 30 * time.Second
 
-func (h *RuntimeHandle) nudgeNow(message string) error {
+// nudgeNow injects the message without a wait-idle heuristic and reports
+// whether the runtime observed it submit. Runtimes that cannot confirm a submit
+// report true, preserving best-effort delivery.
+func (h *RuntimeHandle) nudgeNow(message string) (bool, error) {
 	content := runtime.TextContent(message)
-	if immediate, ok := h.provider.(runtime.ImmediateNudgeProvider); ok {
-		return immediate.NudgeNow(h.sessionName, content)
+	if confirming, ok := h.provider.(runtime.ConfirmingNudgeProvider); ok {
+		return confirming.NudgeNowConfirm(h.sessionName, content)
 	}
-	return h.provider.Nudge(h.sessionName, content)
+	if immediate, ok := h.provider.(runtime.ImmediateNudgeProvider); ok {
+		return true, immediate.NudgeNow(h.sessionName, content)
+	}
+	return true, h.provider.Nudge(h.sessionName, content)
 }
 
 func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
@@ -421,10 +429,15 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		}
 		return NudgeResult{Delivered: false}, nil
 	}
-	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
+	// An idle target can still strand the message: the text is typed but the
+	// submit key is lost, leaving the agent parked on a drafted line while the
+	// session keeps reporting active. Report that as undelivered so the caller
+	// falls back to queued redelivery instead of dropping the work silently.
+	submitted, err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text))
+	if err != nil {
 		return NudgeResult{}, err
 	}
-	return NudgeResult{Delivered: true}, nil
+	return NudgeResult{Delivered: submitted}, nil
 }
 
 func formatRuntimeWaitIdleReminder(source, message string) string {

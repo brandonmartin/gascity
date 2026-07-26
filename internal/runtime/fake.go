@@ -37,6 +37,10 @@ type Fake struct {
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	// nudgeSubmitUnconfirmed marks sessions whose NudgeNowConfirm accepts the
+	// text but reports the submit as never observed. Set it with
+	// SetNudgeSubmitUnconfirmed.
+	nudgeSubmitUnconfirmed map[string]bool
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -374,6 +378,14 @@ func (f *Fake) ProcessAlive(name string, processNames []string) bool {
 
 // Nudge records the call and returns nil (or an error if broken).
 func (f *Fake) Nudge(name string, content []ContentBlock) error {
+	_, err := f.NudgeConfirm(name, content)
+	return err
+}
+
+// NudgeConfirm records the call and reports whether the nudge submitted.
+// It reports true unless SetNudgeSubmitUnconfirmed marked the session as one
+// that strands drafted text.
+func (f *Fake) NudgeConfirm(name string, content []ContentBlock) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{
@@ -383,13 +395,21 @@ func (f *Fake) Nudge(name string, content []ContentBlock) error {
 		Content: content,
 	})
 	if f.broken {
-		return fmt.Errorf("session unavailable")
+		return false, fmt.Errorf("session unavailable")
 	}
-	return nil
+	return !f.nudgeSubmitUnconfirmed[name], nil
 }
 
 // NudgeNow records the call and returns nil (or an error if broken).
 func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
+	_, err := f.NudgeNowConfirm(name, content)
+	return err
+}
+
+// NudgeNowConfirm records the call and reports whether the nudge submitted.
+// It reports true unless SetNudgeSubmitUnconfirmed marked the session as one
+// that strands drafted text.
+func (f *Fake) NudgeNowConfirm(name string, content []ContentBlock) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{
@@ -399,9 +419,21 @@ func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 		Content: content,
 	})
 	if f.broken {
-		return fmt.Errorf("session unavailable")
+		return false, fmt.Errorf("session unavailable")
 	}
-	return nil
+	return !f.nudgeSubmitUnconfirmed[name], nil
+}
+
+// SetNudgeSubmitUnconfirmed makes NudgeNowConfirm report the named session as
+// having accepted the text without the submit landing — the drafted-but-never-
+// submitted strand a terminal runtime can produce.
+func (f *Fake) SetNudgeSubmitUnconfirmed(name string, unconfirmed bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nudgeSubmitUnconfirmed == nil {
+		f.nudgeSubmitUnconfirmed = make(map[string]bool)
+	}
+	f.nudgeSubmitUnconfirmed[name] = unconfirmed
 }
 
 // SetPendingInteraction configures a structured pending interaction for the

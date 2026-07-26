@@ -828,6 +828,13 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 	}
+	// An immediate nudge has no queue to fall back to, so an unsubmitted draft
+	// is reported to the caller rather than announced as a delivery. Silence
+	// here is what let three rigs' patrol coverage sit parked on drafted text
+	// while every status surface still read healthy (ga-287).
+	if !result.Delivered {
+		return writeUnsubmittedSessionNudgeResult(target, mode, jsonOutput, stdout, stderr)
+	}
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
@@ -842,6 +849,30 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
 	return 0
+}
+
+// writeUnsubmittedSessionNudgeResult reports a nudge whose text reached the
+// agent's input box without the submit landing. The message is drafted in the
+// session and will not run until something resubmits it, so this is a failure
+// exit — a caller that treats it as success re-creates the silent strand.
+func writeUnsubmittedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+	if jsonOutput {
+		if code := writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
+			SchemaVersion: "1",
+			OK:            false,
+			Target:        target.agentKey(),
+			SessionID:     target.sessionID,
+			SessionName:   target.sessionName,
+			Delivery:      string(mode),
+			Queued:        false,
+			Outcome:       "unsubmitted",
+		}); code != 0 {
+			return code
+		}
+		return 1
+	}
+	fmt.Fprintf(stderr, "gc session nudge: text reached %s but the submit was never observed to land; the message is drafted in the session and has not run. Retry with --delivery=queue so the dispatcher delivers it at the next idle boundary.\n", target.agentKey()) //nolint:errcheck
+	return 1
 }
 
 func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) (bool, error) {

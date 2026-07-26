@@ -1808,10 +1808,28 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
 func (t *Tmux) NudgeSession(session, message string) error {
+	_, err := t.NudgeSessionConfirm(session, message)
+	return err
+}
+
+// NudgeSessionConfirm is NudgeSession with the submit outcome reported.
+//
+// The returned bool is true when the message was observed to submit, and false
+// when the text was handed to tmux but the agent was never seen to start a turn
+// — the drafted-but-never-submitted strand. Both cases return a nil error: the
+// keystrokes reached tmux, so the caller must not re-paste blindly. Callers that
+// can fall back (queued redelivery) use the bool to avoid recording a drafted
+// message as delivered; callers that only need best-effort delivery use
+// NudgeSession and ignore it.
+//
+// Targets whose provider has no reliable busy indicator report true — see
+// submitVerifyEligible. Absence of a confirmation signal is not evidence of a
+// failed submit, and reporting false there would downgrade every such nudge.
+func (t *Tmux) NudgeSessionConfirm(session, message string) (bool, error) {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+		return false, fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
 	}
 	defer releaseNudgeLock(session)
 
@@ -1849,7 +1867,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
-		return err
+		return false, err
 	}
 
 	// 2. Wait for paste to complete (tested, required). Kimi's TUI can take
@@ -1879,11 +1897,15 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	sendEnter := func() error { _, err := t.run("send-keys", "-t", target, "Enter"); return err }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
-			return fmt.Errorf("failed to send Enter: %w", err)
+		confirmed, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		if err != nil {
+			return false, fmt.Errorf("failed to send Enter: %w", err)
 		}
+		// The keystrokes reached tmux either way, so this counts as a poke for
+		// activity discounting even when the turn was never observed to start.
+		// Only the caller-visible submit state distinguishes the two.
 		delivered = true
-		return nil
+		return confirmed, nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
 	var lastErr error
@@ -1898,9 +1920,9 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		// 6. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("failed to send Enter after %d attempts: %w", submitEnterMaxSends, lastErr)
+	return false, fmt.Errorf("failed to send Enter after %d attempts: %w", submitEnterMaxSends, lastErr)
 }
 
 // NudgePane sends a message to a specific pane reliably.

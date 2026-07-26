@@ -127,3 +127,50 @@ func TestNudgeSessionReEntersUntilSubmittedForClaude(t *testing.T) {
 		t.Fatalf("never reached submitted/busy state after re-send:\n%s", out)
 	}
 }
+
+// TestNudgeSessionConfirmReportsUnsubmittedDraftForClaude proves the ga-287
+// signal end-to-end on real tmux: an agent that never starts a turn leaves the
+// message drafted in its input box, and NudgeSessionConfirm reports that as
+// submitted=false with a nil error. The nil error is deliberate — the
+// keystrokes DID reach tmux, so the caller must not re-paste blindly; it falls
+// back to queued redelivery instead. Pre-fix this outcome was indistinguishable
+// from a delivered nudge, which is how three rigs' patrol coverage sat parked
+// on drafted text with every status surface reading healthy.
+func TestNudgeSessionConfirmReportsUnsubmittedDraftForClaude(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	tm := testTmux()
+	dir := t.TempDir()
+	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
+	sessionName := fmt.Sprintf("gt-test-nudge-strand-%d", time.Now().UnixNano()%100000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+		"GC_PROVIDER": "claude",
+		// Higher than submitEnterMaxSends, so no Enter this path can send ever
+		// drives the agent busy — the turn-exited pane that swallows the submit.
+		"GC_TEST_BUSY_AFTER": "99",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	submitted, err := tm.NudgeSessionConfirm(sessionName, "hello-strand")
+	if err != nil {
+		t.Fatalf("NudgeSessionConfirm: %v", err)
+	}
+	if submitted {
+		out, _ := tm.CapturePaneAll(sessionName)
+		t.Fatalf("NudgeSessionConfirm submitted = true for a never-busy pane, want false:\n%s", out)
+	}
+
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if strings.Contains(out, "esc to interrupt") {
+		t.Fatalf("pane reported busy; the never-busy fixture did not hold:\n%s", out)
+	}
+}

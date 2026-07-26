@@ -618,26 +618,42 @@ func formatWaitIdleReminder(source, message string) string {
 }
 
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
+	_, err := m.nudgeSessionConfirm(ctx, sessName, message, immediate)
+	return err
+}
+
+// nudgeSessionConfirm is nudgeSession with the submit outcome reported. A false
+// result means the runtime accepted the text but never observed the agent start
+// a turn — the message is drafted in the input box and has not run. Runtimes
+// that cannot observe a submit report true, preserving best-effort delivery.
+func (m *Manager) nudgeSessionConfirm(ctx context.Context, sessName, message string, immediate bool) (bool, error) {
 	content := runtime.TextContent(message)
-	err := m.nudgeContent(sessName, content, immediate)
+	submitted, err := m.nudgeContent(sessName, content, immediate)
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()
 	}
 	telemetry.RecordNudge(recordCtx, sessName, err)
 	if err != nil {
-		return fmt.Errorf("sending message to session: %w", err)
+		return false, fmt.Errorf("sending message to session: %w", err)
 	}
-	return nil
+	return submitted, nil
 }
 
-func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) error {
+func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) (bool, error) {
+	confirming, canConfirm := m.sp.(runtime.ConfirmingNudgeProvider)
 	if immediate {
+		if canConfirm {
+			return confirming.NudgeNowConfirm(sessName, content)
+		}
 		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {
-			return np.NudgeNow(sessName, content)
+			return true, np.NudgeNow(sessName, content)
 		}
 	}
-	return m.sp.Nudge(sessName, content)
+	if canConfirm {
+		return confirming.NudgeConfirm(sessName, content)
+	}
+	return true, m.sp.Nudge(sessName, content)
 }
 
 func normalizeWaitIdleNudgeSource(source string) string {
@@ -671,10 +687,16 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
-	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
+	// Reaching idle only picked the moment to type. A lost submit leaves the
+	// reminder drafted in the input box while the session still reads active,
+	// so report the submit state — not the typing — as delivery (ga-287).
+	// A send error stays undelivered-without-error, as before: the caller's
+	// queue fallback is the recovery path, not an operational failure.
+	submitted, err := m.nudgeSessionConfirm(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true)
+	if err != nil {
 		return false, nil
 	}
-	return true, nil
+	return submitted, nil
 }
 
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
@@ -697,10 +719,12 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
-	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
+	// See tryWaitIdleNudgeLocked: an idle agent can still strand the submit.
+	submitted, err := m.nudgeSessionConfirm(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true)
+	if err != nil {
 		return false, nil
 	}
-	return true, nil
+	return submitted, nil
 }
 
 func (m *Manager) pendingInteractionLocked(sessName string) error {
@@ -735,34 +759,38 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 	b.Metadata[startupDialogVerifiedKey] = "true"
 }
 
-func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) error {
+func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-		return err
+		return false, err
 	}
 	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
 	if verifyDeferredDialogs {
 		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
 	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
-		return err
+		return false, err
 	}
-	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
-		return err
+	submitted, err := m.nudgeSessionConfirm(ctx, sessName, message, immediate)
+	if err != nil {
+		return false, err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
 		m.markStartupDialogsVerifiedLocked(id, &b)
 	}
-	return nil
+	return submitted, nil
 }
 
-func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) error {
-	return withSessionMutationLock(id, func() error {
+func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
+	var submitted bool
+	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
+		submitted, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
+		return err
 	})
+	return submitted, err
 }
 
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
@@ -776,10 +804,14 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 			delivered = false
 			return nil
 		}
-		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		// Report the submit state, not the typing: an unsubmitted draft must not
+		// ack a queued nudge, or the queue drops work the agent never saw
+		// (ga-287). The queue path releases the claim and retries on false.
+		submitted, err := m.nudgeSessionConfirm(ctx, sessName, message, immediate)
+		if err != nil {
 			return err
 		}
-		delivered = true
+		delivered = submitted
 		return nil
 	})
 	return delivered, err
@@ -815,6 +847,14 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string
 // Send resumes a suspended session if needed, then nudges the runtime with a
 // new user message.
 func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) error {
+	_, err := m.send(ctx, id, message, resumeCommand, hints, false)
+	return err
+}
+
+// SendConfirm is Send with the submit outcome reported. A false result means
+// the runtime accepted the text but never observed the agent start a turn, so
+// the message is drafted in the session and has not run.
+func (m *Manager) SendConfirm(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	return m.send(ctx, id, message, resumeCommand, hints, false)
 }
 
@@ -823,6 +863,13 @@ func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, h
 // immediate nudges. Falls back to Send semantics on runtimes without the
 // optional immediate nudge capability.
 func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) error {
+	_, err := m.send(ctx, id, message, resumeCommand, hints, true)
+	return err
+}
+
+// SendImmediateConfirm is SendImmediate with the submit outcome reported. See
+// SendConfirm for what a false result means.
+func (m *Manager) SendImmediateConfirm(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	return m.send(ctx, id, message, resumeCommand, hints, true)
 }
 

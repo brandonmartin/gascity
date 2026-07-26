@@ -292,9 +292,11 @@ func buildRealisticPackTree(tb testing.TB, n, filesPerPack int) []PackRootStatus
 
 // TestDriftDetect_NoDrift_NFR4 is the unit-test counterpart of
 // BenchmarkDriftDetect_NoDrift: it runs the same no-drift round-trip
-// repeatedly and asserts the average cost is comfortably under NFR-4's
-// 10ms budget. Failing here surfaces in `go test` (no -bench flag
-// required), which is what CI runs.
+// repeatedly and asserts the detect path stays proportional to the bare
+// /health round-trip it is built on. Average absolute cost is logged for
+// observability; the budget itself is the median paired ratio, for the reasons
+// in medianRatio's doc comment. Failing here surfaces in `go test` (no -bench
+// flag required), which is what CI runs.
 func TestDriftDetect_NoDrift_NFR4(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NFR budget test in short mode")
@@ -358,8 +360,9 @@ func TestDriftDetect_NoDrift_NFR4(t *testing.T) {
 }
 
 // TestDriftDetect_WithRealisticPacks_NFR1 pins the NFR-1 cost budget for
-// DetectPackDrift over a 5-pack city. p95 is computed across enough samples
-// that the upper tail is meaningful.
+// DetectPackDrift over a 5-pack city. Absolute p95 cost is logged for
+// observability; the budget itself is the median paired ratio, for the reasons
+// in medianRatio's doc comment.
 //
 // DetectPackDrift walks each root and stats every file, keeping the newest
 // mtime. referenceTreeWalkCost performs exactly that traversal and nothing

@@ -851,10 +851,11 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	return 0
 }
 
-// writeUnsubmittedSessionNudgeResult reports a nudge whose text reached the
-// agent's input box without the submit landing. The message is drafted in the
-// session and will not run until something resubmits it, so this is a failure
-// exit — a caller that treats it as success re-creates the silent strand.
+// writeUnsubmittedSessionNudgeResult reports a nudge the runtime accepted
+// without the submit landing — typically the text sitting drafted in the
+// agent's input box, or a session that went away mid-delivery. Either way the
+// message has not run, so this is a failure exit: a caller that treats it as
+// success re-creates the silent strand.
 func writeUnsubmittedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		if code := writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
@@ -871,7 +872,7 @@ func writeUnsubmittedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMo
 		}
 		return 1
 	}
-	fmt.Fprintf(stderr, "gc session nudge: text reached %s but the submit was never observed to land; the message is drafted in the session and has not run. Retry with --delivery=queue so the dispatcher delivers it at the next idle boundary.\n", target.agentKey()) //nolint:errcheck
+	fmt.Fprintf(stderr, "gc session nudge: %s accepted the text but the submit was never observed to land; the message has not run and is most likely drafted in the session's input box. Retry with --delivery=queue so the dispatcher delivers it at the next idle boundary.\n", target.agentKey()) //nolint:errcheck
 	return 1
 }
 

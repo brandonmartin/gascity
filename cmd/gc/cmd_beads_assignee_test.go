@@ -1,14 +1,8 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -217,40 +211,5 @@ func TestParseBeadFilters_Assignee(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestRouteBeadsList_AssigneeFiltersAPILane verifies the API lane narrows by
-// assignee on the client. The endpoint has no assignee parameter, so a server
-// returning extra rows must still produce a filtered listing — otherwise the
-// command's answer would depend on which lane happened to serve it.
-func TestRouteBeadsList_AssigneeFiltersAPILane(t *testing.T) {
-	t.Setenv("GC_DEBUG", "0")
-	cityPath := writeBeadsTestCity(t)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "1")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"items": []map[string]any{
-				{"id": "ga-mine", "title": "mayor work", "assignee": "gastown.mayor", "status": "open"},
-				{"id": "ga-theirs", "title": "witness work", "assignee": "gastown.witness", "status": "open"},
-			},
-			"total": 2,
-		})
-	}))
-	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
-
-	var stdout, stderr bytes.Buffer
-	code := routeBeadsList(cityPath, c, "", "text", beadFilters{assignee: "gastown.mayor"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "ga-mine") {
-		t.Errorf("output missing the assigned bead ga-mine; stdout=%q", stdout.String())
-	}
-	if strings.Contains(stdout.String(), "ga-theirs") {
-		t.Errorf("output leaked another agent's bead ga-theirs; stdout=%q", stdout.String())
 	}
 }

@@ -418,9 +418,17 @@ test-mac: test-fsys-darwin-compile
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
+# Deliberately empty: scripts/test-local-parallel owns the default per-package
+# budget, and duplicating the number here is how the unit sweep and the cmd/gc
+# shards drifted onto separate timeouts in the first place (ga-9au). The
+# assignment exists only so an operator override survives TEST_ENV's env -i,
+# the way LOCAL_TEST_JOBS does; the sibling parallel targets below inherit the
+# environment directly and need no such pass-through.
+GO_TEST_TIMEOUT ?=
+
 ## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
 test-fast-parallel:
-	$(TEST_ENV) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel fast
+	$(TEST_ENV) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.

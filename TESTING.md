@@ -571,6 +571,20 @@ wins:
 LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
 ```
 
+Every job in a parallel runner — the `unit-core` package sweep and the `cmd/gc`
+shards alike — gets the same 20m per-package `go test` budget, and the unit
+sweep pins `-p=4` so it does not fan out to `GOMAXPROCS` packages on top of the
+outer shards. Both matter because a package's wall time under the fan-out is
+well above its runtime in isolation: with Go's built-in 10m default, contention
+alone panicked six packages with `test timed out after 10m0s` while they were
+still working through their test lists, and the subprocess-heavy packages
+starved each other into false probe timeouts. Raise the budget on a slow or
+heavily shared host:
+
+```bash
+GO_TEST_TIMEOUT=30m make test-fast-parallel
+```
+
 For one package, shard top-level Go tests directly:
 
 ```bash

@@ -265,10 +265,32 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 // NudgeNow delegates to the routed backend when it supports immediate
 // injection without an internal wait-idle step.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
-	if np, ok := p.route(name).(runtime.ImmediateNudgeProvider); ok {
-		return np.NudgeNow(name, content)
+	_, err := p.NudgeNowConfirm(name, content)
+	return err
+}
+
+// NudgeNowConfirm delegates to the routed backend and forwards its submit
+// confirmation. Backends that cannot confirm a submit report true, so routing
+// through here never downgrades their delivery.
+func (p *Provider) NudgeNowConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	backend := p.route(name)
+	if cp, ok := backend.(runtime.ConfirmingNudgeProvider); ok {
+		return cp.NudgeNowConfirm(name, content)
 	}
-	return p.route(name).Nudge(name, content)
+	if np, ok := backend.(runtime.ImmediateNudgeProvider); ok {
+		return true, np.NudgeNow(name, content)
+	}
+	return true, backend.Nudge(name, content)
+}
+
+// NudgeConfirm delegates to the routed backend and forwards its submit
+// confirmation. Backends that cannot confirm a submit report true.
+func (p *Provider) NudgeConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	backend := p.route(name)
+	if cp, ok := backend.(runtime.ConfirmingNudgeProvider); ok {
+		return cp.NudgeConfirm(name, content)
+	}
+	return true, backend.Nudge(name, content)
 }
 
 // ResetInterruptedTurn delegates to the routed backend when it supports

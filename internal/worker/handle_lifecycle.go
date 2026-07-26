@@ -328,10 +328,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		delivered, err := h.manager.SendConfirm(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		if err != nil {
 			return NudgeResult{}, err
 		}
-		result = NudgeResult{Delivered: true}
+		result = NudgeResult{Delivered: delivered}
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
@@ -342,10 +343,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		delivered, err := h.manager.SendImmediateConfirm(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		if err != nil {
 			return NudgeResult{}, err
 		}
-		result = NudgeResult{Delivered: true}
+		result = NudgeResult{Delivered: delivered}
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {

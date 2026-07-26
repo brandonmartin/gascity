@@ -308,6 +308,28 @@ type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
 }
 
+// ConfirmingNudgeProvider is an optional extension for runtimes that can report
+// whether an injected nudge was actually SUBMITTED, not merely typed into the
+// agent's input box.
+//
+// Typing and submitting are separate keystrokes on a terminal runtime, so a lost
+// submit key leaves the message drafted forever. That failure is silent by
+// construction: the runtime reports no error, the session still reads active,
+// and the only external tell is an agent that stopped making progress while
+// holding open work. Callers use the reported submit state to fall back to
+// queued redelivery instead of recording a drafted message as delivered.
+//
+// A true result means either the submit was observed to land or the delivery
+// path does not race the submit key at all. Implementations must not report
+// false merely because they cannot observe the agent — a runtime with no
+// confirmation signal reports true and keeps best-effort delivery.
+type ConfirmingNudgeProvider interface {
+	// NudgeConfirm mirrors Nudge and reports whether the message submitted.
+	NudgeConfirm(name string, content []ContentBlock) (submitted bool, err error)
+	// NudgeNowConfirm mirrors NudgeNow and reports whether the message submitted.
+	NudgeNowConfirm(name string, content []ContentBlock) (submitted bool, err error)
+}
+
 // InterruptedTurnResetProvider is an optional extension for runtimes that can
 // discard the just-interrupted user turn from the provider's active
 // conversation state without restarting the session.

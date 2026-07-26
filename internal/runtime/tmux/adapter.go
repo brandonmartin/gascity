@@ -524,6 +524,17 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	_, err := p.NudgeConfirm(name, content)
+	return err
+}
+
+// NudgeConfirm is Nudge with the submit outcome reported, implementing
+// [runtime.ConfirmingNudgeProvider].
+//
+// Reaching an idle agent is not the same as reaching a running turn: the wait
+// below only picks the moment to type, and the submit that follows can still be
+// lost, leaving the message drafted in the input box (ga-287).
+func (p *Provider) NudgeConfirm(name string, content []runtime.ContentBlock) (bool, error) {
 	// Wait for the agent to be idle before sending, unless disabled.
 	// This prevents interrupting active tool calls — the prompt is visible
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
@@ -541,11 +552,23 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 			p.tm.DismissModelSwitchModalIfPresent(name)
 		}
 	}
-	return p.NudgeNow(name, content)
+	return p.NudgeNowConfirm(name, content)
 }
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	_, err := p.NudgeNowConfirm(name, content)
+	return err
+}
+
+// NudgeNowConfirm is NudgeNow with the submit outcome reported, implementing
+// [runtime.ConfirmingNudgeProvider].
+//
+// A false result means the message was typed into the agent's input box but the
+// agent was never observed to start a turn — the text is drafted and will sit
+// there until something resubmits it. Callers that can queue a redelivery use
+// this to keep a stranded nudge from being recorded as delivered.
+func (p *Provider) NudgeNowConfirm(name string, content []runtime.ContentBlock) (bool, error) {
 	var parts []string
 	for _, b := range content {
 		switch b.Type {
@@ -568,21 +591,25 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	}
 	message := strings.Join(parts, "\n")
 	if message == "" {
-		return nil
+		return true, nil
 	}
 
+	// The hidden-attach client writes the text and the carriage return straight
+	// to the pty, so there is no send-keys race to lose the submit.
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
 		if err != nil {
-			return err
+			return false, err
 		}
-		return nil
+		return true, nil
 	}
 
-	err := p.tm.NudgeSession(name, message)
+	submitted, err := p.tm.NudgeSessionConfirm(name, message)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-		return nil
+		// A vanished session is best-effort success for delivery purposes, but
+		// nothing was submitted — say so rather than claiming a landed turn.
+		return false, nil
 	}
-	return err
+	return submitted, err
 }
 
 // SetMeta stores a key-value pair in the named session's tmux environment.

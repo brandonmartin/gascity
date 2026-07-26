@@ -230,7 +230,13 @@ assert_eq "slots_dir.under_city_root" "$SLOTS_FROM_CITY" "$CITY_ENV/.gc/gate-slo
 NOCITY="$WORK/no-city-repo"
 mkdir -p "$NOCITY"
 (cd "$NOCITY" && git init -q .) 2>/dev/null || true
-SLOTS_FALLBACK="$(cd "$NOCITY" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
+# HOME=$WORK, not a sibling of it: HOME is the walk-up ceiling, so pointing it
+# at a directory outside $NOCITY's ancestry lets the walk escape the fixture
+# and inspect the real filesystem above $TMPDIR. This assertion only held on
+# hosts where no ancestor of $TMPDIR happens to contain a .gc directory — on a
+# Gas City host with /tmp/.gc (a build cache, not a city) the walk resolved
+# /tmp as a legacy city root and the fallback never ran.
+SLOTS_FALLBACK="$(cd "$NOCITY" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_slots_dir)"
 assert_eq "slots_dir.falls_back_to_repo_relative" "$SLOTS_FALLBACK" "$NOCITY/.git/gate-slots"
 
 # ---------------- static wiring assertions against test-local-parallel ----------------
@@ -262,6 +268,82 @@ else
     record_fail "wiring.closes_gate_fd_before_fanout" \
         "close at line '${close_line:-none}', fan-out at line '${fanout_line:-none}'"
 fi
+
+# ---------------- nesting guard (ga-spc) ----------------
+# The gated targets shell out to each other: test-local-parallel's `full` mode
+# runs `make test-productmetrics-testhook`, which re-enters
+# scripts/go-test-observable. The child must inherit "already gated" rather
+# than take a second slot — otherwise one logical invocation double-counts
+# against the cap, and once every slot is held by such a parent each child
+# blocks against its own parent until the wait bound expires.
+NEST_SLOTS="$WORK/nest-slots"
+NEST_FD=""
+(
+    PUSH_GATE_MAX_CONCURRENT=1
+    export PUSH_GATE_MAX_CONCURRENT
+    unset GC_PUSH_GATE_HELD
+    push_gate_acquire_slot "$NEST_SLOTS" NEST_FD "nesting-parent" >/dev/null 2>&1 || exit 1
+    [[ "${GC_PUSH_GATE_HELD:-}" == "1" ]] || exit 2
+    exit 0
+)
+case "$?" in
+    0) record_pass "nesting.acquire_exports_held_marker" ;;
+    1) record_fail "nesting.acquire_exports_held_marker" "parent could not acquire a slot" ;;
+    *) record_fail "nesting.acquire_exports_held_marker" "GC_PUSH_GATE_HELD was not exported after acquire" ;;
+esac
+
+# The marker must not be set by merely sourcing the library, or every runner
+# would believe it was already gated and the cap would never apply at all.
+assert_true "nesting.marker_unset_before_acquire" \
+    env -u GC_PUSH_GATE_HELD bash -c ". \"\$1\"; [ -z \"\${GC_PUSH_GATE_HELD:-}\" ]" _ "$LIB"
+
+# ---------------- static wiring assertions against go-test-observable ----------------
+# The other funnel to `go test`: `make test`, `make test-mac`,
+# `make test-cmd-gc-process` and `make test-productmetrics-testhook` all reach
+# the product through this script, and the unsharded ./... sweep it runs is the
+# heaviest single job on a shared host.
+OBSERVABLE="$TEST_DIR/go-test-observable"
+assert_true "observable.sources_lib"    grep -q 'push-gate-lock-lib.sh' "$OBSERVABLE"
+assert_true "observable.calls_acquire"  grep -q 'push_gate_acquire_slot' "$OBSERVABLE"
+assert_true "observable.honors_nesting" grep -q 'GC_PUSH_GATE_HELD'     "$OBSERVABLE"
+assert_true "observable.releases_slot_on_exit" \
+    grep -qE 'trap .*push_gate_release_slot.*EXIT' "$OBSERVABLE"
+
+obs_acq_line="$(grep -n 'push_gate_acquire_slot ' "$OBSERVABLE" | head -1 | cut -d: -f1)"
+if [[ -n "$obs_acq_line" ]]; then
+    OBS_LOSER_BLOCK="$(sed -n "${obs_acq_line},$((obs_acq_line + 6))p" "$OBSERVABLE")"
+    assert_contains "observable.timeout_exits_75" "$OBS_LOSER_BLOCK" "exit 75"
+else
+    record_fail "observable.timeout_exits_75" "no push_gate_acquire_slot call found in $OBSERVABLE"
+fi
+
+# Gating must key on a resolvable city root, not on push_gate_slots_dir's
+# repo-relative fallback: outside a city there is no fleet to contend with, and
+# queueing a CI runner behind a bound it does not need would stall the one
+# caller that was never the problem.
+assert_true "observable.gates_only_inside_a_city" grep -q 'push_gate_city_root' "$OBSERVABLE"
+
+# Same FD-inheritance hazard as the fan-out, same ordering assertion: the slot
+# descriptor must be closed before the product `go test` is exec'd.
+obs_close_line="$(grep -nE 'exec \$\{gate_fd\}>&-' "$OBSERVABLE" | head -1 | cut -d: -f1)"
+obs_exec_line="$(grep -n 'exec go test -json' "$OBSERVABLE" | head -1 | cut -d: -f1)"
+if [[ -n "$obs_close_line" && -n "$obs_exec_line" && "$obs_close_line" -lt "$obs_exec_line" ]]; then
+    record_pass "observable.closes_gate_fd_before_go_test"
+else
+    record_fail "observable.closes_gate_fd_before_go_test" \
+        "close at line '${obs_close_line:-none}', exec at line '${obs_exec_line:-none}'"
+fi
+
+# A signal-killed sweep is not a test result. Reported as a bare
+# "FAIL status=143" it reads as a real regression, and a caller piping through
+# `tail` sees only the pipe's exit 0 and calls a killed sweep a pass.
+assert_true "observable.names_signal_deaths" grep -q 'KILLED by signal' "$OBSERVABLE"
+
+# Concurrent sweeps must not produce mutually indistinguishable JSON logs in
+# the shared temp dir — that is how one agent reads another's failures as its
+# own.
+assert_true "observable.log_name_identifies_owner" \
+    grep -qE 'gascity-\$\{safe_name\}-\$\{safe_owner\}-\$\$' "$OBSERVABLE"
 
 echo
 echo "push-gate-lock tests: $pass passed, $fail failed"

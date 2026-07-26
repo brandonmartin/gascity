@@ -116,6 +116,15 @@ run_observable_go_test() {
   if [[ "${GC_TEST_NO_SLICE:-0}" == "1" ]]; then
     observable_env+=(GC_TEST_NO_SLICE=1)
   fi
+  # go-test-observable acquires a push-gate slot unless it is told this process
+  # tree already holds one, and push-gate-lock-lib.sh signals that purely by
+  # exporting GC_PUSH_GATE_HELD. run_in_test_env's env -i would drop the marker,
+  # so a nested runner queues behind its own parent for the full wait bound and
+  # dies on the Go test timeout instead (ga-8yfu). Forwarded here rather than in
+  # base_env because only this exec consults the gate — the direct `go test`
+  # product environment is a deliberately curated contract.
+  [[ -z "${GC_PUSH_GATE_HELD:-}" ]]   || observable_env+=("GC_PUSH_GATE_HELD=${GC_PUSH_GATE_HELD}")
+  [[ -z "${GC_PUSH_GATE_NO_CAP:-}" ]] || observable_env+=("GC_PUSH_GATE_NO_CAP=${GC_PUSH_GATE_NO_CAP}")
   run_in_test_env "${observable_env[@]}" \
     "$repo_root/scripts/go-test-observable" "$timing_name" -- "$@"
 }

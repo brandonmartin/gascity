@@ -13,6 +13,25 @@ import (
 	"testing"
 )
 
+// pushGateFixtureOptOut keeps a fixture-spawned child out of the host-wide
+// push-gate semaphore (scripts/push-gate-lock-lib.sh).
+//
+// These children re-enter scripts/go-test-observable, which acquires one of the
+// two gate slots whenever a city root resolves. A fixture child resolves the
+// real city root — cmd.Dir is the actual repo, and HOME points at a fixture
+// directory that is not one of its ancestors, so push_gate_city_root's walk-up
+// runs past the worktree to the city above it — while the explicit env
+// whitelist drops the GC_PUSH_GATE_HELD marker the parent exported. Under
+// `make test` the parent holds a slot for the whole sweep, so the child queues
+// behind its own parent for the 1800s wait bound and the package dies on the
+// 15m Go test timeout instead (ga-8yfu).
+//
+// Opting out rather than inheriting GC_PUSH_GATE_HELD states the honest fact:
+// these children run a fake `go` that compiles nothing, so they must never
+// consume a real slot in any invocation mode — including a bare `go test
+// ./scripts/`, where no ancestor holds one to inherit.
+const pushGateFixtureOptOut = "GC_PUSH_GATE_NO_CAP=1"
+
 type goTestShardFixture struct {
 	repoRoot        string
 	binDir          string
@@ -137,9 +156,41 @@ func (f goTestShardFixture) commandForShardWithBash(bashPath, shardIndex, shardT
 		"TMPDIR=" + f.tmpDir,
 		"GO_TEST_TIMEOUT=1m",
 		"GC_TEST_NO_SLICE=1",
+		pushGateFixtureOptOut,
 		"SYS_USR_CGO_FALLBACK=0",
 	}, extraEnv...)
 	return cmd
+}
+
+// timingIsolationEnv builds the environment for a fixture-spawned `make` child
+// that must carry CI timing metadata across the Make boundary. The whitelist is
+// deliberate — the child inherits nothing from the ambient agent environment, so
+// the assertions cover exactly the variables Make and scripts/go-test-observable
+// are supposed to forward.
+func (f goTestShardFixture) timingIsolationEnv(timingFile string) []string {
+	return []string{
+		"PATH=" + f.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + f.homeDir,
+		"SHELL=/bin/sh",
+		"LANG=C.UTF-8",
+		"TMPDIR=" + f.tmpDir,
+		"GC_TEST_NO_SLICE=1",
+		pushGateFixtureOptOut,
+		"SYS_USR_CGO_FALLBACK=0",
+		"GO_TEST_TIMING_FILE=" + timingFile,
+		"GO_TEST_TIMING_NAME=cmd-gc-process-1-of-2",
+		"GO_TEST_TIMING_VARIANT=linux default",
+		"GO_TEST_RUNNER_LABEL=blacksmith 32 vcpu",
+		"GO_TEST_RUNNER_CPU_COUNT=99",
+		"GITHUB_SHA=abc123",
+		"GITHUB_WORKFLOW=CI workflow with spaces",
+		"GITHUB_RUN_ID=77",
+		"GITHUB_RUN_ATTEMPT=2",
+		"GITHUB_JOB=cmd gc process",
+		"RUNNER_NAME=runner name with spaces",
+		"RUNNER_OS=Linux",
+		"RUNNER_ARCH=X64",
+	}
 }
 
 func writeGoTestManifest(t *testing.T, dir string, lines ...string) string {

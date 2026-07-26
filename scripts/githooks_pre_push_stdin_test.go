@@ -78,36 +78,28 @@ assert_bead_still_claimed() { return 0; }
 	}
 	f.git(t, "add", "-A")
 	f.git(t, "commit", "-q", "--no-verify", "-m", "base")
-	f.commitOld = f.gitOut(t, "rev-parse", "HEAD")
+	f.commitOld = f.git(t, "rev-parse", "HEAD")
 
 	if err := os.WriteFile(filepath.Join(repo, "touched.go"), []byte("package fixture\n"), 0o644); err != nil {
 		t.Fatalf("write go file: %v", err)
 	}
 	f.git(t, "add", "-A")
 	f.git(t, "commit", "-q", "--no-verify", "-m", "add go file")
-	f.commitNew = f.gitOut(t, "rev-parse", "HEAD")
+	f.commitNew = f.git(t, "rev-parse", "HEAD")
 
 	return f
 }
 
-func (f *prePushFixture) git(t *testing.T, args ...string) {
+// git runs a git command in the fixture repo and returns its trimmed output.
+// Callers that only need the side effect ignore the result.
+func (f *prePushFixture) git(t *testing.T, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = f.repo
 	cmd.Env = f.env
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-}
-
-func (f *prePushFixture) gitOut(t *testing.T, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = f.repo
-	cmd.Env = f.env
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("git %v: %v", args, err)
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return strings.TrimSpace(string(out))
 }

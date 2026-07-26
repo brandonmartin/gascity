@@ -70,8 +70,14 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	// Step 3: detect git and resolve the default branch.
 	hasGit, defaultBranchOverride, resolvedDefaultBranch := resolveGitDefaultBranch(deps, req, rigPath)
 
-	// Step 4: canonicalize --include tokens that name a materialized builtin pack.
-	includes = canonicalizeBuiltinPackIncludes(fs, cityPath, includes, cfg.Packs)
+	// Step 4: canonicalize --include tokens that name a materialized builtin
+	// pack, and reject any token that resolves to no pack at all. This runs
+	// before every mutation so an unresolvable include leaves the city
+	// untouched instead of bricking pack expansion citywide.
+	includes, err = resolveIncludeSources(fs, cityPath, includes, cfg.Packs)
+	if err != nil {
+		return config.Rig{}, result, err
+	}
 
 	// Steps 5-9: resolve imports, detect re-add, derive the prefix, build the next
 	// config, and validate it before any filesystem mutation.

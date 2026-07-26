@@ -283,6 +283,18 @@ push_gate_acquire_slot() {
             if flock -n "$_pgl_fd"; then
                 printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
                 eval "$_pgl_fd_var=\$_pgl_fd"
+                # Mark this process tree as already gated so a nested heavy
+                # runner does not consume a second slot (ga-spc). The gated
+                # targets shell out to each other — test-local-parallel's
+                # `full` mode runs `make test-productmetrics-testhook`, which
+                # re-enters scripts/go-test-observable — and a child that
+                # re-acquires would both double-count against the cap and,
+                # once every slot is held by such a parent, block against its
+                # own parent for the full wait bound. Deliberately never
+                # unset on release: both callers hold their slot for the
+                # invocation's entire lifetime, so the marker's lifetime is
+                # the process tree's.
+                export GC_PUSH_GATE_HELD=1
                 if [[ "$_pgl_announced" -eq 1 ]]; then
                     echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
                 fi

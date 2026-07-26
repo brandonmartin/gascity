@@ -381,6 +381,15 @@ func goTestScriptEnv(t *testing.T, tmpDir string) []string {
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 		"TMPDIR=" + tmpDir,
+		// These tests exercise the observability wrapper, not the
+		// cross-invocation concurrency bound, and must never contend for the
+		// real fleet's push-gate slots (ga-spc). Scrubbing GC_CITY_PATH is not
+		// enough on its own: push_gate_city_root also walks up from $PWD, and
+		// when the checkout lives inside a city — as every agent worktree does
+		// — the walk finds that city's city.toml and resolves the live slot
+		// directory. A run under contention would then block for the sweep
+		// path's wait bound before failing with exit 75.
+		"GC_PUSH_GATE_NO_CAP=1",
 	}
 	for _, key := range []string{
 		"GOPATH",

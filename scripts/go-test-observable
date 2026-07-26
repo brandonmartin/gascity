@@ -19,6 +19,46 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
+# Cross-invocation concurrency bound for the unsharded sweeps (ga-spc).
+#
+# scripts/test-local-parallel gates the four sharded heavy targets; this
+# script is the other funnel — `make test`, `make test-mac`,
+# `make test-cmd-gc-process` and `make test-productmetrics-testhook` all
+# reach `go test` through here, and a full-repo `./...` sweep is the single
+# heaviest thing that runs on a shared agent host. Upstream's gate does not
+# cover this path (TESTING.md is explicit that direct `go test` invocations
+# are outside that bound), which left the largest offender unbounded: a
+# witness patrol on 2026-07-26 measured load 86.86 on a 24-core box with two
+# concurrent `./...` sweeps, and the resulting 15m wall-clock timeout was
+# indistinguishable from a real regression.
+#
+# Only bound this inside a Gas City, i.e. when a city root resolves — every
+# agent has one via GC_CITY_PATH. Outside a city (CI runners, a developer
+# laptop) there is no fleet to contend with, and queueing there would add a
+# stall to the one case that was never the problem. This is a deliberately
+# narrower trigger than push_gate_slots_dir's repo-relative fallback.
+# shellcheck source=push-gate-lock-lib.sh disable=SC1091
+source "$script_dir/push-gate-lock-lib.sh"
+gate_fd=""
+if [ "${GC_PUSH_GATE_HELD:-}" = "1" ]; then
+  # An ancestor already holds a slot for this process tree; re-acquiring here
+  # would double-count against the cap and can deadlock a child against its
+  # own parent. See push-gate-lock-lib.sh's acquire path.
+  :
+elif gate_city_root="$(push_gate_city_root)"; then
+  # A ./... sweep holds its slot for 10-15 minutes, so the library's 600s
+  # default would expire while the current holders are still legitimately
+  # running and report a queueing failure as if it were contention. Wait long
+  # enough to actually queue behind them; an explicit caller value still wins.
+  : "${PUSH_GATE_MAX_WAIT_SECONDS:=1800}"
+  gate_label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:sweep-${name}"
+  if ! push_gate_acquire_slot "$gate_city_root/.gc/gate-slots" gate_fd "$gate_label"; then
+    echo "observable go test: giving up after the push-gate wait bound — this is NOT a test failure. Re-run once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass the cap for one invocation." >&2
+    exit 75
+  fi
+  trap 'push_gate_release_slot "$gate_fd"' EXIT
+fi
+
 timing_file="${OBSERVABLE_TIMING_FILE:-}"
 timing_variant="${OBSERVABLE_VARIANT:-default}"
 timing_shard_id="${OBSERVABLE_SHARD_ID:-$name}"
@@ -68,7 +108,14 @@ if [ -n "${OBSERVABLE_TEST_LOG:-}" ]; then
   rm -f "$log"
 else
   safe_name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
-  log="$(mktemp "${TMPDIR:-/var/tmp}/gascity-${safe_name}.jsonl.XXXXXX")"
+  # Stamp the owning worktree and pid into the name (ga-spc). With several
+  # agents sweeping the same host at once, every run produced an equally
+  # anonymous gascity-<name>.jsonl.* file in the shared temp dir, and an agent
+  # that opened the wrong one attributed another agent's failures to its own
+  # branch — observed on 2026-07-26, where the misread had to be undone by
+  # matching logs back to owners through /proc/<pid>/cwd.
+  safe_owner="$(printf '%s' "$(basename "$PWD")" | tr -c 'A-Za-z0-9._-' '_')"
+  log="$(mktemp "${TMPDIR:-/var/tmp}/gascity-${safe_name}-${safe_owner}-$$.jsonl.XXXXXX")"
 fi
 
 echo "observable go test: log=$log" >&2
@@ -246,7 +293,19 @@ print_progress() {
 # downstream pipe and replace the product exit with SIGPIPE. Rendering after
 # completion trades live progress for exact, deterministic status ownership.
 set +e
-go test -json "$@" >"$log"
+# Sever gate-FD inheritance at the product boundary (ga-spc), mirroring what
+# scripts/test-local-parallel does at its fan-out: `go test` and anything it
+# leaks (a tmux server, a dolt sql-server, an escaped `gc`) must not hold a
+# copy of the slot descriptor, or the slot outlives this invocation. The -n
+# guard is load-bearing — gate_fd is empty on the nested, no-city,
+# GC_PUSH_GATE_NO_CAP and missing-flock paths, and `exec >&-` with an empty
+# FD would close stdout and send the JSON log to nowhere.
+(
+  if [ -n "$gate_fd" ]; then
+    eval "exec ${gate_fd}>&-"
+  fi
+  exec go test -json "$@"
+) >"$log"
 status=$?
 set -e
 
@@ -261,6 +320,15 @@ if ! write_timing_artifact; then
 fi
 
 if [ "$status" -ne 0 ]; then
+  # A signal death is not a test result, and on a shared host it is the
+  # likeliest failure of all: the sweep is killed by another agent's
+  # pattern-matched pkill or by an OOM reaper, never having finished (ga-spc).
+  # Say so in words. Reported as a bare "FAIL status=143" it reads as a real
+  # regression, and callers that pipe this through `tail` see only the pipe's
+  # exit 0 and report a killed sweep as a PASS.
+  if [ "$status" -gt 128 ]; then
+    echo "observable go test: KILLED by signal $((status - 128)) — the sweep did NOT complete, so this is neither a pass nor a failure. Re-run it; do not report this run's result. Check the exit status of this script directly, never a downstream pipe's." >&2
+  fi
   echo "observable go test: FAIL status=$status log=$log" >&2
   if ! print_failure_details; then
     echo "observable go test: warning: failure-detail rendering failed; product result is unchanged" >&2

@@ -468,6 +468,28 @@ GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
 test-result cache, not the compiled-object cache, and does not corrupt
 concurrent builds.
 
+## Shared-Host Test Conventions
+
+Many agents run test suites against one core pool. The full-sweep entry points
+(`make test`, `make test-mac`, `make test-cmd-gc-process`) and the sharded ones
+(`make test-fast-parallel` and friends) are both bounded by the push-gate slot
+mechanism, so a sweep may legitimately *queue* before it runs — see TESTING.md,
+"Cross-invocation concurrency bound via push-gate slots".
+
+Three rules follow from that, all of them learned from real incidents:
+
+- **`exit 75` is not a test failure.** It means the run never started because
+  the concurrency bound timed out. Re-run it; under `make` the distinguishing
+  signal is the stderr text, since `make` reports `Error 75` then exits 2.
+- **Never pattern-kill test processes.** `pkill -f 'go test'` or
+  `pkill -f 'make test'` on this host kills *other agents'* runs — every agent
+  runs the identical command line, so no pattern can select only your own. Kill
+  by process group or recorded pid, or don't kill at all.
+- **Never read a suite's result off a pipe.** `make test | tail` returns
+  `tail`'s exit 0, so a killed sweep reads as a pass. Check the command's own
+  exit status, or `set -o pipefail`. An exit status above 128 means the sweep
+  was signalled, not that it failed.
+
 ## Code quality gates
 
 Before considering any task complete:

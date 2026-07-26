@@ -928,10 +928,60 @@ the `scope=all` audit row, which fails on any change, growth or shrinkage
 alike, with no per-file exemption available — so driving the script as a
 plain shell job avoids that ratchet entirely instead of bumping it.
 
-Only `scripts/test-local-parallel` is wired to this gate — the same targets
-axis 2 leaves unconfined (`test-acceptance*`, `test-integration`,
+`scripts/go-test-observable` is wired to the same gate (`ga-spc`). It is the
+other funnel to `go test` — `make test`, `make test-mac`,
+`make test-cmd-gc-process` and `make test-productmetrics-testhook` all reach
+the product through it — and the unsharded `./...` sweep behind `make test` is
+the single heaviest job that runs on a shared agent host, so leaving it
+unbounded left the largest offender ungoverned. A witness patrol on 2026-07-26
+measured load 86.86 on a 24-core box with two such sweeps running
+concurrently; the 15m wall-clock timeout that produced was indistinguishable
+from a real regression and cost a merge cycle to disprove.
+
+Two deliberate differences from the `test-local-parallel` wiring:
+
+- **It gates only inside a city.** The bound applies when
+  `push_gate_city_root` resolves — which every agent gets via `GC_CITY_PATH` —
+  rather than falling back to a repo-relative slot directory. Outside a city
+  (CI runners, a developer laptop) there is no fleet to contend with, and
+  queueing there would stall the one caller that was never the problem.
+- **It waits longer by default.** A `./...` sweep holds its slot for 10-15
+  minutes, so `PUSH_GATE_MAX_WAIT_SECONDS` defaults to 1800 on this path; the
+  library's 600s default would expire while the current holders were still
+  legitimately running. An explicit caller value still wins.
+
+Because the gated targets shell out to each other — `test-local-parallel`'s
+`full` mode runs `make test-productmetrics-testhook`, which re-enters
+`go-test-observable` — a successful acquire exports `GC_PUSH_GATE_HELD=1` and
+a runner that sees it inherits "already gated" instead of taking a second
+slot. Without that marker one logical invocation would double-count against
+the cap, and once every slot was held by such a parent each child would block
+against its own parent for the full wait bound.
+
+Beyond those two entry points the bound does not apply: the same targets axis 2
+leaves unconfined (`test-acceptance*`, `test-integration`,
 `test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct
-`go test` invocations) are outside this bound too.
+`go test` invocations) are outside it too.
+
+#### Reading a sweep's result correctly
+
+Two failure modes on a shared host masquerade as test results. Both are
+reported explicitly by `scripts/go-test-observable`:
+
+- **A killed sweep is not a result.** Exit status above 128 means the run was
+  terminated by a signal — most often another agent's pattern-matched `pkill`
+  or an OOM reaper — and the script says `KILLED by signal <n>` in words. It is
+  neither a pass nor a failure; re-run it. Never pattern-kill `go test` or
+  `make test` on a shared host: every agent runs the identical command line, so
+  no pattern selects only your own processes. Target your own process group.
+- **Never read the result off a pipe.** `make test | tail` reports `tail`'s
+  exit 0, so a SIGTERM'd sweep reads as a pass. Check the exit status of the
+  command itself, or set `set -o pipefail` (see `PIPESTATUS`).
+
+Each run's JSON log is named for its owning worktree and pid
+(`gascity-<target>-<worktree>-<pid>.jsonl.*`). With several agents sweeping at
+once the older anonymous names were indistinguishable in the shared temp dir,
+and reading the wrong one attributes another agent's failures to your branch.
 
 This mechanism does not extend `bd` claim-lease heartbeats across the
 wait+run phases. An earlier draft of the originating bead (`ga-owh20p`)

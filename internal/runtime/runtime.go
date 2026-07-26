@@ -323,6 +323,15 @@ type ImmediateNudgeProvider interface {
 // path does not race the submit key at all. Implementations must not report
 // false merely because they cannot observe the agent — a runtime with no
 // confirmation signal reports true and keeps best-effort delivery.
+//
+// WRAPPERS MUST OVERRIDE BOTH PAIRS. Callers prefer NudgeConfirm/NudgeNowConfirm
+// over Nudge/NudgeNow, so a decorator that overrides only the latter has its
+// override silently bypassed whenever it embeds a confirming provider — Go
+// promotes the embedded Confirm method and the wrapper never runs. A decorator
+// that forwards to a base by field must forward all four, or it hides the base's
+// confirmation and makes strand detection inert. See statusProvider
+// (cmd/gc/status_provider.go) and seamBackedProvider
+// (internal/runtime/tmux/cutover.go) for the two shapes.
 type ConfirmingNudgeProvider interface {
 	// NudgeConfirm mirrors Nudge and reports whether the message submitted.
 	NudgeConfirm(name string, content []ContentBlock) (submitted bool, err error)

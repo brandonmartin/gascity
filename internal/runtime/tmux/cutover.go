@@ -61,6 +61,27 @@ func (s *seamBackedProvider) Nudge(name string, content []runtime.ContentBlock) 
 	return s.seams.Nudge(name, content)
 }
 
+// NudgeConfirm keeps the routed Nudge authoritative. The embedded *Provider
+// also supplies NudgeConfirm, so without this override a confirm-preferring
+// caller would promote the raw method and bypass the seam routing entirely.
+func (s *seamBackedProvider) NudgeConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	if cp, ok := s.seams.(runtime.ConfirmingNudgeProvider); ok {
+		return cp.NudgeConfirm(name, content)
+	}
+	return true, s.seams.Nudge(name, content)
+}
+
+// NudgeNowConfirm keeps the routed delivery authoritative. See NudgeConfirm.
+func (s *seamBackedProvider) NudgeNowConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	if cp, ok := s.seams.(runtime.ConfirmingNudgeProvider); ok {
+		return cp.NudgeNowConfirm(name, content)
+	}
+	if np, ok := s.seams.(runtime.ImmediateNudgeProvider); ok {
+		return true, np.NudgeNow(name, content)
+	}
+	return true, s.seams.Nudge(name, content)
+}
+
 func (s *seamBackedProvider) SetMeta(name, key, value string) error {
 	return s.seams.SetMeta(name, key, value)
 }

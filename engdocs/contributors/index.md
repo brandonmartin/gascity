@@ -18,6 +18,9 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Hold and Blocked Label Conventions](hold-label-conventions.md) when a bead
   needs to pause on a specific actor or condition — only `hold:mayor` and
   `hold:external` are canonical
+- [Publish-Gate Staleness](publish-gate-staleness.md) when a bead halts with a
+  finished-but-unpublished branch — what to record, and why `metadata.branch`
+  is not the SHA to publish
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 

@@ -559,6 +559,7 @@ bd close <id>         # Complete work
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 - For controller or session reconciler incidents, use `gc trace` and follow `engdocs/contributors/reconciler-debugging.md` for the artifact collection workflow.
 - When a bead needs to pause on a specific actor or condition, only `hold:mayor` and `hold:external` are canonical (set via `bd set-state <id> hold=mayor|external --reason "..."`) — never invent a new ad hoc hold/blocked label. See `engdocs/contributors/hold-label-conventions.md`.
+- When a bead halts holding a finished-but-unpublished branch (`branch_ready=true`), publish `metadata.commit`, not `metadata.branch` — the branch can point at pre-rebase history. `gc doctor` reports the gate age and drift; see `engdocs/contributors/publish-gate-staleness.md`.
 
 ## Session Completion
 

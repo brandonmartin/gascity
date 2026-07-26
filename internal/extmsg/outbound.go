@@ -49,6 +49,27 @@ type OutboundDeps struct {
 	ResolveSessionSelector func(ctx context.Context, selector string) (string, error)
 }
 
+// unboundConversationError explains why an outbound publish has no
+// destination.
+//
+// Binding resolution (step 1) runs before the adapter lookup (step 3), so a
+// provider that was never registered with extmsg at all still surfaces as a
+// missing *binding*. That misdirects the reader: a binding can never exist
+// for an unwired provider, and the reported remedy — go find or create the
+// binding — is unreachable. The diagnosis cost hours on a Discord-wired city
+// whose pack kept its own binding registry and never registered an extmsg
+// adapter (ga-4kfx), where every binding probe correctly returned empty.
+//
+// When the provider is wired, the historical string is returned byte-identical:
+// external callers pattern-match it.
+func unboundConversationError(reg *AdapterRegistry, ref ConversationRef) error {
+	if reg != nil && !reg.HasProvider(ref.Provider) {
+		return fmt.Errorf("provider %q has no registered adapter, so conversation %s cannot be delivered and cannot hold an active binding (register an adapter via POST /extmsg/adapters, then bind the conversation via POST /extmsg/bind): %w",
+			ref.Provider, ref.ConversationID, ErrProviderNotRegistered)
+	}
+	return fmt.Errorf("no active binding for conversation %s/%s", ref.Provider, ref.ConversationID)
+}
+
 // HandleOutbound publishes a message from a session to an external conversation.
 //
 // Pipeline:
@@ -132,18 +153,15 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		publishingSession = binding.SessionID
 		bindingGeneration = binding.BindingGeneration
 	case req.SessionID == "":
-		// No binding and no caller session — preserve the historical error
-		// string so external callers that pattern-match it stay green.
-		return nil, fmt.Errorf("no active binding for conversation %s/%s",
-			req.Conversation.Provider, req.Conversation.ConversationID)
+		// No binding and no caller session.
+		return nil, unboundConversationError(deps.Registry, req.Conversation)
 	default:
 		decision, err := deps.Services.Groups.ResolveOutbound(ctx, req.Conversation, req.SessionID)
 		if err != nil {
 			return nil, fmt.Errorf("resolving group route: %w", err)
 		}
 		if decision == nil || decision.Match != GroupRouteParticipantMatch {
-			return nil, fmt.Errorf("no active binding for conversation %s/%s",
-				req.Conversation.Provider, req.Conversation.ConversationID)
+			return nil, unboundConversationError(deps.Registry, req.Conversation)
 		}
 		publishingSession = req.SessionID
 	}

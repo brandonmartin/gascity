@@ -55,6 +55,22 @@ func (r *AdapterRegistry) LookupByConversation(ref ConversationRef) TransportAda
 	return r.Lookup(AdapterKey{Provider: ref.Provider, AccountID: ref.AccountID})
 }
 
+// HasProvider reports whether any adapter is registered for the given
+// provider, regardless of account. Provider-level granularity is what
+// outbound diagnostics need: a caller can name a conversation whose
+// AccountID it never learned, so an exact-key lookup would falsely report
+// the whole provider as unwired.
+func (r *AdapterRegistry) HasProvider(provider string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for k := range r.adapters {
+		if k.Provider == provider {
+			return true
+		}
+	}
+	return false
+}
+
 // List returns all registered adapter keys.
 func (r *AdapterRegistry) List() []AdapterKey {
 	r.mu.RLock()

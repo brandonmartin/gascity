@@ -2828,12 +2828,13 @@ func realizePoolDesiredSessions(
 		// directly (W-pool), so the former raw pool-loop projection is gone; the
 		// bind fold and every downstream identity read flow through Info.
 		sbInfo := item.sessionInfo
-		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sbInfo, item.request); err != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
-		} else {
-			sbInfo = bound
-		}
 		slot := item.slot
+		// Derive the concrete instance identity BEFORE binding the trigger bead.
+		// The bind resolves and persists this session's work_dir, and work_dir
+		// templates commonly expand {{.AgentBase}}; resolving it against the pool
+		// TEMPLATE name collapses every slot onto one shared directory (ga-po0o).
+		// None of the manual-session predicates read keys the bind patch writes,
+		// so classifying off the pre-bind Info is equivalent.
 		manualSession := isManualSessionInfoForAgent(sbInfo, cfgAgent)
 		var (
 			resolveAgent      *config.Agent
@@ -2845,6 +2846,18 @@ func realizePoolDesiredSessions(
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, qualifiedInstance)
 		} else {
 			resolveAgent, qualifiedInstance, poolSlot = poolDesiredRequestIdentity(cfgAgent, slot)
+		}
+		// A manual session whose persisted identity is unreadable leaves
+		// qualifiedInstance empty; fall back to the template name rather than
+		// resolving work_dir against an empty AgentBase.
+		bindIdentity := strings.TrimSpace(qualifiedInstance)
+		if bindIdentity == "" {
+			bindIdentity = qualifiedName
+		}
+		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, bindIdentity, sbInfo, item.request); err != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+		} else {
+			sbInfo = bound
 		}
 		fpExtra := buildFingerprintExtra(resolveAgent)
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedInstance, fpExtra, sbInfo)

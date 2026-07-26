@@ -15,10 +15,8 @@ var publishGateNow = time.Date(2026, 7, 26, 6, 0, 0, 0, time.UTC)
 
 // publishGateCheckFor wires a check against an in-memory store and a fake
 // repository, with the clock pinned.
-func publishGateCheckFor(store beads.Store, repo publishgate.Resolver, list []beads.Bead) *publishGateCheck {
-	if store == nil {
-		store = beads.NewMemStoreFrom(0, list, nil)
-	}
+func publishGateCheckFor(repo publishgate.Resolver, list []beads.Bead) *publishGateCheck {
+	store := beads.NewMemStoreFrom(0, list, nil)
 	c := newPublishGateCheck("/rig", "gascity", func(string) (beads.Store, error) { return store, nil })
 	c.newResolver = func(string) publishgate.Resolver { return repo }
 	c.now = func() time.Time { return publishGateNow }
@@ -62,7 +60,7 @@ func publishedRepo(beadIDs ...string) publishgate.Resolver {
 }
 
 func TestPublishGateCheckQuietWithNoHolds(t *testing.T) {
-	check := publishGateCheckFor(nil, publishedRepo(), []beads.Bead{
+	check := publishGateCheckFor(publishedRepo(), []beads.Bead{
 		{ID: "ga-1", Title: "ordinary work", Type: "task", Status: "open"},
 		{ID: "ga-2", Title: "in flight", Type: "task", Status: "in_progress", Metadata: beads.StringMap{"branch": "polecat/ga-2"}},
 	})
@@ -83,7 +81,7 @@ func TestPublishGateCheckQuietWithNoHolds(t *testing.T) {
 }
 
 func TestPublishGateCheckReportsAFreshHoldWithoutAlarming(t *testing.T) {
-	check := publishGateCheckFor(nil, publishedRepo("ga-fresh"),
+	check := publishGateCheckFor(publishedRepo("ga-fresh"),
 		[]beads.Bead{heldBead("ga-fresh", publishGateNow.Add(-2*time.Hour).Format(time.RFC3339))})
 	res := check.Run(&doctor.CheckContext{})
 
@@ -99,7 +97,7 @@ func TestPublishGateCheckReportsAFreshHoldWithoutAlarming(t *testing.T) {
 }
 
 func TestPublishGateCheckWarnsAtOneDay(t *testing.T) {
-	check := publishGateCheckFor(nil, publishedRepo("ga-warn"),
+	check := publishGateCheckFor(publishedRepo("ga-warn"),
 		[]beads.Bead{heldBead("ga-warn", publishGateNow.Add(-30*time.Hour).Format(time.RFC3339))})
 	res := check.Run(&doctor.CheckContext{})
 
@@ -115,7 +113,7 @@ func TestPublishGateCheckWarnsAtOneDay(t *testing.T) {
 }
 
 func TestPublishGateCheckEscalatesAtThreeDays(t *testing.T) {
-	check := publishGateCheckFor(nil, publishedRepo("ga-old"),
+	check := publishGateCheckFor(publishedRepo("ga-old"),
 		[]beads.Bead{heldBead("ga-old", publishGateNow.Add(-15*24*time.Hour).Format(time.RFC3339))})
 	res := check.Run(&doctor.CheckContext{})
 
@@ -138,7 +136,7 @@ func TestPublishGateCheckEscalatesAtThreeDays(t *testing.T) {
 func TestPublishGateCheckSurfacesUnpublishableBranch(t *testing.T) {
 	repo := publishedRepo()
 	repo.(*publishGateFakeRepo).refs["refs/remotes/origin/polecat/ga-b5h"] = publishGateTestPreRebase
-	check := publishGateCheckFor(nil, repo,
+	check := publishGateCheckFor(repo,
 		[]beads.Bead{heldBead("ga-b5h", publishGateNow.Add(-time.Hour).Format(time.RFC3339))})
 	res := check.Run(&doctor.CheckContext{})
 
@@ -157,7 +155,7 @@ func TestPublishGateCheckSurfacesUnpublishableBranch(t *testing.T) {
 // A gate with no clock sorts ahead of holds with a known, shorter age: an
 // unmeasured wait is the more urgent defect.
 func TestPublishGateCheckOrdersWorstFirst(t *testing.T) {
-	check := publishGateCheckFor(nil, publishedRepo("ga-old", "ga-mid", "ga-nostamp"), []beads.Bead{
+	check := publishGateCheckFor(publishedRepo("ga-old", "ga-mid", "ga-nostamp"), []beads.Bead{
 		heldBead("ga-mid", publishGateNow.Add(-30*time.Hour).Format(time.RFC3339)),
 		heldBead("ga-nostamp", ""),
 		heldBead("ga-old", publishGateNow.Add(-10*24*time.Hour).Format(time.RFC3339)),
@@ -181,7 +179,7 @@ func TestPublishGateCheckOrdersWorstFirst(t *testing.T) {
 func TestPublishGateCheckCatchesGateHaltReasonWithoutBranchReady(t *testing.T) {
 	bead := heldBead("ga-gate", publishGateNow.Add(-5*24*time.Hour).Format(time.RFC3339))
 	delete(bead.Metadata, publishgate.MetaBranchReady)
-	check := publishGateCheckFor(nil, publishedRepo("ga-gate"), []beads.Bead{bead})
+	check := publishGateCheckFor(publishedRepo("ga-gate"), []beads.Bead{bead})
 	res := check.Run(&doctor.CheckContext{})
 
 	if res.Status != doctor.StatusError {
@@ -193,7 +191,7 @@ func TestPublishGateCheckCatchesGateHaltReasonWithoutBranchReady(t *testing.T) {
 }
 
 func TestPublishGateCheckDegradesWhenGitIsUnavailable(t *testing.T) {
-	check := publishGateCheckFor(nil, &publishGateFakeRepo{},
+	check := publishGateCheckFor(&publishGateFakeRepo{},
 		[]beads.Bead{heldBead("ga-nogit", publishGateNow.Add(-time.Hour).Format(time.RFC3339))})
 	res := check.Run(&doctor.CheckContext{})
 
@@ -221,7 +219,7 @@ func TestPublishGateCheckReportsStoreFailure(t *testing.T) {
 }
 
 func TestPublishGateCheckNameAndFixability(t *testing.T) {
-	check := publishGateCheckFor(nil, publishedRepo(), nil)
+	check := publishGateCheckFor(publishedRepo(), nil)
 	if got := check.Name(); got != "publish-gate:gascity" {
 		t.Errorf("Name = %q, want publish-gate:gascity", got)
 	}

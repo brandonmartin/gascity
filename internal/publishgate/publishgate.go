@@ -11,7 +11,7 @@
 // redone from scratch.
 //
 // The package answers four questions about a gate-held bead, without the
-// reader having to re-run rev-list archaeology:
+// reader having to reconstruct it with rev-list by hand:
 //
 //  1. How long has it been waiting? (age, from branch_ready_at)
 //  2. How far behind its target is the artifact now? (commits behind)
@@ -57,7 +57,7 @@ const (
 	MetaTarget = "target"
 	// MetaTargetHead is the target's SHA at the moment the artifact was
 	// rebased and halted. Recording it turns "how much has the target moved
-	// since this was verified?" into a lookup instead of an archaeology pass.
+	// since this was verified?" into a lookup instead of a hand reconstruction.
 	MetaTargetHead = "target_head"
 	// MetaBranchStale records, at halt time, that MetaBranch does not
 	// resolve to MetaCommit on the remote — i.e. following the obvious
@@ -272,109 +272,109 @@ type Assessment struct {
 // rather than failing.
 func Assess(a Artifact, r Resolver, now time.Time, t Thresholds) Assessment {
 	t = t.normalized()
-	res := Assessment{Artifact: a, Severity: SeverityOK}
+	out := Assessment{Artifact: a, Severity: SeverityOK}
 
-	res.assessAge(now, t)
-	res.resolveTarget(r)
-	res.resolvePublishSHA(r)
-	res.measureDrift(r)
-	res.assessBranchAuthority(r)
-	return res
+	out.assessAge(now, t)
+	out.resolveTarget(r)
+	out.resolvePublishSHA(r)
+	out.measureDrift(r)
+	out.assessBranchAuthority(r)
+	return out
 }
 
 // assessAge applies the gate clock. A missing branch_ready_at is not a
 // benign omission: without it nothing can tell a fresh artifact from one
 // that has waited two weeks, which is the failure this package exists to
 // prevent. Treat it as at least a warning.
-func (res *Assessment) assessAge(now time.Time, t Thresholds) {
-	if res.ReadyAt.IsZero() {
-		res.note("no %s recorded — gate age unknown (the bead's own updated_at moves on every touch and cannot stand in)", MetaBranchReadyAt)
-		res.raise(SeverityWarn)
+func (a *Assessment) assessAge(now time.Time, t Thresholds) {
+	if a.ReadyAt.IsZero() {
+		a.note("no %s recorded — gate age unknown (the bead's own updated_at moves on every touch and cannot stand in)", MetaBranchReadyAt)
+		a.raise(SeverityWarn)
 		return
 	}
-	res.AgeKnown = true
-	res.Age = now.Sub(res.ReadyAt)
+	a.AgeKnown = true
+	a.Age = now.Sub(a.ReadyAt)
 	switch {
-	case res.Age >= t.EscalateAfter:
-		res.raise(SeverityEscalate)
-		res.note("held %s at the gate (escalate after %s)", formatAge(res.Age), formatAge(t.EscalateAfter))
-	case res.Age >= t.WarnAfter:
-		res.raise(SeverityWarn)
-		res.note("held %s at the gate (warn after %s)", formatAge(res.Age), formatAge(t.WarnAfter))
+	case a.Age >= t.EscalateAfter:
+		a.raise(SeverityEscalate)
+		a.note("held %s at the gate (escalate after %s)", formatAge(a.Age), formatAge(t.EscalateAfter))
+	case a.Age >= t.WarnAfter:
+		a.raise(SeverityWarn)
+		a.note("held %s at the gate (warn after %s)", formatAge(a.Age), formatAge(t.WarnAfter))
 	}
 }
 
-func (res *Assessment) resolveTarget(r Resolver) {
+func (a *Assessment) resolveTarget(r Resolver) {
 	if r == nil {
 		return
 	}
-	if res.Target == "" {
-		res.note("no %s recorded — cannot measure drift", MetaTarget)
-		res.raise(SeverityWarn)
+	if a.Target == "" {
+		a.note("no %s recorded — cannot measure drift", MetaTarget)
+		a.raise(SeverityWarn)
 		return
 	}
-	tip, err := ResolveTarget(r, res.Target)
+	tip, err := ResolveTarget(r, a.Target)
 	if err != nil {
-		res.note("target %q does not resolve locally — drift not measured (fetch the rig repo)", res.Target)
-		res.raise(SeverityWarn)
+		a.note("target %q does not resolve locally — drift not measured (fetch the rig repo)", a.Target)
+		a.raise(SeverityWarn)
 		return
 	}
-	res.TargetTip = tip
+	a.TargetTip = tip
 }
 
 // resolvePublishSHA picks the commit a publisher must ship. metadata.commit
 // wins when present: it is the only field that survived the ga-b5h failure
 // intact, where metadata.branch still pointed at pre-rebase history.
-func (res *Assessment) resolvePublishSHA(r Resolver) {
+func (a *Assessment) resolvePublishSHA(r Resolver) {
 	if r == nil {
-		if res.Commit != "" {
-			res.PublishSHA = res.Commit
-			res.PublishSHASource = "metadata." + MetaCommit
+		if a.Commit != "" {
+			a.PublishSHA = a.Commit
+			a.PublishSHASource = "metadata." + MetaCommit
 		}
 		return
 	}
-	if res.Commit != "" {
-		if sha, err := r.ResolveRef(res.Commit); err == nil {
-			res.PublishSHA = sha
-			res.PublishSHASource = "metadata." + MetaCommit
+	if a.Commit != "" {
+		if sha, err := r.ResolveRef(a.Commit); err == nil {
+			a.PublishSHA = sha
+			a.PublishSHASource = "metadata." + MetaCommit
 			return
 		}
-		res.note("metadata.%s %s is not present in this repository — the worktree may have been reaped", MetaCommit, shortSHA(res.Commit))
-		res.raise(SeverityWarn)
+		a.note("metadata.%s %s is not present in this repository — the worktree may have been reaped", MetaCommit, shortSHA(a.Commit))
+		a.raise(SeverityWarn)
 	} else {
-		res.note("no metadata.%s recorded — falling back to whatever metadata.%s resolves to", MetaCommit, MetaBranch)
-		res.raise(SeverityWarn)
+		a.note("no metadata.%s recorded — falling back to whatever metadata.%s resolves to", MetaCommit, MetaBranch)
+		a.raise(SeverityWarn)
 	}
-	if res.Branch == "" {
+	if a.Branch == "" {
 		return
 	}
-	for _, ref := range branchRefCandidates(res.Branch) {
+	for _, ref := range branchRefCandidates(a.Branch) {
 		if sha, err := r.ResolveRef(ref); err == nil {
-			res.PublishSHA = sha
-			res.PublishSHASource = ref
+			a.PublishSHA = sha
+			a.PublishSHASource = ref
 			return
 		}
 	}
 }
 
-func (res *Assessment) measureDrift(r Resolver) {
-	if r == nil || res.TargetTip == "" {
+func (a *Assessment) measureDrift(r Resolver) {
+	if r == nil || a.TargetTip == "" {
 		return
 	}
-	if res.PublishSHA != "" {
-		if behind, err := r.CountBehind(res.PublishSHA, res.TargetTip); err == nil {
-			res.Behind = behind
-			res.BehindKnown = true
+	if a.PublishSHA != "" {
+		if behind, err := r.CountBehind(a.PublishSHA, a.TargetTip); err == nil {
+			a.Behind = behind
+			a.BehindKnown = true
 		}
 	}
-	if res.TargetHead == "" {
-		res.note("no %s recorded — the target SHA this was rebased onto is unknown", MetaTargetHead)
-		res.raise(SeverityWarn)
+	if a.TargetHead == "" {
+		a.note("no %s recorded — the target SHA this was rebased onto is unknown", MetaTargetHead)
+		a.raise(SeverityWarn)
 		return
 	}
-	if moved, err := r.CountBehind(res.TargetHead, res.TargetTip); err == nil {
-		res.MovedSinceHalt = moved
-		res.MovedSinceHaltKnown = true
+	if moved, err := r.CountBehind(a.TargetHead, a.TargetTip); err == nil {
+		a.MovedSinceHalt = moved
+		a.MovedSinceHaltKnown = true
 	}
 }
 
@@ -382,41 +382,41 @@ func (res *Assessment) measureDrift(r Resolver) {
 // not publishable as-is when it resolves to pre-rebase history. A publisher
 // following the obvious field would silently defeat the rebase, so a
 // divergence is always at least a warning.
-func (res *Assessment) assessBranchAuthority(r Resolver) {
-	if r == nil || res.Branch == "" || res.PublishSHA == "" {
+func (a *Assessment) assessBranchAuthority(r Resolver) {
+	if r == nil || a.Branch == "" || a.PublishSHA == "" {
 		return
 	}
 	// When the publish SHA was derived from the branch itself there is
 	// nothing independent to compare against.
-	if res.PublishSHASource != "metadata."+MetaCommit {
+	if a.PublishSHASource != "metadata."+MetaCommit {
 		return
 	}
-	res.BranchStateKnown = true
-	sha, err := ResolveBranchTip(r, res.Branch)
+	a.BranchStateKnown = true
+	sha, err := ResolveBranchTip(r, a.Branch)
 	if err != nil {
-		res.BranchStale = true
-		res.note("metadata.%s %q is not published on any remote — only metadata.%s %s carries the artifact",
-			MetaBranch, res.Branch, MetaCommit, shortSHA(res.PublishSHA))
-		res.raise(SeverityWarn)
+		a.BranchStale = true
+		a.note("metadata.%s %q is not published on any remote — only metadata.%s %s carries the artifact",
+			MetaBranch, a.Branch, MetaCommit, shortSHA(a.PublishSHA))
+		a.raise(SeverityWarn)
 		return
 	}
-	res.BranchTip = sha
-	if sha != res.PublishSHA {
-		res.BranchStale = true
-		res.note("metadata.%s %q resolves to %s on the remote, not the artifact %s — publish the commit, not the branch",
-			MetaBranch, res.Branch, shortSHA(sha), shortSHA(res.PublishSHA))
-		res.raise(SeverityWarn)
+	a.BranchTip = sha
+	if sha != a.PublishSHA {
+		a.BranchStale = true
+		a.note("metadata.%s %q resolves to %s on the remote, not the artifact %s — publish the commit, not the branch",
+			MetaBranch, a.Branch, shortSHA(sha), shortSHA(a.PublishSHA))
+		a.raise(SeverityWarn)
 	}
 }
 
-func (res *Assessment) raise(s Severity) {
-	if s > res.Severity {
-		res.Severity = s
+func (a *Assessment) raise(s Severity) {
+	if s > a.Severity {
+		a.Severity = s
 	}
 }
 
-func (res *Assessment) note(format string, args ...any) {
-	res.Notes = append(res.Notes, fmt.Sprintf(format, args...))
+func (a *Assessment) note(format string, args ...any) {
+	a.Notes = append(a.Notes, fmt.Sprintf(format, args...))
 }
 
 // Line renders a one-line summary suitable for a doctor detail row.

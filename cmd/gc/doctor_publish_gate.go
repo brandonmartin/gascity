@@ -16,7 +16,7 @@ import (
 const publishGateFixHint = "A gate hold older than the artifact's tolerable drift is a defect, not a queue. " +
 	"Publish it (push the SHA the check reports, NOT metadata.branch, which can point at pre-rebase history), " +
 	"or re-dispatch the bead for a fresh rebase. Artifacts missing branch_ready_at/target_head were halted " +
-	"without provenance — re-stamp them so the next reader does not have to run rev-list archaeology."
+	"without provenance — re-stamp them so the next reader does not have to reconstruct it with rev-list."
 
 // publishGateCheck reports artifacts parked at a publish gate: how long each
 // has waited, how far its target has moved since, and which SHA is actually

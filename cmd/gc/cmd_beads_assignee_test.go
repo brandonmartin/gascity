@@ -1,0 +1,256 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
+)
+
+// The regression under test (ga-rp4k): a bead that lives on a RIG ledger but is
+// assigned to a city-scoped agent (gastown.mayor) is invisible to bare
+// `bd list --assignee`, because bare bd reads one ledger. `gc beads list`
+// already sweeps every rig store plus the city store, so pairing that sweep
+// with --assignee is the cross-ledger read. Three P1/P2 delays on 2026-07-26
+// traced to the mayor reporting an empty hook while holding assigned
+// rig-ledger work.
+
+// newAssigneeTestStore returns an in-memory store seeded with the given beads.
+// Assignee and Status are preserved as supplied so the filters under test see
+// realistic rows.
+func newAssigneeTestStore(t *testing.T, seed []beads.Bead) beads.Store {
+	t.Helper()
+	store := beads.NewMemStore()
+	for _, b := range seed {
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("seeding bead %q: %v", b.Title, err)
+		}
+		// Create fills ID/Status/CreatedAt; force the status the case wants.
+		if b.Status != "" && created.Status != b.Status {
+			if err := store.Update(created.ID, beads.UpdateOpts{Status: &b.Status}); err != nil {
+				t.Fatalf("setting status on %q: %v", created.ID, err)
+			}
+		}
+	}
+	return store
+}
+
+// TestCollectBeadsAcrossStores_AssigneeSpansRigLedgers is the core regression
+// pin: an assignee filter must reach beads held in a NON-city store. The city
+// store here stands in for the town ledger and the second store for a rig
+// ledger; only the rig store holds the mayor's bead, which is exactly the shape
+// that made ga-6s9 / ga-0562 invisible.
+func TestCollectBeadsAcrossStores_AssigneeSpansRigLedgers(t *testing.T) {
+	cityStore := newAssigneeTestStore(t, []beads.Bead{
+		{Title: "town bead for someone else", Assignee: "gastown.witness", Status: "open"},
+	})
+	rigStore := newAssigneeTestStore(t, []beads.Bead{
+		{Title: "rig bead for the mayor", Assignee: "gastown.mayor", Status: "open"},
+		{Title: "rig bead for a polecat", Assignee: "gascity/gastown.polecat", Status: "open"},
+	})
+	stores := []convoyStoreView{
+		{path: "city", store: cityStore},
+		{path: "rig", store: rigStore},
+	}
+
+	got, err := collectBeadsAcrossStores(stores, beadFilters{assignee: "gastown.mayor"})
+	if err != nil {
+		t.Fatalf("collectBeadsAcrossStores: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("assignee sweep returned %d beads, want 1; got=%+v", len(got), got)
+	}
+	if got[0].Title != "rig bead for the mayor" {
+		t.Errorf("assignee sweep returned %q, want the rig-ledger bead", got[0].Title)
+	}
+	if got[0].Assignee != "gastown.mayor" {
+		t.Errorf("returned bead assignee = %q, want %q", got[0].Assignee, "gastown.mayor")
+	}
+}
+
+// TestCollectBeadsAcrossStores_AssigneeCombinesWithStatus verifies the assignee
+// filter composes with --status instead of overriding it. The mayor's startup
+// check is an in_progress query, so an assignee sweep that ignored status would
+// hand back already-open backlog as if it were resumable work.
+func TestCollectBeadsAcrossStores_AssigneeCombinesWithStatus(t *testing.T) {
+	rigStore := newAssigneeTestStore(t, []beads.Bead{
+		{Title: "mayor in progress", Assignee: "gastown.mayor", Status: "in_progress"},
+		{Title: "mayor still open", Assignee: "gastown.mayor", Status: "open"},
+		{Title: "other in progress", Assignee: "gastown.witness", Status: "in_progress"},
+	})
+	stores := []convoyStoreView{{path: "rig", store: rigStore}}
+
+	got, err := collectBeadsAcrossStores(stores, beadFilters{
+		assignee: "gastown.mayor",
+		status:   "in_progress",
+	})
+	if err != nil {
+		t.Fatalf("collectBeadsAcrossStores: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("assignee+status returned %d beads, want 1; got=%+v", len(got), got)
+	}
+	if got[0].Title != "mayor in progress" {
+		t.Errorf("assignee+status returned %q, want %q", got[0].Title, "mayor in progress")
+	}
+}
+
+// TestFilterBeads_Assignee covers the client-side filter the API lane relies on.
+// The first subtest is the important one: assignee as the ONLY filter must not
+// hit filterBeads' empty-filter fast path, which would return every bead in
+// town and read as "this agent owns everything".
+func TestFilterBeads_Assignee(t *testing.T) {
+	all := []beads.Bead{
+		{ID: "ga-1", Assignee: "gastown.mayor", Status: "open"},
+		{ID: "ga-2", Assignee: "gastown.witness", Status: "open"},
+		{ID: "ga-3", Assignee: "gastown.mayor", Status: "in_progress"},
+		{ID: "ga-4", Assignee: "", Status: "open"},
+	}
+
+	tests := []struct {
+		name    string
+		filters beadFilters
+		wantIDs []string
+	}{
+		{
+			name:    "assignee only is not short-circuited",
+			filters: beadFilters{assignee: "gastown.mayor"},
+			wantIDs: []string{"ga-1", "ga-3"},
+		},
+		{
+			name:    "assignee with status",
+			filters: beadFilters{assignee: "gastown.mayor", status: "in_progress"},
+			wantIDs: []string{"ga-3"},
+		},
+		{
+			name:    "assignee matches exactly, not by prefix",
+			filters: beadFilters{assignee: "gastown.may"},
+			wantIDs: nil,
+		},
+		{
+			name:    "unassigned beads are excluded",
+			filters: beadFilters{assignee: "gastown.witness"},
+			wantIDs: []string{"ga-2"},
+		},
+		{
+			name:    "no filters still returns everything",
+			filters: beadFilters{},
+			wantIDs: []string{"ga-1", "ga-2", "ga-3", "ga-4"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterBeads(all, tc.filters)
+			if len(got) != len(tc.wantIDs) {
+				t.Fatalf("filterBeads returned %d beads, want %d; got=%+v", len(got), len(tc.wantIDs), got)
+			}
+			for i, want := range tc.wantIDs {
+				if got[i].ID != want {
+					t.Errorf("bead[%d] = %q, want %q", i, got[i].ID, want)
+				}
+			}
+		})
+	}
+}
+
+// TestParseBeadFilters_Assignee pins both flag spellings and, critically, that
+// --assignee is consumed rather than left in the positional remainder where the
+// fake-bd harness would treat it as a bead ID.
+func TestParseBeadFilters_Assignee(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantAssignee string
+		wantRest     []string
+	}{
+		{
+			name:         "equals form",
+			args:         []string{"--assignee=gastown.mayor"},
+			wantAssignee: "gastown.mayor",
+			wantRest:     nil,
+		},
+		{
+			name:         "space-separated form",
+			args:         []string{"--assignee", "gastown.mayor"},
+			wantAssignee: "gastown.mayor",
+			wantRest:     nil,
+		},
+		{
+			name:         "alongside other filters, positional preserved",
+			args:         []string{"--status", "in_progress", "--assignee", "gastown.mayor", "ga-xyz"},
+			wantAssignee: "gastown.mayor",
+			wantRest:     []string{"ga-xyz"},
+		},
+		{
+			name:         "empty assignee value stays empty",
+			args:         []string{"--assignee="},
+			wantAssignee: "",
+			wantRest:     nil,
+		},
+		{
+			name:         "trailing flag with no value is not consumed as a filter",
+			args:         []string{"--assignee"},
+			wantAssignee: "",
+			wantRest:     []string{"--assignee"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, rest := parseBeadFilters(tc.args)
+			if got.assignee != tc.wantAssignee {
+				t.Errorf("assignee = %q, want %q", got.assignee, tc.wantAssignee)
+			}
+			if len(rest) != len(tc.wantRest) {
+				t.Fatalf("rest = %v, want %v", rest, tc.wantRest)
+			}
+			for i, want := range tc.wantRest {
+				if rest[i] != want {
+					t.Errorf("rest[%d] = %q, want %q", i, rest[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestRouteBeadsList_AssigneeFiltersAPILane verifies the API lane narrows by
+// assignee on the client. The endpoint has no assignee parameter, so a server
+// returning extra rows must still produce a filtered listing — otherwise the
+// command's answer would depend on which lane happened to serve it.
+func TestRouteBeadsList_AssigneeFiltersAPILane(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeBeadsTestCity(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "1")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{"id": "ga-mine", "title": "mayor work", "assignee": "gastown.mayor", "status": "open"},
+				{"id": "ga-theirs", "title": "witness work", "assignee": "gastown.witness", "status": "open"},
+			},
+			"total": 2,
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeBeadsList(cityPath, c, "", "text", beadFilters{assignee: "gastown.mayor"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "ga-mine") {
+		t.Errorf("output missing the assigned bead ga-mine; stdout=%q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "ga-theirs") {
+		t.Errorf("output leaked another agent's bead ga-theirs; stdout=%q", stdout.String())
+	}
+}

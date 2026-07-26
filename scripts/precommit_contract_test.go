@@ -263,6 +263,19 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 	clientPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "web", "shared", "src", "generated", "gc-supervisor-client")
 	distPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "dist", "placeholder")
 
+	// The hook resolves its beads chain relative to `git rev-parse
+	// --show-toplevel`, which is this temp repo — install the real forwarder
+	// there rather than re-implementing it.
+	chain, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "beads-chain.sh"))
+	if err != nil {
+		t.Fatalf("read beads-chain.sh: %v", err)
+	}
+	chainPath := filepath.Join(tmpRepo, ".githooks", "lib", "beads-chain.sh")
+	if err := os.MkdirAll(filepath.Dir(chainPath), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks/lib: %v", err)
+	}
+	writeExecutable(t, chainPath, string(chain))
+
 	runGit("init")
 	writeTestFile(t, specPath, "{}\n")
 	writeTestFile(t, clientPath, "placeholder\n")
@@ -286,6 +299,11 @@ exit 0
 	// block at all (the reviewer's criterion-2 gap), not the real
 	// dashboard-check/dashboard-smoke targets, which need the full repo.
 	writeExecutable(t, filepath.Join(binDir, "make"), `#!/usr/bin/env bash
+exit 0
+`)
+	// Stub bd so the chained beads pre-commit hook is a no-op here; this test
+	// is about the repo hook's own control flow.
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env bash
 exit 0
 `)
 

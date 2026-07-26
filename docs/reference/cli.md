@@ -545,11 +545,13 @@ gc beads list [flags]
 gc beads list
 gc beads list --label ready-to-build
 gc beads list --status open --format=json
+gc beads list --assignee gastown.mayor --status in_progress
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
+| `--assignee` | string |  | filter to beads assigned to this identity (across every rig and the city) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |

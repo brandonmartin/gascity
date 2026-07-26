@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -414,8 +415,12 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 //  1. TTL: skip roots with activity newer than now-wispGCCloseAbandonedTTL so
 //     live/in-flight roots and the external operational reconciler are never
 //     raced.
-//  2. descendants > 0: never close a stepless root — that would race the
-//     instantiator (mirrors autocloseMoleculeIfComplete).
+//  2. Stepless: a root with no descendants has no completion signal of its own,
+//     so it closes only when steplessRootIsAbandoned says it was never claimed.
+//     A claimed stepless root is held by a live worker; an unclaimed one that
+//     outlived the TTL is a leaked pour. (The reactive
+//     autocloseMoleculeIfComplete skips stepless roots outright — it has no TTL
+//     to bound the instantiator race with, and this sweep does.)
 //  3. Exempt: skip roots carrying the gc.gc_exempt marker. This is a generic,
 //     operator-supplied opt-out — the SDK never stamps it (stamping a specific
 //     named root would hardcode a deployment role). A deployment marks any
@@ -463,8 +468,9 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 		if !terminal {
 			continue
 		}
-		// Guard 2: never close a stepless root — that races the instantiator.
-		if descendants == 0 {
+		// Guard 2: a stepless root is only closable once it is provably
+		// unclaimed — see steplessRootIsAbandoned.
+		if descendants == 0 && !steplessRootIsAbandoned(root) {
 			continue
 		}
 
@@ -505,6 +511,41 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 // fueling the wisp backlog the PR targets.
 func isAbandonedRootCandidate(b beads.Bead) bool {
 	return sourceworkflow.IsWorkflowRoot(b) || b.Type == "molecule"
+}
+
+// steplessRootIsAbandoned reports whether a root with no descendants is safe
+// for the periodic sweep to close. Callers apply it only after the idle-TTL
+// guard, so "abandoned" here means "still unclaimed long after anything that
+// would claim it should have".
+//
+// A stepless root has no completion signal of its own, so the sweep leans on
+// the ONE status predicate the launch path already owns:
+// sling.PromoteWorkflowLaunchBead moves a root OUT of the unclaimed set
+// (sling.ShouldPromoteWorkflowLaunchStatus) and into in_progress the moment a
+// worker takes it. Reading claim state back through that same predicate is what
+// keeps the two halves from drifting: a root still carrying an unclaimed status
+// is, by construction, one no worker ever took, and no separately-written
+// status literal can disagree with the promoter about which statuses those are.
+//
+// Both halves of that matter:
+//
+//   - Unclaimed + idle past TTL: either a root-only formula whose owner is long
+//     gone, or an instantiation that died before writing its steps. Both are
+//     garbage, and leaving them is what let root-only patrol wisps accumulate
+//     unboundedly — one per restart cycle, invisible to the assignee-and-status
+//     filtered queries meant to reconcile them (gastownhall/gascity ga-98b).
+//   - Claimed: a live worker holds it. A root bead's UpdatedAt does not advance
+//     while its agent works, so idle age cannot tell "busy" from "abandoned"
+//     here; only the claim status can, and this one is no longer unclaimed.
+//
+// The unclaimed arm also reaps routed demand that has sat unclaimed past the
+// TTL. That is intended — a day-old unclaimed root is stale demand, not a
+// queue — and it is bounded three ways: the sweep is opt-in (see
+// closeAbandonedEnv), it only ever considers formula/wisp roots
+// (isAbandonedRootCandidate), and a deployment can park a perpetual root-only
+// root with the gc.gc_exempt marker (isGCExempt).
+func steplessRootIsAbandoned(b beads.Bead) bool {
+	return sling.ShouldPromoteWorkflowLaunchStatus(b.Status)
 }
 
 // isGCExempt reports whether a root carries the gc.gc_exempt opt-out marker.

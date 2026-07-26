@@ -1774,13 +1774,16 @@ func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (boo
 }
 
 // paneBusy reports whether the target pane shows an active processing indicator
-// (Claude's live spinner / "esc to interrupt"). Used to confirm a submitted turn.
+// (Claude's live spinner / "esc to interrupt") right now. Used to confirm a
+// submitted turn, so it reads only the live footer: a finished turn's busy frame
+// still sitting in scrollback would otherwise confirm a submit that never
+// happened and suppress the Enter re-send that recovers it (ga-61tq).
 func (t *Tmux) paneBusy(target string) (bool, error) {
 	lines, err := t.CapturePaneLines(target, promptObservationLines)
 	if err != nil {
 		return false, err
 	}
-	return paneContainsBusyIndicator(lines), nil
+	return paneShowsLiveBusyIndicator(lines), nil
 }
 
 // submitVerifyEligible reports whether the target runs a provider whose busy
@@ -3137,7 +3140,11 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		// Check for active processing indicator in the status bar.
 		// Claude Code shows "esc to interrupt" while processing — if present,
 		// the agent is busy regardless of whether the prompt is visible.
-		if paneContainsBusyIndicator(lines) {
+		// Only the live footer counts: the capture window reaches into
+		// scrollback, and a finished turn's busy frame left there would hold
+		// this wait open until it timed out on an agent already sitting idle
+		// (ga-61tq).
+		if paneShowsLiveBusyIndicator(lines) {
 			consecutiveIdle = 0
 			if err := waitForIdlePoll(ctx); err != nil {
 				return err
@@ -3319,11 +3326,59 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 // "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
 var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
 
+// busyObservationLines bounds live-activity detection to the footer region a
+// TUI repaints, measured in rows that carry content.
+//
+// Busy indicators are footer chrome, but pane captures reach
+// promptObservationLines back into scrollback — a window sized for prompt
+// detection, where blank rows below an idle prompt push the prompt up. History
+// that far back holds the busy frames of turns that have already finished, and
+// counting those as current activity is what let a stranded nudge report a
+// landed submit (ga-61tq). Sized to clear a spinner line, a blank, the input
+// box, and a status bar, with room for a todo panel between them.
+const busyObservationLines = 16
+
+// tailContentLines returns the last n lines that carry content, in order.
+//
+// The bound is measured in content rows rather than raw rows because tmux pads
+// a captured grid out to the pane height: counting raw lines from the bottom
+// would let trailing blank padding push the live footer out of the window.
+func tailContentLines(lines []string, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	kept := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		kept++
+		if kept == n {
+			return lines[i:]
+		}
+	}
+	return lines
+}
+
+// paneShowsLiveBusyIndicator reports whether captured pane lines show the agent
+// processing *now*, ignoring the busy frames finished turns leave in scrollback.
+//
+// Callers asking "is this agent busy at this moment" — submit confirmation and
+// idle waiting — want this rather than paneContainsBusyIndicator, which matches
+// anywhere in the lines it is handed.
+func paneShowsLiveBusyIndicator(lines []string) bool {
+	return paneContainsBusyIndicator(tailContentLines(lines, busyObservationLines))
+}
+
 // paneContainsBusyIndicator checks captured pane lines for signs that the agent
 // is actively processing. Agent TUIs surface this differently: older Claude Code
 // and Codex show "esc to interrupt"; current Claude Code shows a live spinner
 // with an elapsed timer + token stream (claudeBusySpinnerRe); Gemini shows its
 // own cancel / shell-tool strings.
+//
+// This matches anywhere in the lines it is given and carries no notion of how
+// recent they are; callers deciding whether a turn is running right now bound
+// the window first via paneShowsLiveBusyIndicator.
 func paneContainsBusyIndicator(lines []string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, "esc to interrupt") ||

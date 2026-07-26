@@ -89,6 +89,27 @@ ok  github.com/gastownhall/gascity/internal/workdir
 asserts four namepool slots resolve to four distinct worktrees and fails on any
 collision.
 
+### The symptom is live anyway — through a different path (ga-po0o)
+
+"ga-5py is present" is a claim about `realizePoolDesiredSessions`, not a clean
+bill of health for the whole system. At the time of this audit all five live
+`gascity` polecats shared one session `WORKDIR`
+(`.../polecats/gastown.polecat`) despite each carrying a correct distinct
+`canonical_pool_slot` and `canonical_instance_name`, on session beads created
+that same day.
+
+That is not ga-5py regressing — the deployed binary (`gc 1.1.1` = `4873ef3d5` =
+`origin/main`) contains `poolDesiredRequestIdentity`, and
+`ResolveWorkDirPath` is correct when handed a per-instance qualified name.
+Something upstream of the resolver passes the *template* qualified name for
+these sessions. Filed separately as **ga-po0o** with the lead: the rediscovery
+path passes `sessionQualifiedName` where the pool path passes
+`qualifiedInstance`.
+
+The general lesson for this page: a fix can be present *and* its symptom can be
+live via another caller. Verify the behaviour end-to-end on the running system,
+not only in the function the original fix touched.
+
 ---
 
 ## ga-n2d.5 — gap-1 wisp wake probe (DROPPED ON PURPOSE)

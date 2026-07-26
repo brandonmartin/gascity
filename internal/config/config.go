@@ -1904,7 +1904,21 @@ func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
 
 const (
 	// DefaultDoltMaxConnections is the managed Dolt listener connection cap.
-	DefaultDoltMaxConnections = 256
+	//
+	// Sized for the managed access pattern rather than for a conventional
+	// application pool: every bd/dolt-sql operation opens its own short-lived
+	// client connection, and a connection whose client exits without a clean
+	// COM_QUIT stays in Sleep until DefaultDoltReadTimeoutMillis reaps it. Live
+	// connections are therefore roughly the operation arrival rate times the
+	// read timeout, so a fleet of agents reaches several hundred concurrent
+	// connections without anything being wrong. At the former 256 a routine
+	// burst (~900 connections in ~90s) exhausted the cap and took the whole
+	// data plane down for 7.5 minutes. Cap exhaustion is not a useful
+	// backpressure signal here — it fails every reader and writer at once and
+	// triggers recovery — so the cap is set well above the expected peak and
+	// overload is absorbed by the read timeout instead. Cities that need a
+	// different ceiling set city.toml [dolt] max_connections.
+	DefaultDoltMaxConnections = 1024
 	// DefaultDoltReadTimeoutMillis is the managed Dolt listener read timeout.
 	// Managed multi-agent cities open a short-lived bd/dolt-sql client
 	// connection per operation and frequently SIGKILL it on a client-side
@@ -1945,7 +1959,7 @@ type DoltConfig struct {
 	AutoGCEnabled *bool `toml:"auto_gc_enabled,omitempty" jsonschema:"default=true"`
 	// MaxConnections overrides the managed Dolt listener max_connections.
 	// 0 means use the managed default.
-	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
+	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=1024"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
 	// 0 means use the managed default.
 	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=15000"`

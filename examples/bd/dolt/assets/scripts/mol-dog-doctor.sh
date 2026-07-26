@@ -49,7 +49,7 @@ if [ -n "${GC_DOCTOR_CONN_MAX:-}" ]; then
 else
     _server_max=$(dolt_sql -r csv -q "SELECT @@GLOBAL.max_connections" 2>/dev/null | tail -1 || true)
     case "${_server_max:-}" in
-        ''|*[!0-9]*) CONN_MAX=256 ;;
+        ''|*[!0-9]*) CONN_MAX=1024 ;;
         *) CONN_MAX="$_server_max" ;;
     esac
     unset _server_max

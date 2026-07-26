@@ -71,12 +71,13 @@ else
   bad "server returns 512 -> expected CONN_MAX=512, got $result"
 fi
 
-# Server query fails -> fall back to 256.
+# Server query fails -> fall back to the managed default
+# (config.DefaultDoltMaxConnections).
 result=$(eval_conn_max "")
-if [ "$result" = "256" ]; then
-  pass "server query fails -> CONN_MAX=256 (fallback)"
+if [ "$result" = "1024" ]; then
+  pass "server query fails -> CONN_MAX=1024 (fallback)"
 else
-  bad "server query fails -> expected CONN_MAX=256 (fallback), got $result"
+  bad "server query fails -> expected CONN_MAX=1024 (fallback), got $result"
 fi
 
 # Explicit GC_DOCTOR_CONN_MAX override takes precedence over server value.

@@ -138,6 +138,25 @@ func TestPortResolveOrDieExit78OnEmptyState(t *testing.T) {
 	assertPortResolveResult(t, result, 78, "", expectedPortResolveError(stateFile, cityPath, "present but not running"))
 }
 
+// A resolved port with an anomaly note must reach the operator. The note fires
+// when the state file disagrees with live state — a stale recorded pid is the
+// case that made a healthy server look dead (ga-pu2s) — so discarding it would
+// leave the operator resolving a port with no hint that the recorded state is
+// no longer true.
+func TestPortResolveOrDieSurfacesPrimaryProbeStderr(t *testing.T) {
+	note := "dolt runtime: state file /x/dolt-state.json records pid=3459523 but port 47823 is served by live dolt pid=3235721; recorded pid is stale"
+
+	result := runPortResolveOrDie(t, portResolveCase{
+		stateFile:     filepath.Join(t.TempDir(), "dolt-state.json"),
+		dataDir:       filepath.Join(t.TempDir(), "d"),
+		cityPath:      t.TempDir(),
+		managedPort:   "47823",
+		managedStderr: note,
+	})
+
+	assertPortResolveResult(t, result, 0, "47823\n", note+"\n")
+}
+
 func TestRuntimeShUsesPortResolve(t *testing.T) {
 	root := repoRoot(t)
 	assertScriptSourcesPortResolveOnce(t, filepath.Join(root, "assets", "scripts", "runtime.sh"))
@@ -154,6 +173,7 @@ type portResolveCase struct {
 	dataDir             string
 	cityPath            string
 	managedPort         string
+	managedStderr       string
 	providerManagedPort string
 	env                 []string
 }
@@ -169,6 +189,9 @@ func runPortResolveOrDie(t *testing.T, tc portResolveCase) portResolveResult {
 	root := repoRoot(t)
 	driver := fmt.Sprintf(`
 managed_runtime_port() {
+    if [ "$1" = "$STATE_FILE" ] && [ -n "${TEST_MANAGED_STDERR:-}" ]; then
+        printf '%%s\n' "$TEST_MANAGED_STDERR" >&2
+    fi
     if [ "$1" = "$STATE_FILE" ] && [ -n "${TEST_MANAGED_PORT:-}" ]; then
         printf '%%s\n' "$TEST_MANAGED_PORT"
         return 0
@@ -188,13 +211,14 @@ fi
 `, shellQuote(filepath.Join(root, "assets", "scripts", "port_resolve.sh")))
 
 	cmd := exec.Command("sh", "-c", driver)
-	cmd.Env = filteredEnv("GC_DOLT_PORT", "GC_DOLT_STATE_FILE", "STATE_FILE", "PROVIDER_STATE_FILE", "DATA_DIR", "CITY_PATH", "TEST_MANAGED_PORT", "TEST_PROVIDER_MANAGED_PORT")
+	cmd.Env = filteredEnv("GC_DOLT_PORT", "GC_DOLT_STATE_FILE", "STATE_FILE", "PROVIDER_STATE_FILE", "DATA_DIR", "CITY_PATH", "TEST_MANAGED_PORT", "TEST_MANAGED_STDERR", "TEST_PROVIDER_MANAGED_PORT")
 	cmd.Env = append(cmd.Env,
 		"STATE_FILE="+tc.stateFile,
 		"PROVIDER_STATE_FILE="+tc.providerStateFile,
 		"DATA_DIR="+tc.dataDir,
 		"CITY_PATH="+tc.cityPath,
 		"TEST_MANAGED_PORT="+tc.managedPort,
+		"TEST_MANAGED_STDERR="+tc.managedStderr,
 		"TEST_PROVIDER_MANAGED_PORT="+tc.providerManagedPort,
 	)
 	cmd.Env = append(cmd.Env, tc.env...)

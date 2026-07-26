@@ -1893,7 +1893,7 @@ func TestValidateUsesCodeOwnedBootstrapPolicy(t *testing.T) {
 	ledger := cloneLedger(bootstrapPolicy)
 	ledger.Debt[0].OwnerBead = "ga-rewritten"
 	err := Validate(ledger, Census{}, fixedNow())
-	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-80po0c.2"`)
+	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-cqcj"`)
 	if strings.Contains(err.Error(), "source resource census") {
 		t.Fatalf("live census was compared before code-owned policy drift was rejected: %v", err)
 	}
@@ -1904,8 +1904,8 @@ func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceHTTPTestServer)
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("HTTP test server owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("HTTP test server owner = %q/%q, want ga-cqcj/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1917,8 +1917,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 	if audit.BaselineCalls != 58 || audit.BaselineFiles != 23 || audit.ReportedCalls != 58 || audit.ReportedFiles != 23 {
 		t.Fatalf("all-source listener-helper baseline/reported = %d/%d, %d/%d; want 58/23, 58/23", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
 	}
-	if audit.OwnerBead != "ga-80po0c.2.2.3" || audit.MigrationTarget != "P0.4c-listener-helper" {
-		t.Fatalf("all-source listener-helper owner = %q/%q, want ga-80po0c.2.2.3/P0.4c-listener-helper", audit.OwnerBead, audit.MigrationTarget)
+	if audit.OwnerBead != "ga-cqcj" || audit.MigrationTarget != "P0.4c-listener-helper" {
+		t.Fatalf("all-source listener-helper owner = %q/%q, want ga-cqcj/P0.4c-listener-helper", audit.OwnerBead, audit.MigrationTarget)
 	}
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
@@ -1926,8 +1926,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 		if row.BaselineCalls != 38 || row.BaselineFiles != 13 || row.ReportedCalls != 38 || row.ReportedFiles != 13 {
 			t.Fatalf("listener-helper baseline/reported = %d/%d, %d/%d; want 38/13, 38/13", row.BaselineCalls, row.BaselineFiles, row.ReportedCalls, row.ReportedFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.3" || row.MigrationTarget != "P0.4c-listener-helper" {
-			t.Fatalf("listener-helper owner = %q/%q, want ga-80po0c.2.2.3/P0.4c-listener-helper", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c-listener-helper" {
+			t.Fatalf("listener-helper owner = %q/%q, want ga-cqcj/P0.4c-listener-helper", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1944,8 +1944,8 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 		t.Fatalf("stream-listener Small baseline = %d/%d, want 92/34", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("stream-listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("stream-listener owner = %q/%q, want ga-cqcj/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 
@@ -1960,8 +1960,8 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 		if len(row.Resources) != 1 || row.Resources[0] != ResourceNetListen {
 			t.Fatalf("herdr Medium owner %s resources = %v, want net_listen", row.Owner, row.Resources)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("herdr Medium owner %s policy = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.Owner, row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("herdr Medium owner %s policy = %q/%q, want ga-cqcj/P0.4c-listener", row.Owner, row.OwnerBead, row.MigrationTarget)
 		}
 		delete(wantOwners, row.Owner)
 	}
@@ -1978,8 +1978,8 @@ func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
 		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
 			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-cqcj/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1992,8 +1992,8 @@ func TestBootstrapPolicyOwnsNetListenPacketDebt(t *testing.T) {
 		if row.BaselineCalls != 3 || row.BaselineFiles != 2 {
 			t.Fatalf("packet-listener baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("packet-listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("packet-listener owner = %q/%q, want ga-cqcj/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -2006,8 +2006,8 @@ func TestBootstrapPolicyOwnsSyscallListenDebt(t *testing.T) {
 		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
 			t.Fatalf("syscall.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("syscall.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("syscall.Listen owner = %q/%q, want ga-cqcj/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -2024,8 +2024,8 @@ func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 		t.Fatalf("tmux Small baseline = %d/%d, want 0/0", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
-		if row.OwnerBead != "ga-80po0c.2.2.1" || row.MigrationTarget != "P0.4c-tmux" {
-			t.Fatalf("tmux owner = %q/%q, want ga-80po0c.2.2.1/P0.4c-tmux", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cqcj" || row.MigrationTarget != "P0.4c-tmux" {
+			t.Fatalf("tmux owner = %q/%q, want ga-cqcj/P0.4c-tmux", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 

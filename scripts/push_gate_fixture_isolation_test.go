@@ -1,0 +1,175 @@
+package scripts_test
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestFixtureSpawnedChildrenNeverQueueOnThePushGate pins the invariant that
+// broke `make test` in ga-8yfu: a fixture-spawned child must acquire a
+// push-gate slot immediately even when every slot is already held.
+//
+// Fixture children shell out to `make`/scripts/test-go-test-shard, both of
+// which funnel into scripts/go-test-observable and acquire a slot whenever a
+// city root resolves. Because a fixture builds an explicit env whitelist, the
+// GC_PUSH_GATE_HELD marker its parent exported is dropped, and the child queues
+// against the very sweep that spawned it — a self-deadlock that surfaces as an
+// opaque 15-minute package timeout rather than a test failure.
+//
+// The probe drives the real library against a temporary slot directory, so it
+// never touches the city's live slots.
+func TestFixtureSpawnedChildrenNeverQueueOnThePushGate(t *testing.T) {
+	t.Parallel()
+
+	requirePushGateProbeTools(t)
+
+	fixture := newGoTestShardFixture(t)
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{name: "shard command", env: fixture.command().Env},
+		{name: "timing isolation", env: fixture.timingIsolationEnv(filepath.Join(fixture.tmpDir, "timing.json"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			output, err := probePushGateAcquire(t, tc.env)
+			if err != nil || !strings.Contains(output, "ACQUIRED") {
+				t.Fatalf("fixture child queued for a push-gate slot instead of bypassing the cap: %v\n%s\n"+
+					"the child env must carry %s, or a sweep holding every slot deadlocks against its own child",
+					err, output, pushGateFixtureOptOut)
+			}
+		})
+	}
+}
+
+// TestPushGateMarkersSurviveTestEnvScrubs pins the push-gate env contract
+// across the two `env -i` boundaries between an outer sweep and the nested
+// scripts/go-test-observable it eventually execs.
+//
+// Both scrubs are allowlists, and push-gate nesting is signaled purely by an
+// exported GC_PUSH_GATE_HELD. A marker dropped at either boundary re-arms the
+// cap inside a process tree that already holds a slot, and the failure is
+// silent: the nested runner queues behind its own parent until the wait bound
+// expires, surfacing as a package timeout rather than anything naming the gate.
+func TestPushGateMarkersSurviveTestEnvScrubs(t *testing.T) {
+	t.Parallel()
+
+	// The assignment form, not a bare mention — the surrounding comments name
+	// these variables too, and only the assignment actually forwards them.
+	for _, scrub := range []struct {
+		path     string
+		forwards []string
+	}{
+		{
+			path:     "Makefile",
+			forwards: []string{`GC_PUSH_GATE_HELD="$${GC_PUSH_GATE_HELD-}"`, `GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}"`},
+		},
+		{
+			// Appended to observable_env, not base_env: only the
+			// go-test-observable exec consults the gate, and the direct
+			// `go test` product environment is a curated contract that
+			// TestGoTestShardWithoutTimingPreservesDirectProductContract pins.
+			path: filepath.Join("scripts", "test-go-test-shard"),
+			forwards: []string{
+				`observable_env+=("GC_PUSH_GATE_HELD=${GC_PUSH_GATE_HELD}")`,
+				`observable_env+=("GC_PUSH_GATE_NO_CAP=${GC_PUSH_GATE_NO_CAP}")`,
+			},
+		},
+	} {
+		t.Run(scrub.path, func(t *testing.T) {
+			t.Parallel()
+
+			content, err := os.ReadFile(filepath.Join(repoRoot(t), scrub.path))
+			if err != nil {
+				t.Fatalf("read %s: %v", scrub.path, err)
+			}
+			for _, forward := range scrub.forwards {
+				if !strings.Contains(string(content), forward) {
+					t.Errorf("%s scrubs the environment without forwarding %s\n"+
+						"a nested runner then re-acquires a slot it already holds and blocks against its own parent",
+						scrub.path, forward)
+				}
+			}
+		})
+	}
+}
+
+// requirePushGateProbeTools skips when the probe cannot distinguish a pass from
+// a failure. push_gate_acquire_slot degrades to an immediate success when
+// flock(1) is missing, which would make this test vacuously green.
+func requirePushGateProbeTools(t *testing.T) {
+	t.Helper()
+
+	for _, tool := range []string{"bash", "flock"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("push-gate probe needs %s: %v", tool, err)
+		}
+	}
+}
+
+// probePushGateAcquire holds the only slot in a throwaway slot directory, then
+// asks push_gate_acquire_slot for one using childEnv. It prints ACQUIRED only
+// when the child bypasses the cap outright; a child that honors the cap waits
+// out the (zeroed) bound and reports failure instead of hanging the suite.
+func probePushGateAcquire(t *testing.T, childEnv []string) (string, error) {
+	t.Helper()
+
+	slotDir := filepath.Join(t.TempDir(), "gate-slots")
+	if err := os.MkdirAll(slotDir, 0o755); err != nil {
+		t.Fatalf("create probe slot directory: %v", err)
+	}
+	holdPushGateSlot(t, filepath.Join(slotDir, "slot-0.lock"))
+
+	probe := exec.Command(
+		"bash", "-c",
+		`source "$1" || exit 90
+push_gate_acquire_slot "$2" GATE_FD fixture-child || exit 91
+printf ACQUIRED`,
+		"push-gate-probe",
+		filepath.Join(repoRoot(t), "scripts", "push-gate-lock-lib.sh"),
+		slotDir,
+	)
+	// The tunables bound the probe itself, so a child that does queue fails
+	// fast instead of inheriting go-test-observable's 1800s wait. They are
+	// deliberately not part of the fixture whitelist under test.
+	probe.Env = append(append([]string(nil), childEnv...),
+		"PUSH_GATE_MAX_CONCURRENT=1",
+		"PUSH_GATE_MAX_WAIT_SECONDS=0",
+		"PUSH_GATE_POLL_SECONDS=1",
+	)
+
+	output, err := probe.CombinedOutput()
+	return string(output), err
+}
+
+// holdPushGateSlot locks slotFile for the rest of the test, so the probe faces
+// a fully occupied slot directory.
+func holdPushGateSlot(t *testing.T, slotFile string) {
+	t.Helper()
+
+	holder := exec.Command("flock", slotFile, "sleep", "300")
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start push-gate slot holder: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+	})
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := exec.Command("flock", "-n", slotFile, "true").Run(); err != nil {
+			return // the holder owns the lock; the probe now faces a full slot set
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("push-gate slot holder never locked %s", slotFile)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

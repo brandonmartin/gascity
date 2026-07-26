@@ -342,6 +342,13 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
+##
+## Also load-bearing: GC_PUSH_GATE_HELD and GC_PUSH_GATE_NO_CAP. The gated
+## targets shell out to each other, and scripts/push-gate-lock-lib.sh signals
+## "this process tree already holds a slot" purely by exporting
+## GC_PUSH_GATE_HELD. Dropping it here re-arms the cap inside a sweep that
+## already holds a slot, so the nested runner queues behind its own parent for
+## the full wait bound and dies on the Go test timeout instead (ga-8yfu).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
@@ -358,6 +365,8 @@ TEST_ENV = env -i \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
 	OBSERVABLE_FAILURE_LINES="$${OBSERVABLE_FAILURE_LINES-}" \
 	GC_TEST_NO_SLICE="$${GC_TEST_NO_SLICE-}" \
+	GC_PUSH_GATE_HELD="$${GC_PUSH_GATE_HELD-}" \
+	GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" \
 	XDG_RUNTIME_DIR="$$XDG_RUNTIME_DIR" \
 	GOPATH="$(GOPATH_VAL)" \
 	GOCACHE="$(GOCACHE_VAL)" \

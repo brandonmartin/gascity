@@ -357,28 +357,7 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 		"EXTRA_TEST_ENV="+cmdGCProcessExtraTestEnv,
 	)
 	cmd.Dir = fixture.repoRoot
-	cmd.Env = []string{
-		"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME=" + fixture.homeDir,
-		"SHELL=/bin/sh",
-		"LANG=C.UTF-8",
-		"TMPDIR=" + fixture.tmpDir,
-		"GC_TEST_NO_SLICE=1",
-		"SYS_USR_CGO_FALLBACK=0",
-		"GO_TEST_TIMING_FILE=" + timingFile,
-		"GO_TEST_TIMING_NAME=cmd-gc-process-1-of-2",
-		"GO_TEST_TIMING_VARIANT=linux default",
-		"GO_TEST_RUNNER_LABEL=blacksmith 32 vcpu",
-		"GO_TEST_RUNNER_CPU_COUNT=99",
-		"GITHUB_SHA=abc123",
-		"GITHUB_WORKFLOW=CI workflow with spaces",
-		"GITHUB_RUN_ID=77",
-		"GITHUB_RUN_ATTEMPT=2",
-		"GITHUB_JOB=cmd gc process",
-		"RUNNER_NAME=runner name with spaces",
-		"RUNNER_OS=Linux",
-		"RUNNER_ARCH=X64",
-	}
+	cmd.Env = fixture.timingIsolationEnv(timingFile)
 	status, output := runShardCommand(t, cmd)
 	if status == 0 || !strings.Contains(string(output), "Error 23") {
 		t.Fatalf("make status = %d, want product failure 23 to remain authoritative\n%s", status, output)

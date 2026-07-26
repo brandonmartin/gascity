@@ -111,13 +111,24 @@ The stamp is deliberately conservative:
 - it only augments a write already declaring `branch_ready=true`;
 - it never overwrites a key the caller set itself;
 - it skips the JSON `--metadata` form, which bd refuses to combine with
-  `--set-metadata`;
+  `--set-metadata`, and any command containing a bare `--`, after which
+  appended flags would reach bd as bead IDs;
 - every git-derived key requires the caller to be standing on the branch it
   is recording. Anyone touching the bead from another directory gets the
   timestamp and nothing else, because nothing proves which worktree they are
   in.
 - any git failure omits the key rather than failing the write. A halt must
   never fail because provenance could not be resolved.
+
+### A running clock is not reset
+
+`branch_ready_at` is only stamped fresh when the artifact itself is new.
+If the bead already carries a `branch_ready_at`, the existing value is kept
+unless the commit being halted differs from the recorded `commit`. Re-running
+a halt sequence after a crash, or anyone re-marking the bead, therefore
+cannot make a two-week-old wait read as a fresh arrival — and when the
+caller cannot prove which commit it is halting, the existing clock always
+wins.
 
 ## Where the code lives
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/publishgate"
 )
 
@@ -101,7 +102,7 @@ func TestStampPublishGateArgsRecordsProvenance(t *testing.T) {
 		"--set-metadata", "target=develop",
 		"--set-metadata", "branch_ready=true",
 		"--set-metadata", "halt_reason=auto_push_false",
-	}, "/work/ga-qbq")
+	}, "/work/ga-qbq", nil)
 
 	meta := stampedMetadata(got)
 	if meta[publishgate.MetaBranchReadyAt] != "2026-07-26T06:15:00Z" {
@@ -134,7 +135,7 @@ func TestStampPublishGateArgsMarksAPublishedBranchAuthoritative(t *testing.T) {
 		"--set-metadata", "branch=polecat/ga-qbq",
 		"--set-metadata", "target=develop",
 		"--set-metadata", "branch_ready=true",
-	}, "/work/ga-qbq"))
+	}, "/work/ga-qbq", nil))
 
 	if meta[publishgate.MetaBranchStale] != "false" {
 		t.Fatalf("%s = %q, want false when the remote branch is the artifact", publishgate.MetaBranchStale, meta[publishgate.MetaBranchStale])
@@ -152,7 +153,7 @@ func TestStampPublishGateArgsMarksPreRebaseBranchStale(t *testing.T) {
 		"update", "ga-qbq",
 		"--set-metadata", "branch=polecat/ga-qbq",
 		"--set-metadata", "branch_ready=true",
-	}, "/work/ga-qbq"))
+	}, "/work/ga-qbq", nil))
 
 	if meta[publishgate.MetaBranchStale] != "true" {
 		t.Fatalf("%s = %q, want true when origin holds pre-rebase history", publishgate.MetaBranchStale, meta[publishgate.MetaBranchStale])
@@ -174,7 +175,7 @@ func TestStampPublishGateArgsRequiresTheArtifactWorktree(t *testing.T) {
 		"--set-metadata", "branch=polecat/ga-qbq",
 		"--set-metadata", "target=develop",
 		"--set-metadata", "branch_ready=true",
-	}, "/somewhere/else"))
+	}, "/somewhere/else", nil))
 
 	if _, ok := meta[publishgate.MetaBranchReadyAt]; !ok {
 		t.Error("branch_ready_at should still be stamped without a repository")
@@ -199,7 +200,7 @@ func TestStampPublishGateArgsNeverOverridesCallerValues(t *testing.T) {
 		"--set-metadata", "target_head=cafebabecafebabecafebabecafebabecafebabe",
 		"--set-metadata", "branch_stale=false",
 	}
-	got := stampPublishGateArgs(args, "/work/ga-qbq")
+	got := stampPublishGateArgs(args, "/work/ga-qbq", nil)
 
 	if len(got) != len(args) {
 		t.Fatalf("args grew from %d to %d; nothing should be added when the caller set every key:\n%v", len(args), len(got), got)
@@ -220,8 +221,8 @@ func TestStampPublishGateArgsIsIdempotent(t *testing.T) {
 		"--set-metadata", "branch=polecat/ga-qbq",
 		"--set-metadata", "target=develop",
 		"--set-metadata", "branch_ready=true",
-	}, "/work/ga-qbq")
-	twice := stampPublishGateArgs(once, "/work/ga-qbq")
+	}, "/work/ga-qbq", nil)
+	twice := stampPublishGateArgs(once, "/work/ga-qbq", nil)
 
 	if strings.Join(once, " ") != strings.Join(twice, " ") {
 		t.Fatalf("second stamp changed the args:\n once: %v\ntwice: %v", once, twice)
@@ -243,7 +244,7 @@ func TestStampPublishGateArgsPassesThroughUnrelatedCommands(t *testing.T) {
 		{"update", "ga-qbq", "--metadata", `{"branch_ready":"true"}`},
 	}
 	for _, args := range cases {
-		got := stampPublishGateArgs(args, "/work/ga-qbq")
+		got := stampPublishGateArgs(args, "/work/ga-qbq", nil)
 		if strings.Join(got, " ") != strings.Join(args, " ") {
 			t.Errorf("stampPublishGateArgs(%v) = %v, want it unchanged", args, got)
 		}
@@ -257,7 +258,7 @@ func TestStampPublishGateArgsAcceptsEqualsForm(t *testing.T) {
 		"update", "ga-qbq",
 		"--set-metadata=branch=polecat/ga-qbq",
 		"--set-metadata=branch_ready=true",
-	}, "/work/ga-qbq"))
+	}, "/work/ga-qbq", nil))
 
 	if meta[publishgate.MetaCommit] != publishGateTestHead {
 		t.Fatalf("commit = %q, want the equals-form write to be recognized", meta[publishgate.MetaCommit])
@@ -271,9 +272,93 @@ func TestStampPublishGateArgsWithoutBranchStampsTimeOnly(t *testing.T) {
 
 	meta := stampedMetadata(stampPublishGateArgs([]string{
 		"update", "ga-qbq", "--set-metadata", "branch_ready=true",
-	}, "/work/ga-qbq"))
+	}, "/work/ga-qbq", nil))
 
 	if len(meta) != 2 || meta[publishgate.MetaBranchReadyAt] == "" {
 		t.Fatalf("metadata = %v, want only branch_ready plus a timestamp", meta)
+	}
+}
+
+// A clock that is already running must survive a re-touch. Re-running a
+// halt sequence after a crash, or anyone re-marking the bead, previously
+// would have reset a two-week wait to zero — the exact invisibility this
+// work exists to remove.
+func TestStampPublishGateArgsPreservesARunningClock(t *testing.T) {
+	withPublishGateStamp(t, haltWorktree(), time.Date(2026, 7, 26, 6, 15, 0, 0, time.UTC))
+	existing := func() beads.StringMap {
+		return beads.StringMap{
+			publishgate.MetaBranchReadyAt: "2026-07-11T09:30:00Z",
+			publishgate.MetaCommit:        publishGateTestHead,
+		}
+	}
+
+	meta := stampedMetadata(stampPublishGateArgs([]string{
+		"update", "ga-qbq",
+		"--set-metadata", "branch=polecat/ga-qbq",
+		"--set-metadata", "branch_ready=true",
+	}, "/work/ga-qbq", existing))
+
+	if _, ok := meta[publishgate.MetaBranchReadyAt]; ok {
+		t.Fatalf("branch_ready_at = %q, want the existing stamp left alone", meta[publishgate.MetaBranchReadyAt])
+	}
+}
+
+// A genuinely new artifact restarts the clock: the old wait described a
+// commit that no longer exists on the branch.
+func TestStampPublishGateArgsRestartsTheClockForANewArtifact(t *testing.T) {
+	now := time.Date(2026, 7, 26, 6, 15, 0, 0, time.UTC)
+	withPublishGateStamp(t, haltWorktree(), now)
+	existing := func() beads.StringMap {
+		return beads.StringMap{
+			publishgate.MetaBranchReadyAt: "2026-07-11T09:30:00Z",
+			publishgate.MetaCommit:        publishGateTestPreRebase,
+		}
+	}
+
+	meta := stampedMetadata(stampPublishGateArgs([]string{
+		"update", "ga-qbq",
+		"--set-metadata", "branch=polecat/ga-qbq",
+		"--set-metadata", "branch_ready=true",
+	}, "/work/ga-qbq", existing))
+
+	if meta[publishgate.MetaBranchReadyAt] != "2026-07-26T06:15:00Z" {
+		t.Fatalf("branch_ready_at = %q, want a fresh stamp for a new commit", meta[publishgate.MetaBranchReadyAt])
+	}
+}
+
+// When the caller cannot prove which commit it is halting, the existing
+// clock wins — a blind touch must never look like a fresh arrival.
+func TestStampPublishGateArgsKeepsClockWhenTheArtifactIsUnprovable(t *testing.T) {
+	repo := haltWorktree()
+	repo.branch = "some-other-branch"
+	withPublishGateStamp(t, repo, time.Date(2026, 7, 26, 6, 15, 0, 0, time.UTC))
+	existing := func() beads.StringMap {
+		return beads.StringMap{
+			publishgate.MetaBranchReadyAt: "2026-07-11T09:30:00Z",
+			publishgate.MetaCommit:        publishGateTestHead,
+		}
+	}
+
+	meta := stampedMetadata(stampPublishGateArgs([]string{
+		"update", "ga-qbq",
+		"--set-metadata", "branch=polecat/ga-qbq",
+		"--set-metadata", "branch_ready=true",
+	}, "/elsewhere", existing))
+
+	if _, ok := meta[publishgate.MetaBranchReadyAt]; ok {
+		t.Fatalf("branch_ready_at = %q, want the running clock preserved", meta[publishgate.MetaBranchReadyAt])
+	}
+}
+
+// Everything after a bare "--" is positional, so appended flags would reach
+// bd as bead IDs.
+func TestStampPublishGateArgsSkipsPositionalTerminator(t *testing.T) {
+	withPublishGateStamp(t, haltWorktree(), time.Now())
+
+	args := []string{"update", "--set-metadata", "branch_ready=true", "--", "ga-qbq"}
+	got := stampPublishGateArgs(args, "/work/ga-qbq", nil)
+
+	if strings.Join(got, " ") != strings.Join(args, " ") {
+		t.Fatalf("args = %v, want them unchanged after a positional terminator", got)
 	}
 }

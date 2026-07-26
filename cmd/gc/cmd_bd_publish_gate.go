@@ -42,9 +42,20 @@ var newPublishGateStampResolver = func(dir string) publishgate.HeadResolver {
 // stampPublishGateArgs augments a `bd update ... --set-metadata
 // branch_ready=true` invocation with publish-gate provenance. Every other
 // invocation passes through untouched.
-func stampPublishGateArgs(bdArgs []string, repoDir string) []string {
+//
+// existing lazily supplies the bead's current metadata; it is called only
+// once the write is known to be a branch-ready halt, so ordinary `gc bd`
+// traffic never pays for the lookup. It may return nil.
+func stampPublishGateArgs(bdArgs []string, repoDir string, existing func() beads.StringMap) []string {
 	if len(bdArgs) == 0 || bdArgs[0] != "update" {
 		return bdArgs
+	}
+	// A bare "--" turns everything after it into positionals, so appended
+	// flags would reach bd as bead IDs.
+	for _, arg := range bdArgs {
+		if arg == "--" {
+			return bdArgs
+		}
 	}
 	edits, err := parseWorkRecordMetadataEdits(bdArgs)
 	if err != nil || len(edits.setMetadata) == 0 {
@@ -63,7 +74,11 @@ func stampPublishGateArgs(bdArgs []string, repoDir string) []string {
 		return bdArgs
 	}
 
-	additions := publishGateStampAdditions(writing, repoDir)
+	var current beads.StringMap
+	if existing != nil {
+		current = existing()
+	}
+	additions := publishGateStampAdditions(writing, current, repoDir)
 	if len(additions) == 0 {
 		return bdArgs
 	}
@@ -83,50 +98,75 @@ func stampPublishGateArgs(bdArgs []string, repoDir string) []string {
 
 // publishGateStampAdditions computes the provenance keys missing from a
 // branch-ready write. writing holds the metadata the caller is already
-// setting; keys present there are never overridden.
-func publishGateStampAdditions(writing beads.StringMap, repoDir string) map[string]string {
+// setting and always wins; existing is the bead's current metadata, used
+// only to decide whether the gate clock is already running.
+func publishGateStampAdditions(writing, existing beads.StringMap, repoDir string) map[string]string {
 	additions := make(map[string]string, 4)
-	if _, ok := writing[publishgate.MetaBranchReadyAt]; !ok {
-		additions[publishgate.MetaBranchReadyAt] = publishGateStampNow().UTC().Format(time.RFC3339)
+	commit := strings.TrimSpace(writing[publishgate.MetaCommit])
+
+	if resolver := publishGateWorktreeResolver(writing, repoDir); resolver != nil {
+		if commit == "" {
+			if head, err := resolver.ResolveRef("HEAD"); err == nil {
+				commit = head
+				additions[publishgate.MetaCommit] = head
+			}
+		}
+		if _, ok := writing[publishgate.MetaTargetHead]; !ok {
+			if tip, err := publishgate.ResolveTarget(resolver, writing[publishgate.MetaTarget]); err == nil {
+				additions[publishgate.MetaTargetHead] = tip
+			}
+		}
+		// branch_stale answers "is metadata.branch publishable as-is?" at
+		// the moment of the halt. An unpushed or pre-rebase branch is stale:
+		// the artifact lives at metadata.commit and nowhere else.
+		if _, ok := writing[publishgate.MetaBranchStale]; !ok && commit != "" {
+			branch := strings.TrimSpace(writing[publishgate.MetaBranch])
+			tip, err := publishgate.ResolveBranchTip(resolver, branch)
+			additions[publishgate.MetaBranchStale] = boolMetadataValue(err != nil || tip != commit)
+		}
 	}
 
+	if _, ok := writing[publishgate.MetaBranchReadyAt]; !ok && publishGateClockShouldStart(existing, commit) {
+		additions[publishgate.MetaBranchReadyAt] = publishGateStampNow().UTC().Format(time.RFC3339)
+	}
+	return additions
+}
+
+// publishGateWorktreeResolver returns a repository reader only when the
+// caller is provably standing in the artifact's own worktree: it must be on
+// the branch it is recording. Without that proof nothing derived from HEAD
+// describes the artifact, so the caller gets no git-derived provenance.
+func publishGateWorktreeResolver(writing beads.StringMap, repoDir string) publishgate.HeadResolver {
 	branch := strings.TrimSpace(writing[publishgate.MetaBranch])
 	if branch == "" || strings.TrimSpace(repoDir) == "" || newPublishGateStampResolver == nil {
-		// Without a recorded branch there is nothing to prove the caller is
-		// in the artifact's worktree, so no git-derived key is trustworthy.
-		return additions
+		return nil
 	}
 	resolver := newPublishGateStampResolver(repoDir)
 	if resolver == nil {
-		return additions
+		return nil
 	}
-	// The worktree proof: a halting agent records the branch it is standing
-	// on. Anyone else touching the bead from another directory fails here
-	// and gets the timestamp only.
 	if current, err := resolver.CurrentBranch(); err != nil || current != branch {
-		return additions
+		return nil
 	}
+	return resolver
+}
 
-	commit := strings.TrimSpace(writing[publishgate.MetaCommit])
-	if commit == "" {
-		if head, err := resolver.ResolveRef("HEAD"); err == nil {
-			commit = head
-			additions[publishgate.MetaCommit] = head
-		}
+// publishGateClockShouldStart reports whether a fresh branch_ready_at is
+// warranted. A running clock is only reset by a genuinely new artifact:
+// re-running a halt sequence after a crash, or anyone else re-marking the
+// bead, must not make a two-week-old wait read as brand new — that
+// invisibility is the whole failure ga-qbq was filed about. When the caller
+// cannot prove which commit it is halting, the existing clock always wins.
+func publishGateClockShouldStart(existing beads.StringMap, commit string) bool {
+	previous := strings.TrimSpace(existing[publishgate.MetaBranchReadyAt])
+	if previous == "" {
+		return true
 	}
-	if _, ok := writing[publishgate.MetaTargetHead]; !ok {
-		if tip, err := publishgate.ResolveTarget(resolver, writing[publishgate.MetaTarget]); err == nil {
-			additions[publishgate.MetaTargetHead] = tip
-		}
+	priorCommit := strings.TrimSpace(existing[publishgate.MetaCommit])
+	if commit == "" || priorCommit == "" {
+		return false
 	}
-	// branch_stale answers "is metadata.branch publishable as-is?" at the
-	// moment of the halt. An unpushed or pre-rebase branch is stale: the
-	// artifact lives at metadata.commit and nowhere else.
-	if _, ok := writing[publishgate.MetaBranchStale]; !ok && commit != "" {
-		tip, err := publishgate.ResolveBranchTip(resolver, branch)
-		additions[publishgate.MetaBranchStale] = boolMetadataValue(err != nil || tip != commit)
-	}
-	return additions
+	return priorCommit != commit
 }
 
 func boolMetadataValue(b bool) string {
@@ -144,4 +184,24 @@ func publishGateStampRepoDir() string {
 		return ""
 	}
 	return wd
+}
+
+// publishGateExistingMetadata reads the current metadata of the single bead
+// a write targets. Every failure — ambiguous args, a batch write, an
+// unreachable store, a bead bd has not projected yet — returns nil, which
+// the stamp treats as "no clock running". It must never block the write.
+func publishGateExistingMetadata(cityPath string, target execStoreTarget, bdArgs []string) beads.StringMap {
+	ids, ok, ambiguous := bdMutationWriteIDs(bdArgs)
+	if !ok || ambiguous || len(ids) != 1 {
+		return nil
+	}
+	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+	if err != nil {
+		return nil
+	}
+	bead, err := store.Get(ids[0])
+	if err != nil {
+		return nil
+	}
+	return bead.Metadata
 }

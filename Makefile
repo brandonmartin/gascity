@@ -406,24 +406,55 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
+# UNIT_PKGS is every package except cmd/gc. `go test -timeout` is a PER-PACKAGE
+# budget, so a sweep's number has to cover its slowest single package rather
+# than its average one, and cmd/gc does not fit any number a fast gate can
+# carry: measured alone on an idle box it needs 1298.6s (21.6m) under
+# GC_FAST_UNIT=1, against the 15m below. That overran deterministically — three
+# independent sweeps, zero failing assertions in cmd/gc each time, the package
+# simply out of wall clock — so `make test` could never pass on a clean tree
+# and agents learned to hand-wave the one line that is the gate (ga-wawj).
+# cmd/gc comes back sharded in the targets below; test-cover splits it the same
+# way for the same reason.
+UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+
+# One per-package budget for both halves of the unit sweep. The sweep and the
+# cmd/gc shards run back to back against the same tree on the same box, so a
+# package slow enough to trip one should trip the other for the same reason;
+# two independently maintained numbers drift, and that drift is what left the
+# shards on 20m while the unit sweep silently kept Go's 10m default (ga-9au).
+UNIT_TEST_TIMEOUT ?= 15m
+
+# Shard count for cmd/gc inside the unsharded unit targets. Six splits the
+# package's measured 21.6m into ~3.6m slices, comfortably inside the budget
+# above even on a loaded host.
+CMD_GC_UNIT_TOTAL ?= 6
+
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
+## cmd/gc runs as CMD_GC_UNIT_TOTAL shards after the sweep rather than inside
+## it, so every invocation stays under one per-package budget; dropping it
+## outright would leave the repo's most-edited package untested by its own gate.
+## `make test-fast-parallel` runs the identical coverage concurrently.
 ## Bound package parallelism so subprocess-heavy packages do not starve each
 ## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
-
-# MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
-# sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout $(UNIT_TEST_TIMEOUT) $(UNIT_PKGS)
+	@for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL)); do \
+		$(TEST_ENV) GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=$(UNIT_TEST_TIMEOUT) \
+		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_UNIT_TOTAL) || exit 1; \
+	done
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
+## Unlike `test`, this target does not run the shards inline: the
+## mac-cmd-gc-process CI matrix job already covers them, and running them here
+## would push the sweep past the Mac job cap the way test-cover-mac notes.
 test-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout $(UNIT_TEST_TIMEOUT) $(UNIT_PKGS)
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
@@ -471,9 +502,20 @@ sync-bd-corpus:
 	scripts/sync-bd-corpus.sh
 
 ## test-cmd-gc-process: run the full non-short cmd/gc suite, including the
-## process-backed lifecycle coverage routed out of the default fast loop
+## process-backed lifecycle coverage routed out of the default fast loop.
+## This runs the package as one serial invocation, so -timeout has to clear the
+## package's serial runtime: it measured 2081.5s (34.7m) under real fleet load,
+## which is past the 25m this carried before and made TESTING.md's documented
+## workaround for ga-wawj fail the same wall-clock way the defect it works
+## around does. Sized as a hang detector above that measurement, not as a
+## schedule — a passing run returns when it returns. Overridable, like the
+## acceptance budgets below, because that measurement is load-dependent and the
+## number has already had to move once:
+##   CMD_GC_PROCESS_TIMEOUT=60m make test-cmd-gc-process
+## Prefer `make test-cmd-gc-process-parallel`, which shards the same coverage.
+CMD_GC_PROCESS_TIMEOUT ?= 45m
 test-cmd-gc-process:
-	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-cmd-gc-process -- -timeout 25m ./cmd/gc
+	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-cmd-gc-process -- -timeout $(CMD_GC_PROCESS_TIMEOUT) ./cmd/gc
 	$(MAKE) test-productmetrics-testhook
 
 ## test-productmetrics-testhook: run the focused tagged product-metrics contracts

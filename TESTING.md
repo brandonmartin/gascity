@@ -520,7 +520,15 @@ double-claim conflicts, rollback behavior, boundary conditions.
 
 `make test` and `make test-cover` now follow this boundary strictly: they
 run the fast unit loop only, with `GC_FAST_UNIT=1` gating slow `cmd/gc`
-process scenarios. Slow process-backed cases
+process scenarios. Both also split `cmd/gc` out of their single-invocation
+package sweep and run it as `CMD_GC_UNIT_TOTAL` / `CMD_GC_COVER_TOTAL` shards
+instead. `go test -timeout` is a *per-package* budget, and `cmd/gc` alone
+needs 21.6m under `GC_FAST_UNIT=1` — past any budget a fast gate can carry, so
+carrying it inline made `make test` fail on a clean tree with zero failing
+assertions (ga-wawj). Sharding keeps every invocation inside one budget without
+dropping the repo's most-edited package from its own gate;
+`make test-fast-parallel` runs the identical coverage concurrently instead of
+back to back. Slow process-backed cases
 such as managed Dolt recovery, real `bd` lifecycle, tutorial regression
 scripts, and the large `gc-beads-bd` provider suite are routed out of the
 default path so local `make check` and CI `Check` stay focused on quick
@@ -945,9 +953,12 @@ plain shell job avoids that ratchet entirely instead of bumping it.
 `scripts/go-test-observable` is wired to the same gate (`ga-spc`). It is the
 other funnel to `go test` — `make test`, `make test-mac`,
 `make test-cmd-gc-process` and `make test-productmetrics-testhook` all reach
-the product through it — and the unsharded `./...` sweep behind `make test` is
+the product through it — and the whole-repo sweep behind `make test` is
 the single heaviest job that runs on a shared agent host, so leaving it
-unbounded left the largest offender ungoverned. A witness patrol on 2026-07-26
+unbounded left the largest offender ungoverned. That sweep now excludes
+`cmd/gc`, whose shards follow it through `scripts/test-go-test-shard` and are
+outside this bound the same way `test-cover`'s shards already are; each is a
+sixth of the package, so the gated sweep remains the heaviest single job. A witness patrol on 2026-07-26
 measured load 86.86 on a 24-core box with two such sweeps running
 concurrently; the 15m wall-clock timeout that produced was indistinguishable
 from a real regression and cost a merge cycle to disprove.

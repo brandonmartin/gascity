@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -58,6 +59,28 @@ func awaitClose(t *testing.T, ch <-chan struct{}, what string) {
 	case <-time.After(hangBudget):
 		t.Fatalf("%s did not complete within the hang budget (%s)", what, hangBudget)
 	}
+}
+
+// awaitContext returns a context bounded by hangBudget, canceled at test
+// cleanup. It is the context-shaped member of the same family as awaitClose and
+// awaitCond: reach for it when a test hands a deadline to a blocking call purely
+// so a wedge reports instead of hanging, and no assertion depends on how long
+// the call took.
+//
+// The distinction the hangBudget doc draws applies unchanged here. A context
+// the test feeds the system to define the scenario — "prove this respects a
+// 100ms deadline" — is an input, not a hang detector, and must keep its own
+// explicit value. This helper is only for the other case, where the deadline
+// exists so a hung call names itself.
+//
+// Why it exists: real managed-Dolt fixtures (spawn a server, migrate a schema,
+// answer the first query) were bounded by 15s literals sized for an idle
+// machine, and failed under normal host load while nothing was wedged (ga-df7s).
+func awaitContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 // awaitCond polls cond until it reports true and fails the test if that does not

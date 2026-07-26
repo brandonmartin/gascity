@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1299,8 +1298,10 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("nativeDoltOpenEnvForScope(rig): %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	// Hang detector, not a latency budget: this opens a real managed Dolt
+	// scope and initializes its schema, and nothing below asserts how long
+	// that took. See awaitContext in hangbudget_test.go.
+	ctx := awaitContext(t)
 	nativeStorage, err := beads.OpenNativeStorage(ctx, rigPath, nativeEnv)
 	if err != nil {
 		t.Fatalf("OpenNativeStorage(rig): %v", err)

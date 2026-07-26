@@ -145,6 +145,28 @@ var (
 	providerLifecycleContext = context.WithTimeout
 )
 
+// beadsScopeReadyTimeout bounds how long we wait for a freshly initialized or
+// recovered beads scope to answer a ping.
+//
+// This is a HANG DETECTOR, not a latency budget. The wait it bounds
+// (waitForBeadsScopeReadyAfterRecovery) polls and returns the instant the store
+// answers, so raising this value costs a healthy host exactly nothing — it only
+// changes how long a genuinely wedged scope takes to report. It must therefore
+// clear the worst-case cost of the work it is waiting on: spawning
+// `dolt sql-server`, running bd's schema migrations, and answering the first
+// query, on a host that is busy with other work.
+//
+// The previous ceiling was a 10s literal repeated at each call site, sized for
+// an idle machine. A fresh managed-bd city init measured 15.8s end to end on a
+// 24-core host at load 58 (ga-df7s) — steady state for a Gas City host, not an
+// anomaly — so the ceiling was routinely exceeded while nothing was wedged.
+// That is a false red, not a caught defect, and it made the whole cmd/gc
+// process suite unreadable as a gate. The value below keeps roughly 5x headroom
+// over that measurement and stays far under the suite's per-package timeout, so
+// a real wedge still fails at the call site that wedged rather than taking the
+// package down with an unattributed timeout.
+const beadsScopeReadyTimeout = 90 * time.Second
+
 var (
 	initDirIfReadyEnsureBeadsProvider = ensureBeadsProvider
 	initDirIfReadyInitAndHookDir      = initAndHookDir
@@ -537,7 +559,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
 		}
-		if err := initAndHookDirWaitForScopeReady(dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
+		if err := initAndHookDirWaitForScopeReady(dir, cityPath, time.Now().Add(beadsScopeReadyTimeout)); err != nil {
 			return fmt.Errorf("waiting for initialized bead scope readiness: %w", err)
 		}
 		// Strong post-init validation: confirm the canonical database
@@ -1081,7 +1103,7 @@ func reconcileHealthyManagedRuntimePublication(cityPath string, waitForScopes bo
 		return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", err)
 	}
 	if waitForScopes {
-		if err := deps.waitScopesReady(cityPath, 10*time.Second); err != nil {
+		if err := deps.waitScopesReady(cityPath, beadsScopeReadyTimeout); err != nil {
 			return fmt.Errorf("healthy but store not ready after publishing managed dolt runtime state: %w", err)
 		}
 	}
@@ -1162,7 +1184,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				return fmt.Errorf("recovered but failed to publish managed dolt runtime state: %w", pubErr)
 			}
 			if waitForScopes {
-				if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
+				if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, beadsScopeReadyTimeout); waitErr != nil {
 					return fmt.Errorf("recovered but store not ready: %w", waitErr)
 				}
 			}

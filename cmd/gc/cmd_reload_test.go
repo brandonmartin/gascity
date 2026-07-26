@@ -580,15 +580,10 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	// Hang detector: the assertions that matter come after this wait, and none
+	// of them depends on how fast the first reconcile landed. A 5s literal here
+	// was a false red under normal host load (ga-df7s).
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
 	reply, err := sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "1s"})
 	if err != nil {
@@ -790,15 +785,10 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	// Hang detector: the assertions that matter come after this wait, and none
+	// of them depends on how fast the first reconcile landed. A 5s literal here
+	// was a false red under normal host load (ga-df7s).
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
 	oldDebounce := debounceDelay
 	debounceDelay = 30 * time.Second
@@ -811,7 +801,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 	stdoutBeforeInvalid := stdout.String()
 	var reply reloadControlReply
-	deadline = time.After(45 * time.Second)
+	deadline := time.After(45 * time.Second)
 	for {
 		reply, err = sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "30s"})
 		if err != nil {

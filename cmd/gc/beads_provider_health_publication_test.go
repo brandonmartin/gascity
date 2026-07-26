@@ -101,8 +101,12 @@ func TestReconcileHealthyManagedRuntimePublication(t *testing.T) {
 				},
 				waitScopesReady: func(gotCityPath string, timeout time.Duration) error {
 					record("wait-scopes-ready", gotCityPath)
-					if timeout != 10*time.Second {
-						t.Errorf("waitScopesReady timeout = %v, want 10s", timeout)
+					// The shared constant, not a local literal: all three
+					// managed-Dolt readiness waits must move together, and a
+					// per-site literal is how the old 10s ceiling survived
+					// being outgrown by the init it bounds (ga-df7s).
+					if timeout != beadsScopeReadyTimeout {
+						t.Errorf("waitScopesReady timeout = %v, want %v (beadsScopeReadyTimeout)", timeout, beadsScopeReadyTimeout)
 					}
 					return tt.waitErr
 				},

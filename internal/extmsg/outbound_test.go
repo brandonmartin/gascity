@@ -266,6 +266,104 @@ func TestHandleOutbound_NoBindingEmptySessionReturnsActiveBindingError(t *testin
 	}
 }
 
+// newUnwiredProviderTestRig builds outbound deps whose adapter registry is
+// empty, modelling a provider that was never registered with extmsg at all
+// (the Discord-wired-city case in ga-4kfx).
+func newUnwiredProviderTestRig(t *testing.T) (*[]capturedEvent, OutboundDeps) {
+	t.Helper()
+	fabric := NewServices(beads.NewMemStore())
+	captured := make([]capturedEvent, 0)
+	emit := func(eventType, subject string, payload events.Payload) {
+		captured = append(captured, capturedEvent{Type: eventType, Subject: subject, Payload: payload})
+	}
+	deps := OutboundDeps{Services: fabric, Registry: NewAdapterRegistry(), EmitEvent: emit}
+	return &captured, deps
+}
+
+// TestHandleOutbound_UnwiredProviderReportsMissingAdapter pins the fix for
+// ga-4kfx: when a provider has no registered adapter, the caller must be told
+// the provider is unwired rather than that the conversation lacks a binding.
+// The old message sent operators hunting for binding records that could never
+// exist, because binding resolution runs before the adapter lookup.
+func TestHandleOutbound_UnwiredProviderReportsMissingAdapter(t *testing.T) {
+	freezeTestClock(t)
+	captured, deps := newUnwiredProviderTestRig(t)
+	ref := testConversationRef()
+
+	_, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+		SessionID:    "sess-x",
+		Conversation: ref,
+		Text:         "hello",
+	})
+	if err == nil {
+		t.Fatalf("HandleOutbound error = nil, want unregistered-provider error")
+	}
+	if !errors.Is(err, ErrProviderNotRegistered) {
+		t.Fatalf("HandleOutbound error = %v, want errors.Is(err, ErrProviderNotRegistered)", err)
+	}
+	if strings.Contains(err.Error(), "no active binding for conversation") {
+		t.Fatalf("HandleOutbound error = %v, must not blame a missing binding when the provider is unwired", err)
+	}
+	if !strings.Contains(err.Error(), ref.Provider) {
+		t.Fatalf("HandleOutbound error = %v, want the unwired provider %q named", err, ref.Provider)
+	}
+	if len(*captured) != 0 {
+		t.Fatalf("captured events = %d, want 0", len(*captured))
+	}
+}
+
+// TestHandleOutbound_UnwiredProviderEmptySessionReportsMissingAdapter covers
+// the sibling early-return: with no caller session there is no group-route
+// fallback, but the unwired-provider diagnosis must be identical.
+func TestHandleOutbound_UnwiredProviderEmptySessionReportsMissingAdapter(t *testing.T) {
+	freezeTestClock(t)
+	captured, deps := newUnwiredProviderTestRig(t)
+	ref := testConversationRef()
+
+	_, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+		SessionID:    "",
+		Conversation: ref,
+		Text:         "hello",
+	})
+	if err == nil {
+		t.Fatalf("HandleOutbound error = nil, want unregistered-provider error")
+	}
+	if !errors.Is(err, ErrProviderNotRegistered) {
+		t.Fatalf("HandleOutbound error = %v, want errors.Is(err, ErrProviderNotRegistered)", err)
+	}
+	if strings.Contains(err.Error(), "no active binding for conversation") {
+		t.Fatalf("HandleOutbound error = %v, must not blame a missing binding when the provider is unwired", err)
+	}
+	if len(*captured) != 0 {
+		t.Fatalf("captured events = %d, want 0", len(*captured))
+	}
+}
+
+// TestHandleOutbound_WiredProviderKeepsHistoricalBindingError guards the
+// contract the ga-4kfx fix must not break: when the provider IS wired, a
+// genuinely missing binding keeps the historical error string that external
+// callers pattern-match on.
+func TestHandleOutbound_WiredProviderKeepsHistoricalBindingError(t *testing.T) {
+	freezeTestClock(t)
+	_, _, _, deps := newOutboundTestRig(t)
+	ref := testConversationRef()
+
+	_, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+		SessionID:    "sess-x",
+		Conversation: ref,
+		Text:         "hello",
+	})
+	if err == nil {
+		t.Fatalf("HandleOutbound error = nil, want 'no active binding'")
+	}
+	if !strings.Contains(err.Error(), "no active binding for conversation") {
+		t.Fatalf("HandleOutbound error = %v, want historical 'no active binding for conversation' substring", err)
+	}
+	if errors.Is(err, ErrProviderNotRegistered) {
+		t.Fatalf("HandleOutbound error = %v, must not report an unwired provider when an adapter is registered", err)
+	}
+}
+
 func TestHandleOutbound_GroupRouteEmitsEventOnPublishingSession(t *testing.T) {
 	freezeTestClock(t)
 	fabric, _, captured, deps := newOutboundTestRig(t)

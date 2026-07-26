@@ -69,6 +69,17 @@ func (p *providerMissNudgeProvider) NudgeNow(name string, content []runtime.Cont
 	return fmt.Errorf("%w: provider does not own %q", runtime.ErrSessionNotFound, name)
 }
 
+// The Confirm pair must be overridden alongside Nudge/NudgeNow: the embedded
+// *runtime.Fake supplies them too, and a confirm-preferring caller would
+// otherwise promote the embedded methods and never see this provider's miss.
+func (p *providerMissNudgeProvider) NudgeConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	return false, p.Nudge(name, content)
+}
+
+func (p *providerMissNudgeProvider) NudgeNowConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	return false, p.NudgeNow(name, content)
+}
+
 type missingNudgeBeadStore struct {
 	*beads.MemStore
 	missingID string

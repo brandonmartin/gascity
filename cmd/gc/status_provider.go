@@ -110,6 +110,36 @@ func (p *statusProvider) Nudge(name string, content []runtime.ContentBlock) erro
 	return p.base.Nudge(name, content)
 }
 
+// NudgeNow forwards immediate injection to the wrapped provider. Without this
+// the wrapper hides the base's ImmediateNudgeProvider capability and callers
+// silently downgrade to Nudge's internal wait-idle heuristic.
+func (p *statusProvider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	if np, ok := p.base.(runtime.ImmediateNudgeProvider); ok {
+		return np.NudgeNow(name, content)
+	}
+	return p.base.Nudge(name, content)
+}
+
+// NudgeConfirm forwards to the wrapped provider and preserves its submit
+// confirmation. This wrapper sits between the CLI and the real provider on
+// every `gc session nudge`, so dropping the signal here would make the
+// unsubmitted-draft detection inert exactly where it matters (ga-287).
+func (p *statusProvider) NudgeConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	if cp, ok := p.base.(runtime.ConfirmingNudgeProvider); ok {
+		return cp.NudgeConfirm(name, content)
+	}
+	return true, p.base.Nudge(name, content)
+}
+
+// NudgeNowConfirm forwards to the wrapped provider and preserves its submit
+// confirmation. See NudgeConfirm.
+func (p *statusProvider) NudgeNowConfirm(name string, content []runtime.ContentBlock) (bool, error) {
+	if cp, ok := p.base.(runtime.ConfirmingNudgeProvider); ok {
+		return cp.NudgeNowConfirm(name, content)
+	}
+	return true, p.NudgeNow(name, content)
+}
+
 func (p *statusProvider) SetMeta(name, key, value string) error {
 	return p.base.SetMeta(name, key, value)
 }

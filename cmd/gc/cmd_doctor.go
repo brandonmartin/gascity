@@ -389,6 +389,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 			register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
+			// Publish-gate staleness: branch-ready artifacts waiting on the
+			// mayor rot while their target advances, and nothing used to
+			// measure the wait (ga-qbq).
+			register(newPublishGateCheck(rig.Path, rig.Name, storeFactory))
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:

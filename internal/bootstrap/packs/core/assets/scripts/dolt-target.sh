@@ -50,6 +50,33 @@ pid_is_running() (
     return 1
 )
 
+# pid_is_dolt_server reports whether $1 is a running dolt sql-server. It is
+# how a live listener on the recorded port is confirmed to be the managed
+# server itself rather than an unrelated process that claimed the port after
+# the recorded server exited. The match mirrors the health command's
+# classification: the process name must be exactly `dolt` (the args line alone
+# yields false positives from agent sessions whose prompt text mentions "dolt
+# sql-server") and the command line must carry the sql-server subcommand.
+pid_is_dolt_server() (
+    pid="$1"
+
+    case "$pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    command -v ps >/dev/null 2>&1 || return 1
+
+    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+        *sql-server*) ;;
+        *) return 1 ;;
+    esac
+
+    comm=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')
+    [ "${comm##*/}" = "dolt" ]
+)
+
 managed_runtime_listener_pid() (
     port="$1"
 
@@ -111,6 +138,16 @@ PY
     return 1
 )
 
+# managed_runtime_port prints the port of the managed Dolt server described by
+# state file $1, or nothing when no live server is serving data dir $2.
+#
+# Liveness is decided by live state — a listener on the recorded port — never
+# by the recorded pid. The pid in dolt-state.json goes stale on every restart
+# and is subject to reuse, so gating on it reports a healthy server as down and
+# disables every `gc dolt` subcommand, including the incident diagnostics an
+# operator must collect before deciding to restart anything (ga-pu2s). The
+# recorded port and data_dir are hints to validate; the listening socket and
+# the process table are the authority.
 managed_runtime_port() (
     state_file="$1"
     expected_data_dir="$2"
@@ -123,20 +160,34 @@ managed_runtime_port() (
     data_dir=$(read_runtime_state_string "$state_file" data_dir)
 
     [ "$running" = "true" ] || return 0
-    [ -n "$pid" ] || return 0
     [ -n "$port" ] || return 0
     [ "$data_dir" = "$expected_data_dir" ] || return 0
-    pid_is_running "$pid" || return 0
 
     holder_pid=$(managed_runtime_listener_pid "$port" || true)
     if [ -n "$holder_pid" ]; then
-        [ "$holder_pid" = "$pid" ] || return 0
-        printf '%s\n' "$port"
+        if [ "$holder_pid" = "$pid" ]; then
+            printf '%s\n' "$port"
+            return 0
+        fi
+        # Some other process holds the port. Adopt it only when it is itself a
+        # dolt server: otherwise an unrelated service inherited the port and
+        # every `gc dolt` call would be aimed at it.
+        if pid_is_dolt_server "$holder_pid"; then
+            printf 'dolt runtime: state file %s records pid=%s but port %s is served by live dolt pid=%s; recorded pid is stale\n' \
+                "$state_file" "${pid:-unset}" "$port" "$holder_pid" >&2
+            printf '%s\n' "$port"
+        fi
         return 0
     fi
 
+    # The listener could not be enumerated (no lsof, or the holder belongs to
+    # another user). Connecting is the remaining live-state check.
     if ! managed_runtime_tcp_reachable "$port"; then
         return 0
+    fi
+    if ! pid_is_running "$pid"; then
+        printf 'dolt runtime: state file %s records pid=%s which is not running, but port %s is reachable; recorded pid is stale\n' \
+            "$state_file" "${pid:-unset}" "$port" >&2
     fi
 
     printf '%s\n' "$port"

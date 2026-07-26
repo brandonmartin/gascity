@@ -48,8 +48,13 @@
 #     enforce ': "${GC_CITY_PATH:?...}"' at file head).
 #
 # Output contract:
-#   - On success: exactly one line on stdout (the port, e.g. "47823").
-#                  Nothing on stderr. Exit 0.
+#   - On success: exactly one line on stdout (the port, e.g. "47823"). Exit 0.
+#                  Stderr is empty for a healthy server, and carries the
+#                  primary probe's anomaly notes otherwise — a stale recorded
+#                  pid, or a state file describing another city's data dir.
+#                  Those are surfaced rather than swallowed: they resolve a
+#                  port but tell the operator the state file no longer
+#                  describes reality.
 #   - On failure: nothing on stdout. Multi-line structured error on stderr
 #                  (§3 verbatim). Exit 78 (whole shell exits, not return).
 resolve_dolt_port_or_die() {
@@ -64,7 +69,11 @@ resolve_dolt_port_or_die() {
         _rdp_city_path="$3"
     fi
 
-    _rdp_resolved=$(managed_runtime_port "$_rdp_state_file" "$_rdp_data_dir" 2>/dev/null)
+    # Stderr from the primary probe is deliberately NOT discarded. It only
+    # speaks when the city's own state file disagrees with live state (stale
+    # recorded pid, foreign data_dir), and that is exactly what an operator
+    # needs to hear before deciding the data plane is down.
+    _rdp_resolved=$(managed_runtime_port "$_rdp_state_file" "$_rdp_data_dir")
     if [ -n "$_rdp_resolved" ]; then
         printf '%s\n' "$_rdp_resolved"
         return 0

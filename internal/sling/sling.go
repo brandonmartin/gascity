@@ -1627,6 +1627,13 @@ func mapsCloneWithout(in map[string]string, drop string) map[string]string {
 
 // ShouldPromoteWorkflowLaunchStatus reports whether a bead's status should
 // be promoted to in_progress when a workflow launches.
+//
+// This is also read as the definition of "not yet claimed by a worker": the
+// periodic wisp GC decides whether a stepless root was ever picked up by asking
+// this same question rather than testing its own status literals, so the launch
+// promoter and the reaper cannot disagree about which statuses mean unclaimed
+// (see steplessRootIsAbandoned in cmd/gc/wisp_gc.go). Widening or narrowing the
+// set below changes both.
 func ShouldPromoteWorkflowLaunchStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "", "open", "ready", "todo", "triage", "backlog":

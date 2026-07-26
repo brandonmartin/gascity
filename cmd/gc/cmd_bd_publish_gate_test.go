@@ -362,3 +362,25 @@ func TestStampPublishGateArgsSkipsPositionalTerminator(t *testing.T) {
 		t.Fatalf("args = %v, want them unchanged after a positional terminator", got)
 	}
 }
+
+// The stamp appends flags that gc bd's own substring-collision guard must
+// still parse: an unrecognized flag would make it fail closed and refuse
+// the halt entirely.
+func TestStampedArgsStayParseableByTheWriteIDGuard(t *testing.T) {
+	withPublishGateStamp(t, haltWorktree(), time.Date(2026, 7, 26, 6, 15, 0, 0, time.UTC))
+
+	got := stampPublishGateArgs([]string{
+		"update", "ga-qbq",
+		"--set-metadata", "branch=polecat/ga-qbq",
+		"--set-metadata", "target=develop",
+		"--set-metadata", "branch_ready=true",
+	}, "/work/ga-qbq", nil)
+
+	ids, ok, ambiguous := bdMutationWriteIDs(got)
+	if !ok || ambiguous {
+		t.Fatalf("bdMutationWriteIDs(stamped) ok=%v ambiguous=%v, want a clean parse of %v", ok, ambiguous, got)
+	}
+	if len(ids) != 1 || ids[0] != "ga-qbq" {
+		t.Fatalf("ids = %v, want exactly [ga-qbq]", ids)
+	}
+}

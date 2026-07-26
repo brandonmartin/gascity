@@ -202,11 +202,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Publish-gate provenance: a write that declares branch_ready=true also
-	// records when it arrived, the target SHA it was verified against, and
-	// whether metadata.branch is publishable. See cmd_bd_publish_gate.go.
-	bdArgs = stampPublishGateArgs(bdArgs, publishGateStampRepoDir())
-
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -229,6 +224,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Publish-gate provenance: a write that declares branch_ready=true also
+	// records when it arrived, the target SHA it was verified against, and
+	// whether metadata.branch is publishable. The existing-metadata lookup is
+	// deferred so ordinary bd traffic never pays for it. See
+	// cmd_bd_publish_gate.go.
+	argsBeforeStamp := bdArgs
+	bdArgs = stampPublishGateArgs(bdArgs, publishGateStampRepoDir(), func() beads.StringMap {
+		return publishGateExistingMetadata(cityPath, target, argsBeforeStamp)
+	})
+
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

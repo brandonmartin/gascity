@@ -9,8 +9,9 @@
 #
 # Runs `gc doctor --json`, looks for dangling owner_bead findings from the
 # census-owner-liveness check, and files one alert bead per distinct
-# dangling owner_bead -- deduped against existing open alerts so a
-# persistent condition doesn't spam a fresh bead on every cron tick.
+# dangling owner_bead -- deduped against every bead already naming that
+# owner_bead, whatever its status or labels, so a persistent condition
+# doesn't spam a fresh bead on every cron tick.
 #
 # Detection only: this script never repairs the ledger or the bead store.
 # Intended trigger: a cron order running every few hours (see the close-out
@@ -76,11 +77,31 @@ created=0
 while IFS= read -r owner_bead; do
     [ -z "$owner_bead" ] && continue
 
-    existing_count=$(bd list --json --label "$alert_label" --status open \
-        --metadata-field "census.owner_bead=${owner_bead}" | jq 'length')
+    # Dedup on the owner_bead metadata alone, across every status. Narrowing
+    # this query re-files one duplicate per dangling owner_bead on every cron
+    # tick (ga-xw25), so both dimensions must stay wide:
+    #
+    #   status  A tracked condition spends most of its life outside `open` --
+    #           in_progress once a polecat claims the alert, closed once the
+    #           mayor folds symptom beads into a consolidation bead, deferred
+    #           while that bead waits. Each of those must still suppress.
+    #   label   The consolidation bead carries census.owner_bead but not this
+    #           patrol's label, so a label-scoped query cannot see the very
+    #           bead doing the work.
+    #
+    # gc doctor reads the canonical rig checkout, so the warning persists for
+    # the whole branch->merge window -- hours, with a tick every few. Any bead
+    # naming this owner_bead means the condition is already on the ledger.
+    # Detection is not lost by suppressing: the gc doctor warning stands on
+    # its own, and the skip line below names the beads that suppressed it.
+    existing=$(bd list --json --all --limit 0 \
+        --metadata-field "census.owner_bead=${owner_bead}")
+
+    existing_count=$(printf '%s' "$existing" | jq 'length')
 
     if [ "${existing_count:-0}" -gt 0 ]; then
-        echo "check-census-owner-liveness: owner_bead=$owner_bead already has an open alert (${existing_count}), skipping"
+        existing_summary=$(printf '%s' "$existing" | jq -r '[.[] | "\(.id) (\(.status))"] | join(", ")')
+        echo "check-census-owner-liveness: owner_bead=$owner_bead already tracked by ${existing_count} bead(s): ${existing_summary}; skipping"
         continue
     fi
 

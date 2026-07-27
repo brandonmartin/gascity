@@ -55,14 +55,33 @@ fi
 # Dashboard SPA rebuild: when internal/api/openapi.json changes, regenerate
 # the generated TS API client from the new spec and stage it. When the spec
 # OR the SPA source changes, typecheck and rebuild the compiled bundle.
-# Guarded on `npm` availability so contributors without Node tooling aren't
-# blocked; CI enforces the full regeneration via make dashboard-ci.
-if command -v npm >/dev/null 2>&1; then
-  # Re-read the index rather than reusing the pre-hook snapshot: the Go
-  # block above runs `go run ./cmd/genspec` and stages the regenerated
-  # internal/api/openapi.json, so a Go-only commit that moves the API
-  # surface only shows up here (#4627, #4607).
-  spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+#
+# Re-read the index rather than reusing the pre-hook snapshot: the Go
+# block above runs `go run ./cmd/genspec` and stages the regenerated
+# internal/api/openapi.json, so a Go-only commit that moves the API
+# surface only shows up here (#4627, #4607).
+spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+
+if [ -n "$spec_changed" ] || [ -n "$staged_web_src" ]; then
+  # npm is required only by commits that actually stage dashboard-derived
+  # sources, so Go and docs work stays unblocked on hosts without Node
+  # tooling — the reason the original availability guard existed. But this
+  # commit cannot regenerate what it invalidates, and the stderr warning
+  # that used to cover that case scrolled past unread on every commit, so
+  # dashboard and API-schema changes were landing with no local enforcement
+  # whatsoever (ga-fxhk). Fail closed instead.
+  if ! command -v npm >/dev/null 2>&1; then
+    {
+      echo "error: npm is not on PATH, but this commit stages dashboard-derived sources:"
+      printf '%s\n' "$spec_changed" "$staged_web_src" | sed '/^$/d; s/^/  /'
+      echo "Without npm neither the generated TS client nor"
+      echo "internal/api/dashboardspa/dist can be regenerated, so this commit would"
+      echo "land stale artifacts (#4627, #4607)."
+      echo "Install Node/npm and re-commit, or bypass deliberately with"
+      echo '`git commit --no-verify` and run `make dashboard-ci` before pushing.'
+    } >&2
+    exit 1
+  fi
   if [ -n "$spec_changed" ]; then
     # Regenerate BEFORE typecheck/build below: a client that no longer
     # matches the new spec must fail typecheck immediately instead of
@@ -70,15 +89,11 @@ if command -v npm >/dev/null 2>&1; then
     (cd internal/api/dashboardspa/web && npm ci --silent && npm run generate:client)
     git add internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client
   fi
-  if [ -n "$spec_changed" ] || [ -n "$staged_web_src" ]; then
-    # Typecheck BEFORE build: vite's build transpiles TS to JS and
-    # silently ignores type errors. The Makefile target also runs the
-    # Vitest suite, builds dist/, and smoke-runs the compiled SPA via
-    # Vite preview so a bundle that builds but won't serve is caught
-    # before CI.
-    make dashboard-check dashboard-smoke
-    git add internal/api/dashboardspa/dist
-  fi
-else
-  echo "warning: npm not on PATH — skipped dashboard SPA typecheck + rebuild. CI will enforce this." >&2
+  # Typecheck BEFORE build: vite's build transpiles TS to JS and
+  # silently ignores type errors. The Makefile target also runs the
+  # Vitest suite, builds dist/, and smoke-runs the compiled SPA via
+  # Vite preview so a bundle that builds but won't serve is caught
+  # before CI.
+  make dashboard-check dashboard-smoke
+  git add internal/api/dashboardspa/dist
 fi

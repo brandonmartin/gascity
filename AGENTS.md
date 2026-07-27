@@ -547,6 +547,16 @@ Beads' installer can reclaim `core.hooksPath` at any time. When it does,
 backstop for spec/client drift, but it only sees work that reaches a PR —
 locally merged branches depend on the pre-commit gate actually running.
 
+**npm is required to commit dashboard-derived sources.** When a commit stages
+`internal/api/openapi.json` or SPA source under `internal/api/dashboardspa/web/`,
+`pre-commit` regenerates the TS client and rebuilds `dashboardspa/dist`. With no
+`npm` on `PATH` it cannot, so it fails the commit rather than warning: the
+warning it replaced scrolled past unread and let stale generated artifacts land
+with no local enforcement at all (ga-fxhk). Every other commit — Go, docs,
+config — is unaffected and needs no Node tooling. To land such a change without
+npm, bypass deliberately with `git commit --no-verify` and run `make dashboard-ci`
+before pushing.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

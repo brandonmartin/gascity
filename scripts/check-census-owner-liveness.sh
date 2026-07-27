@@ -23,7 +23,12 @@
 
 set -euo pipefail
 
-routed_to="${CENSUS_OWNER_LIVENESS_ROUTED_TO:-gascity/architect}"
+# Routing target for the alerts this patrol files. Unset by default: an alert
+# with no gc.routed_to lands in the rig's normal unassigned pool, which is how
+# every other dispatchable bead sits and is the only target guaranteed to exist
+# in an arbitrary city. Cities that do run a dedicated triage agent set
+# CENSUS_OWNER_LIVENESS_ROUTED_TO in the order environment.
+routed_to="${CENSUS_OWNER_LIVENESS_ROUTED_TO:-}"
 alert_label="source:census-owner-liveness-patrol"
 
 # gc doctor exits nonzero when unrelated BLOCKING checks fail; the
@@ -81,8 +86,16 @@ while IFS= read -r owner_bead; do
 
     matching_lines=$(printf '%s\n' "$dangling_lines" | grep -F "dangling owner_bead=${owner_bead} ")
 
-    metadata=$(jq -n --arg routed_to "$routed_to" --arg owner_bead "$owner_bead" \
-        '{"gc.routed_to": $routed_to, "census.owner_bead": $owner_bead}')
+    # Omit gc.routed_to entirely when no target is configured. Writing it as an
+    # empty string would still read as "routed" to consumers that only test for
+    # key presence.
+    if [ -n "$routed_to" ]; then
+        metadata=$(jq -n --arg routed_to "$routed_to" --arg owner_bead "$owner_bead" \
+            '{"gc.routed_to": $routed_to, "census.owner_bead": $owner_bead}')
+    else
+        metadata=$(jq -n --arg owner_bead "$owner_bead" \
+            '{"census.owner_bead": $owner_bead}')
+    fi
 
     description=$(cat <<EOF
 gc doctor census-owner-liveness detected a resource-census ledger row

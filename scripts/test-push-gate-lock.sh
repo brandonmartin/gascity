@@ -223,6 +223,72 @@ mkdir -p "$CITY_WALK/rigs/proj/sub"
 RESOLVED_WALK="$(cd "$CITY_WALK/rigs/proj/sub" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_city_root)"
 assert_eq "city_root.walk_up_finds_ancestor" "$RESOLVED_WALK" "$CITY_WALK"
 
+# ---------------- city-root resolution: the legacy .gc/ fallback is bounded ----------------
+# push_gate_city_root is a port of cmd/gc/city_discovery.go's
+# findCityWithOptions, whose legacy `.gc/`-only fallback is bounded three ways:
+# it is skipped at a ceiling directory ($HOME, $TMPDIR, $GC_CEILING_DIRECTORIES),
+# and it ignores both the supervisor's global runtime root ($GC_HOME, default
+# $HOME/.gc) and any `.gc/` under an ancestor of $TMPDIR.
+#
+# Those bounds are what make the slot pool city-wide. An agent whose walk-up
+# adopts an unrelated `.gc/` as its city root gets a *private* pool and runs its
+# own PUSH_GATE_MAX_CONCURRENT heavy suites on the same box, so the cap silently
+# stops capping. Observed live on a 24-core host (ga-8i9z): a real gate run held
+# ~/.gc/gate-slots/slot-0.lock — $GC_HOME, not a city — while the true city pool
+# was separately full.
+
+# $HOME is a ceiling, so a `.gc/` sitting in it must never become the city root.
+FAKE_HOME="$WORK/fake-home"
+mkdir -p "$FAKE_HOME/.gc" "$FAKE_HOME/proj"
+(cd "$FAKE_HOME/proj" && git init -q .) 2>/dev/null || true
+if RESOLVED_HOME="$(cd "$FAKE_HOME/proj" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" GC_HOME="" HOME="$FAKE_HOME" push_gate_city_root)"; then
+    assert_true "city_root.ignores_home_dot_gc" test "$RESOLVED_HOME" != "$FAKE_HOME"
+else
+    record_pass "city_root.ignores_home_dot_gc"
+fi
+
+# ...and the slot pool must fall back to repo-relative rather than silently
+# becoming a private per-$HOME pool.
+SLOTS_HOME="$(cd "$FAKE_HOME/proj" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" GC_HOME="" HOME="$FAKE_HOME" push_gate_slots_dir)"
+assert_true "slots_dir.never_under_home_dot_gc" test "$SLOTS_HOME" != "$FAKE_HOME/.gc/gate-slots"
+
+# A ceiling stops the *legacy* fallback, not an explicit city: findCity checks
+# HasCityConfig before the ceiling break, so a real city.toml at $HOME wins.
+HOME_CITY="$WORK/home-city"
+mkdir -p "$HOME_CITY/proj"
+: >"$HOME_CITY/city.toml"
+RESOLVED_HOME_CITY="$(cd "$HOME_CITY/proj" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" GC_HOME="" HOME="$HOME_CITY" push_gate_city_root)"
+assert_eq "city_root.city_toml_wins_at_ceiling" "$RESOLVED_HOME_CITY" "$HOME_CITY"
+
+# $GC_HOME is the supervisor's global runtime root. It is a `.gc/` directory by
+# construction and is never a city, even when it sits below the $HOME ceiling.
+SUPERVISOR="$WORK/supervisor"
+mkdir -p "$SUPERVISOR/.gc" "$SUPERVISOR/proj"
+if RESOLVED_GC_HOME="$(cd "$SUPERVISOR/proj" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" GC_HOME="$SUPERVISOR/.gc" HOME="$WORK/unrelated-home" push_gate_city_root)"; then
+    assert_true "city_root.ignores_gc_home_runtime_root" test "$RESOLVED_GC_HOME" != "$SUPERVISOR"
+else
+    record_pass "city_root.ignores_gc_home_runtime_root"
+fi
+
+# A `.gc/` under an ancestor of $TMPDIR is build/runtime scratch, not a city.
+# Reached only from a sibling path, since $TMPDIR itself is a ceiling.
+TMPROOT="$WORK/tmproot"
+mkdir -p "$TMPROOT/.gc" "$TMPROOT/other/repo" "$TMPROOT/gct-prefixed"
+if RESOLVED_TMP="$(cd "$TMPROOT/other/repo" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" GC_HOME="" HOME="$WORK/unrelated-home" TMPDIR="$TMPROOT/gct-prefixed" push_gate_city_root)"; then
+    assert_true "city_root.ignores_tmpdir_ancestor_dot_gc" test "$RESOLVED_TMP" != "$TMPROOT"
+else
+    record_pass "city_root.ignores_tmpdir_ancestor_dot_gc"
+fi
+
+# The ancestor walk stops before the filesystem root, matching the Go's
+# `dir != filepath.Dir(dir)` guard. Ignoring `/.gc` would make bash refuse a
+# legacy root the Go accepts, and a bash/Go disagreement about the city root
+# splits the slot pool — the very failure this bounding exists to prevent.
+IGNORED_ROOTS="$(TMPDIR=/tmp _push_gate_ignored_runtime_roots)"
+assert_contains "ignored_roots.includes_tmpdir_ancestor" "$IGNORED_ROOTS" "/tmp/.gc"
+assert_false "ignored_roots.stops_before_filesystem_root" \
+    grep -qx '/\.gc' <<<"$IGNORED_ROOTS"
+
 # ---------------- slots dir: derives from city root, falls back to repo-relative ----------------
 SLOTS_FROM_CITY="$(GC_CITY_PATH="$CITY_ENV" GC_CITY="" GC_CITY_ROOT="" push_gate_slots_dir)"
 assert_eq "slots_dir.under_city_root" "$SLOTS_FROM_CITY" "$CITY_ENV/.gc/gate-slots"

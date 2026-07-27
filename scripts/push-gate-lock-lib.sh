@@ -130,6 +130,95 @@
 # keep the 3.2 floor above.
 PUSH_GATE_FD_BASE=200
 
+# Normalize a path for ceiling/ignore comparison: absolute, symlinks resolved,
+# no trailing slash. Port of normalizeDiscoveryPath in
+# cmd/gc/city_discovery.go. Comparisons must be symmetric, so the walked
+# directory and every ceiling flow through here. A path that does not exist yet
+# (a configured-but-not-created ceiling) resolves its longest existing ancestor
+# and re-appends the remainder, rather than dropping out of the comparison.
+_push_gate_normalize_path() {
+    local _pgn_path="$1" _pgn_resolved _pgn_rest="" _pgn_dir _pgn_parent
+    [[ -n "$_pgn_path" ]] || return 1
+    if _pgn_resolved="$(cd "$_pgn_path" 2>/dev/null && pwd -P)"; then
+        printf '%s\n' "$_pgn_resolved"
+        return 0
+    fi
+    _pgn_dir="$_pgn_path"
+    while [[ "$_pgn_dir" != "/" && "$_pgn_dir" != "." && -n "$_pgn_dir" ]]; do
+        _pgn_parent="$(dirname "$_pgn_dir")"
+        _pgn_rest="$(basename "$_pgn_dir")${_pgn_rest:+/$_pgn_rest}"
+        if _pgn_resolved="$(cd "$_pgn_parent" 2>/dev/null && pwd -P)"; then
+            printf '%s/%s\n' "${_pgn_resolved%/}" "$_pgn_rest"
+            return 0
+        fi
+        [[ "$_pgn_parent" == "$_pgn_dir" ]] && break
+        _pgn_dir="$_pgn_parent"
+    done
+    printf '%s\n' "${_pgn_path%/}"
+}
+
+# True when $2 appears as a line in the newline-separated list $1.
+_push_gate_list_contains() {
+    local _pglc_list="$1" _pglc_want="$2" _pglc_line
+    [[ -n "$_pglc_want" ]] || return 1
+    while IFS= read -r _pglc_line; do
+        if [[ -n "$_pglc_line" && "$_pglc_line" == "$_pglc_want" ]]; then
+            return 0
+        fi
+    done <<<"$_pglc_list"
+    return 1
+}
+
+# Print the walk-up ceilings, one normalized path per line. Port of
+# implicitCityDiscoveryCeilings: $GC_CEILING_DIRECTORIES (PATH-separated),
+# $HOME, $TMPDIR. The walk stops at a ceiling and never adopts one as a legacy
+# city root.
+_push_gate_ceiling_dirs() {
+    local _pgcd_entry _pgcd_norm _pgcd_saved_ifs="$IFS"
+    IFS=':'
+    for _pgcd_entry in ${GC_CEILING_DIRECTORIES:-}; do
+        IFS="$_pgcd_saved_ifs"
+        if _pgcd_norm="$(_push_gate_normalize_path "$_pgcd_entry")"; then
+            printf '%s\n' "$_pgcd_norm"
+        fi
+        IFS=':'
+    done
+    IFS="$_pgcd_saved_ifs"
+    for _pgcd_entry in "${HOME:-}" "${TMPDIR:-/tmp}"; do
+        if _pgcd_norm="$(_push_gate_normalize_path "$_pgcd_entry")"; then
+            printf '%s\n' "$_pgcd_norm"
+        fi
+    done
+}
+
+# Print the `.gc/` paths that must never be treated as a legacy city root, one
+# per line. Port of implicitIgnoredLegacyRuntimeRoots: the supervisor's global
+# runtime root ($GC_HOME, default $HOME/.gc), plus `.gc/` under every ancestor
+# of $TMPDIR — a live city may keep runtime state under a prefixed TMPDIR, so
+# the unprefixed ancestor's `.gc/` is scratch, not a city.
+_push_gate_ignored_runtime_roots() {
+    local _pgir_gc_home="${GC_HOME:-}" _pgir_norm _pgir_dir _pgir_parent
+    if [[ -z "$_pgir_gc_home" && -n "${HOME:-}" ]]; then
+        _pgir_gc_home="$HOME/.gc"
+    fi
+    if [[ -n "$_pgir_gc_home" ]] && _pgir_norm="$(_push_gate_normalize_path "$_pgir_gc_home")"; then
+        printf '%s\n' "$_pgir_norm"
+    fi
+    if _pgir_dir="$(_push_gate_normalize_path "${TMPDIR:-/tmp}")"; then
+        # Pre-test loop, matching the Go's `dir != filepath.Dir(dir)` guard: the
+        # filesystem root is not an ancestor worth ignoring, and emitting `/.gc`
+        # here would make bash refuse a legacy root the Go accepts — a
+        # disagreement that splits the pool, which is what this bounding exists
+        # to prevent.
+        while [[ -n "$_pgir_dir" ]]; do
+            _pgir_parent="$(dirname "$_pgir_dir")"
+            [[ "$_pgir_parent" == "$_pgir_dir" ]] && break
+            printf '%s/.gc\n' "${_pgir_dir%/}"
+            _pgir_dir="$_pgir_parent"
+        done
+    fi
+}
+
 # Resolve the city root, validating any env var before trusting it so a
 # stray GC_CITY_PATH can't redirect the lock directory arbitrarily.
 push_gate_city_root() {
@@ -148,16 +237,31 @@ push_gate_city_root() {
     # findCityWithOptions. city.toml wins outright; a legacy .gc/-only
     # ancestor is remembered as a fallback but only used if no city.toml is
     # ever found before the ceiling.
-    local _pgc_dir="$PWD" _pgc_home="${HOME:-}" _pgc_legacy="" _pgc_parent
+    #
+    # The legacy fallback is bounded exactly as the Go is, and those bounds are
+    # what keep the slot pool city-wide: an unrelated `.gc/` adopted as the city
+    # root yields a *private* pool, so every agent that adopts it runs its own
+    # PUSH_GATE_MAX_CONCURRENT heavy suites and the cap stops capping (ga-8i9z).
+    local _pgc_dir="$PWD" _pgc_legacy="" _pgc_parent _pgc_norm
+    local _pgc_ceilings _pgc_ignored _pgc_at_ceiling
+    _pgc_ceilings="$(_push_gate_ceiling_dirs)"
+    _pgc_ignored="$(_push_gate_ignored_runtime_roots)"
     while :; do
         if [[ -f "$_pgc_dir/city.toml" ]]; then
             printf '%s\n' "$_pgc_dir"
             return 0
         fi
-        if [[ -z "$_pgc_legacy" && -d "$_pgc_dir/.gc" ]]; then
-            _pgc_legacy="$_pgc_dir"
+        _pgc_norm="$(_push_gate_normalize_path "$_pgc_dir")" || _pgc_norm="$_pgc_dir"
+        _pgc_at_ceiling=0
+        if _push_gate_list_contains "$_pgc_ceilings" "$_pgc_norm"; then
+            _pgc_at_ceiling=1
         fi
-        if [[ -n "$_pgc_home" && "$_pgc_dir" == "$_pgc_home" ]]; then
+        if [[ -z "$_pgc_legacy" && "$_pgc_at_ceiling" -eq 0 && -d "$_pgc_dir/.gc" ]]; then
+            if ! _push_gate_list_contains "$_pgc_ignored" "${_pgc_norm%/}/.gc"; then
+                _pgc_legacy="$_pgc_dir"
+            fi
+        fi
+        if [[ "$_pgc_at_ceiling" -eq 1 ]]; then
             break
         fi
         _pgc_parent="$(dirname "$_pgc_dir")"

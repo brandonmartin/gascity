@@ -89,7 +89,10 @@
 #       sessions rely on via env vars). Returns 1 if nothing is found.
 #   push_gate_slots_dir
 #       Print the slot directory to use: <city_root>/.gc/gate-slots when
-#       push_gate_city_root resolves, else <repo_root>/.git/gate-slots
+#       push_gate_city_root resolves, else <git_common_dir>/gate-slots —
+#       still <repo_root>/.git/gate-slots in a normal clone, but sibling
+#       linked worktrees resolve to the one shared common dir instead of a
+#       per-worktree `.git` file that cannot hold a directory
 #       (NFR4 fallback, never /tmp — see AGENTS.md Build Cache Conventions).
 #       Does not create the directory (push_gate_acquire_slot does).
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
@@ -276,7 +279,7 @@ push_gate_city_root() {
     return 1
 }
 
-# Print the slot directory to use (city-rooted, or repo-relative fallback).
+# Print the slot directory to use (city-rooted, or common-Git-dir fallback).
 # Does not create it.
 push_gate_slots_dir() {
     local _pgs_city_root
@@ -284,9 +287,14 @@ push_gate_slots_dir() {
         printf '%s/.gc/gate-slots\n' "$_pgs_city_root"
         return 0
     fi
-    local _pgs_repo_root
-    if _pgs_repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-        printf '%s/.git/gate-slots\n' "$_pgs_repo_root"
+    # --git-common-dir (Git 2.5+) may print a path relative to $PWD, so
+    # absolutize it here rather than with --path-format=absolute (Git 2.31+):
+    # git rev-parse echoes an unrecognized option and still exits 0, which
+    # would smuggle garbage past this `if` on older git.
+    local _pgs_git_common
+    if _pgs_git_common="$(git rev-parse --git-common-dir 2>/dev/null)" && [[ -n "$_pgs_git_common" ]]; then
+        _pgs_git_common="$(cd "$_pgs_git_common" 2>/dev/null && pwd)" || return 1
+        printf '%s/gate-slots\n' "$_pgs_git_common"
         return 0
     fi
     return 1

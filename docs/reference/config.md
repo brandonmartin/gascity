@@ -392,7 +392,7 @@ EventsRotationConfig holds file-backed events rotation settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `enabled` | boolean |  | `true` | Enabled controls automatic size-triggered rotation. Defaults to true. |
-| `max_size_bytes` | integer |  | `268435456` | MaxSizeBytes is the active events.jsonl size threshold. Defaults to DefaultEventsRotationMaxSizeBytes. |
+| `max_size_bytes` | integer |  | `16777216` | MaxSizeBytes is the active events.jsonl size threshold. Defaults to DefaultEventsRotationMaxSizeBytes. |
 | `check_interval_records` | integer |  | `1024` | CheckIntervalRecords is the number of records between size checks. Defaults to DefaultEventsRotationCheckIntervalRecords. |
 | `check_interval_seconds` | integer |  | `60` | CheckIntervalSeconds is the time backstop between size checks. Defaults to DefaultEventsRotationCheckIntervalSeconds. |
 | `archive_retain_age` | string |  |  | ArchiveRetainAge is an optional Go duration. Empty keeps all archives. |

@@ -1521,7 +1521,7 @@
         "max_size_bytes": {
           "type": "integer",
           "description": "MaxSizeBytes is the active events.jsonl size threshold. Defaults to\nDefaultEventsRotationMaxSizeBytes.",
-          "default": 268435456
+          "default": 16777216
         },
         "check_interval_records": {
           "type": "integer",

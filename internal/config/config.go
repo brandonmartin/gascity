@@ -1835,7 +1835,26 @@ type UsageConfig struct {
 const (
 	// DefaultEventsRotationMaxSizeBytes is the default active events.jsonl
 	// size threshold before auto-rotation.
-	DefaultEventsRotationMaxSizeBytes int64 = 256 * 1024 * 1024
+	//
+	// The active log is the one segment no reader can skip: archives carry a
+	// seq window and a rotation timestamp in their filenames, so a bounded or
+	// Since-filtered read passes over them without gunzipping, but the active
+	// file has no such header and is scanned end to end every time. Its size
+	// is therefore the floor on the cost of every unbounded read, and the
+	// threshold is what that floor is set to.
+	//
+	// At the former 256 MiB that floor was ~36s. A city observed at 161 MiB
+	// (253k events, ~640 B/event) had never once rotated, so "retention" had
+	// never engaged and every consumer of the log — including `gc events
+	// --since`, the documented fallback for confirming agent liveness — paid a
+	// full scan of it (ga-b2s). 16 MiB holds ~25k events, which is a generous
+	// live tail, and bounds that floor to roughly a second.
+	//
+	// Total bytes retained do not grow as a result: rotation moves the older
+	// events into gzipped archives rather than deleting them, so a lower
+	// threshold trades one large plain file for a small one plus compressed
+	// history. Archive retention remains opt-in via archive_retain_age.
+	DefaultEventsRotationMaxSizeBytes int64 = 16 * 1024 * 1024
 	// DefaultEventsRotationCheckIntervalRecords is the default number of
 	// records between active file size checks.
 	DefaultEventsRotationCheckIntervalRecords = 1024
@@ -1853,7 +1872,7 @@ type EventsRotationConfig struct {
 	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
 	// MaxSizeBytes is the active events.jsonl size threshold. Defaults to
 	// DefaultEventsRotationMaxSizeBytes.
-	MaxSizeBytes *int64 `toml:"max_size_bytes,omitempty" jsonschema:"default=268435456"`
+	MaxSizeBytes *int64 `toml:"max_size_bytes,omitempty" jsonschema:"default=16777216"`
 	// CheckIntervalRecords is the number of records between size checks.
 	// Defaults to DefaultEventsRotationCheckIntervalRecords.
 	CheckIntervalRecords *int `toml:"check_interval_records,omitempty" jsonschema:"default=1024"`

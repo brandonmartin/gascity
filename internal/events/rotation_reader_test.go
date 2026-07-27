@@ -288,6 +288,46 @@ func TestReadFilteredSkipsNonOverlappingArchives(t *testing.T) {
 	}
 }
 
+// TestReadFilteredSkipsArchivesOlderThanSince is the read-path guard for the
+// time-window skip. A Since-filtered read is the documented way to ask "what
+// happened recently", and on a long-lived city the archives holding older
+// events dwarf the answer. The archive here is deliberately not valid gzip: if
+// the reader opens it the read fails, so a clean result proves the archive was
+// skipped on its filename timestamp alone rather than gunzipped and discarded.
+func TestReadFilteredSkipsArchivesOlderThanSince(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	rotatedAt := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	corrupt := filepath.Join(dir, formatArchiveBasename(rotatedAt, 1, 2))
+	if err := os.WriteFile(corrupt, []byte("not gzip at all"), 0o644); err != nil {
+		t.Fatalf("write corrupt archive: %v", err)
+	}
+
+	recent := rotatedAt.Add(time.Hour)
+	line := fmt.Sprintf(`{"seq":3,"type":%q,"subject":"active","ts":%q}`+"\n",
+		string(BeadCreated), recent.Format(time.RFC3339Nano))
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatalf("write active log: %v", err)
+	}
+
+	// Since is after the archive's rotation instant → skipped untouched.
+	got, err := ReadFiltered(path, Filter{Since: rotatedAt.Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatalf("ReadFiltered(Since after archive) opened the archive it should have skipped: %v", err)
+	}
+	if want := []uint64{3}; !reflect.DeepEqual(seqsOf(got), want) {
+		t.Errorf("seqs = %v, want %v", seqsOf(got), want)
+	}
+
+	// Without a Since cutoff the same archive is in scope, so the corruption
+	// surfaces. This is what pins the result above to the skip and not to the
+	// archive being unreadable-but-ignored on every path.
+	if _, err := ReadFiltered(path, Filter{}); err == nil {
+		t.Fatal("ReadFiltered(no Since) returned nil error; the corrupt archive should have been read and failed")
+	}
+}
+
 func TestReadFilteredAcrossArchivesAppliesPredicates(t *testing.T) {
 	dir := seedRecorderWithRotation(t, 4, 3)
 	path := filepath.Join(dir, "events.jsonl")

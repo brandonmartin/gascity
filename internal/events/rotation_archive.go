@@ -123,15 +123,31 @@ func parseLegacyArchiveBasename(name string) (time.Time, error) {
 	return ts.UTC(), nil
 }
 
-// archiveOverlapsFilter reports whether the archive's seq range can
-// possibly contain events that satisfy filter. The skip-fast read path
-// uses this to avoid gunzipping archives whose entire window has
-// already been excluded by the caller's AfterSeq or BeforeSeq predicate.
+// archiveOverlapsFilter reports whether the archive's seq range or time
+// window can possibly contain events that satisfy filter. The skip-fast
+// read path uses this to avoid gunzipping archives whose entire window has
+// already been excluded by the caller's AfterSeq, BeforeSeq, or Since
+// predicate.
+//
+// The Since predicate is answered from the filename timestamp, which is the
+// instant rotation closed the archive and therefore upper-bounds the Ts of
+// every event inside it: an archive rotated before the cutoff cannot hold an
+// event at or after it. Equality does not skip — an event may share the
+// rotation instant. Reading the timestamp off the name is the same trust
+// reapExpiredArchives already places in it when deciding which archives to
+// delete outright, and skipping is the more conservative of the two.
+//
+// Until is deliberately not a skip predicate. The filename carries no lower
+// bound on event time, so no archive can be excluded by an upper time bound
+// without opening it.
 func archiveOverlapsFilter(info archiveInfo, filter Filter) bool {
 	if filter.AfterSeq > 0 && info.LastSeq <= filter.AfterSeq {
 		return false
 	}
 	if filter.BeforeSeq > 0 && info.FirstSeq >= filter.BeforeSeq {
+		return false
+	}
+	if !filter.Since.IsZero() && info.Timestamp.Before(filter.Since) {
 		return false
 	}
 	return true

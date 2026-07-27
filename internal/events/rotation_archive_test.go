@@ -137,3 +137,42 @@ func TestArchiveOverlapsFilter(t *testing.T) {
 		})
 	}
 }
+
+// TestArchiveOverlapsFilterSkipsBySince covers the time-window half of the
+// skip-fast path. An archive's filename timestamp is the instant rotation
+// closed it, so it upper-bounds every event inside; a Since cutoff at or after
+// that instant cannot match anything in the archive and must skip it without
+// gunzipping. Until is deliberately not a skip predicate: the filename carries
+// no lower bound on event time, so an archive can always hold events at or
+// before any Until.
+func TestArchiveOverlapsFilterSkipsBySince(t *testing.T) {
+	rotatedAt := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	info := archiveInfo{
+		Basename:  "events.jsonl.archive-20260507T120000Z-seq-100-200.gz",
+		Timestamp: rotatedAt,
+		FirstSeq:  100,
+		LastSeq:   200,
+	}
+	tests := []struct {
+		name string
+		f    Filter
+		want bool
+	}{
+		{"Since well before rotation", Filter{Since: rotatedAt.Add(-24 * time.Hour)}, true},
+		{"Since just before rotation", Filter{Since: rotatedAt.Add(-time.Second)}, true},
+		{"Since exactly at rotation", Filter{Since: rotatedAt}, true},
+		{"Since just after rotation", Filter{Since: rotatedAt.Add(time.Second)}, false},
+		{"Since well after rotation", Filter{Since: rotatedAt.Add(24 * time.Hour)}, false},
+		{"Until never skips", Filter{Until: rotatedAt.Add(-24 * time.Hour)}, true},
+		{"Since after rotation still skips despite overlapping seq window", Filter{Since: rotatedAt.Add(time.Hour), AfterSeq: 50}, false},
+		{"seq exclusion still wins when Since overlaps", Filter{Since: rotatedAt.Add(-time.Hour), AfterSeq: 200}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := archiveOverlapsFilter(info, tc.f)
+			if got != tc.want {
+				t.Errorf("overlap = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

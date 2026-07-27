@@ -634,9 +634,14 @@ func directSessionBeadIDCandidates(assignee string) []string {
 		if assignee[i] != '-' {
 			continue
 		}
-		if suffix := assignee[i+1:]; suffix != "" {
-			candidates = append(candidates, suffix)
+		// A qualified agent name encodes "/" as "--" (agent.SessionNameFor),
+		// so the byte after a "-" can be another "-". Such a suffix is never a
+		// bead ID, and stores that shell out would read it as a flag.
+		suffix := assignee[i+1:]
+		if suffix == "" || suffix[0] == '-' {
+			continue
 		}
+		candidates = append(candidates, suffix)
 	}
 	return candidates
 }

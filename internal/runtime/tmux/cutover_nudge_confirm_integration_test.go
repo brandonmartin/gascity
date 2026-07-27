@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -36,10 +37,15 @@ func seamBackedTestProvider(idleTimeout time.Duration) runtime.Provider {
 	return NewSeamBackedWithConfig(cfg)
 }
 
-// startNeverBusyClaudePane starts a fake claude TUI that accepts pasted text but
-// never starts a turn, no matter how many Enters arrive — the turn-exited pane
-// that swallows the submit and leaves the nudge drafted in the input box.
-func startNeverBusyClaudePane(t *testing.T, label string) (*Tmux, string) {
+// startClaudePaneAtIdle starts a fake claude TUI and blocks until the pane
+// actually reports idle, so each test measures submit confirmation rather than
+// racing TUI startup.
+//
+// busyAfter is how many Enter keystrokes the fixture needs before it prints a
+// busy footer. A value above submitEnterMaxSends yields a pane that NEVER starts
+// a turn no matter how many Enters arrive — the turn-exited agent that swallows
+// the submit and leaves the nudge drafted in its input box.
+func startClaudePaneAtIdle(t *testing.T, label string, busyAfter int) (*Tmux, string) {
 	t.Helper()
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -51,18 +57,20 @@ func startNeverBusyClaudePane(t *testing.T, label string) (*Tmux, string) {
 
 	_ = tm.KillSession(sessionName)
 	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
-		"GC_PROVIDER": "claude",
-		// Higher than submitEnterMaxSends, so no Enter this path can send ever
-		// drives the agent busy.
-		"GC_TEST_BUSY_AFTER": "99",
-		// Print an idle prompt so WaitForIdle resolves promptly and the test
-		// measures the submit confirmation, not the idle wait.
+		"GC_PROVIDER":        "claude",
+		"GC_TEST_BUSY_AFTER": fmt.Sprintf("%d", busyAfter),
+		// Print an idle prompt so readiness is an observable condition below
+		// instead of a guessed delay.
 		"GC_TEST_IDLE_PROMPT": "1",
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
 	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
-	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.WaitForIdle(context.Background(), sessionName, 10*time.Second); err != nil {
+		out, _ := tm.CapturePaneAll(sessionName)
+		t.Fatalf("fixture never reached idle: %v\npane:\n%s", err, out)
+	}
 	return tm, sessionName
 }
 
@@ -79,12 +87,16 @@ func confirmingSeamBackedProvider(t *testing.T, sp runtime.Provider) runtime.Con
 	return cp
 }
 
+// neverStartsATurn is a busyAfter above submitEnterMaxSends, so no Enter this
+// path can send ever drives the fixture busy.
+const neverStartsATurn = 99
+
 // TestSeamBackedNudgeConfirmReportsUnsubmittedDraft is the regression guard for
 // the deployed-binary gap: wait-idle delivery through the production provider
 // must report the unsubmitted draft, which is what makes the CLI's
 // wait-idle -> queue fallback reachable.
 func TestSeamBackedNudgeConfirmReportsUnsubmittedDraft(t *testing.T) {
-	tm, sessionName := startNeverBusyClaudePane(t, "waitidle")
+	tm, sessionName := startClaudePaneAtIdle(t, "waitidle", neverStartsATurn)
 	cp := confirmingSeamBackedProvider(t, seamBackedTestProvider(2*time.Second))
 
 	submitted, err := cp.NudgeConfirm(sessionName, runtime.TextContent("keep patrolling"))
@@ -103,7 +115,7 @@ func TestSeamBackedNudgeConfirmReportsUnsubmittedDraft(t *testing.T) {
 // immediate delivery — the mode operators use to recover a stranded agent, and
 // the one whose result the CLI reports as a non-zero exit rather than queueing.
 func TestSeamBackedNudgeNowConfirmReportsUnsubmittedDraft(t *testing.T) {
-	tm, sessionName := startNeverBusyClaudePane(t, "immediate")
+	tm, sessionName := startClaudePaneAtIdle(t, "immediate", neverStartsATurn)
 	cp := confirmingSeamBackedProvider(t, seamBackedTestProvider(2*time.Second))
 
 	submitted, err := cp.NudgeNowConfirm(sessionName, runtime.TextContent("keep patrolling"))
@@ -122,27 +134,10 @@ func TestSeamBackedNudgeNowConfirmReportsUnsubmittedDraft(t *testing.T) {
 // Without this, "always report false" would pass the guards above while
 // downgrading every healthy nudge in the town to a queued redelivery.
 func TestSeamBackedNudgeConfirmReportsLandedSubmit(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-	tm := testTmux()
-	dir := t.TempDir()
-	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
-	sessionName := fmt.Sprintf("gt-test-seam-landed-%d", time.Now().UnixNano()%100000)
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
-		"GC_PROVIDER": "claude",
-		// Go busy on the first Enter: a submit that lands.
-		"GC_TEST_BUSY_AFTER":  "1",
-		"GC_TEST_IDLE_PROMPT": "1",
-	}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
-
+	// Go busy on the first Enter: a submit that lands.
+	tm, sessionName := startClaudePaneAtIdle(t, "landed", 1)
 	cp := confirmingSeamBackedProvider(t, seamBackedTestProvider(2*time.Second))
+
 	submitted, err := cp.NudgeConfirm(sessionName, runtime.TextContent("keep patrolling"))
 	if err != nil {
 		t.Fatalf("NudgeConfirm: %v", err)

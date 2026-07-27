@@ -314,7 +314,18 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	guardedRunner := newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// Reap tmux servers started on the harness socket root before anything
+	// removes that tree. Both teardown paths below delete the directory holding
+	// the sockets, and an unlinked socket leaves its server running and
+	// unreachable until reboot (ga-dsex). Keyed on tmuxSocketRoot rather than
+	// tmuxSocketCleanupRoot so the fallback layout — socket root under TMPDIR,
+	// removed by the guarded runner itself — is covered too. This is the
+	// package's declared tmux owner, so the sweep call stays inside TestMain.
+	guardedRunner.beforeCleanup = func() {
+		tmuxtest.SweepSocketRoot(tmuxSocketRoot, os.Stderr)
+	}
+	var testRunner testscript.TestingM = guardedRunner
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}

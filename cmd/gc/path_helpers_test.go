@@ -101,9 +101,21 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 }
 
 type doltLeakGuardedTestingM struct {
-	m            *testing.M
-	tempRoot     string
-	cleanupPaths []string
+	m        *testing.M
+	tempRoot string
+	// beforeCleanup runs once the tests return and before any cleanup path is
+	// removed. TestMain uses it to reap tmux servers while their sockets are
+	// still linked: removing the tree first strands those servers unreachable
+	// until reboot (ga-dsex). Nil skips the hook.
+	beforeCleanup func()
+	cleanupPaths  []string
+}
+
+// runBeforeCleanup invokes the pre-cleanup hook when one is set.
+func (g *doltLeakGuardedTestingM) runBeforeCleanup() {
+	if g.beforeCleanup != nil {
+		g.beforeCleanup()
+	}
 }
 
 func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
@@ -138,6 +150,12 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	code := runTests()
 
+	// Run the pre-cleanup hook first: cleanupTemporaryPaths below (and the
+	// caller's own teardown) removes the tree holding the tmux sockets, and an
+	// unlinked socket makes its server unreachable to every tmux command
+	// (ga-dsex).
+	g.runBeforeCleanup()
+
 	guardFailed := initialErr != nil
 	if initialErr == nil {
 		final, finalErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
@@ -170,6 +188,7 @@ func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 		case sig := <-signals:
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: received %s; sweeping test dolt processes before exit\n", sig) //nolint:errcheck
 			_ = g.reapDoltProcessesUnderRoot("signal")
+			g.runBeforeCleanup()
 			g.cleanupTemporaryPaths()
 			signal.Stop(signals)
 			if s, ok := sig.(syscall.Signal); ok {

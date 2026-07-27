@@ -2399,6 +2399,9 @@ dir = "myrig"
 
 func TestCmdNudgeStatusJSON(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	// cmdNudgeStatus resolves its target by materializing the configured named
+	// session, which starts a real tmux server on the harness socket root.
+	// TestMain's pre-cleanup sweep reaps it (ga-dsex).
 	cityDir := t.TempDir()
 	writeNamedSessionCityTOML(t, cityDir)
 	t.Setenv("GC_CITY", cityDir)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -2600,5 +2601,26 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveModernPoolSessionWhenLiveListMi
 	}
 	if got.Assignee != sessionName {
 		t.Fatalf("assignee = %q, want %q", got.Assignee, sessionName)
+	}
+}
+
+func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
+	// agent.SessionNameFor encodes "/" as "--" for qualified identities, so a
+	// named-session assignee can carry a "--" pair. The suffix starting at the
+	// second "-" of that pair begins with "-", which is never a bead ID and
+	// which shell-out stores would read as a flag.
+	sessionName := agent.SessionNameFor("", "hello-world/polecat", "") + "-th-abc12"
+	if sessionName != "hello-world--polecat-th-abc12" {
+		t.Fatalf("session name = %q, want hello-world--polecat-th-abc12", sessionName)
+	}
+
+	candidates := directSessionBeadIDCandidates(sessionName)
+	if !slices.Contains(candidates, "th-abc12") {
+		t.Fatalf("candidates = %v, want to contain the session bead ID %q", candidates, "th-abc12")
+	}
+	for _, c := range candidates {
+		if strings.HasPrefix(c, "-") {
+			t.Fatalf("candidate %q starts with %q; stores that shell out would read it as a flag (all: %v)", c, "-", candidates)
+		}
 	}
 }

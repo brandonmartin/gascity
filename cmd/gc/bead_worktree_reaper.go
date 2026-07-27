@@ -71,7 +71,15 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes, no unpushed commits, no stashes.
+//  6. Git state: no uncommitted changes, no stashes, and no commits that
+//     removing the worktree would orphan — commits reachable from no branch,
+//     tag, or remote-tracking ref (git.HasUnreachableCommitsResult). The test
+//     is deliberately reachability, not push state: `git worktree remove`
+//     deletes the checkout, not refs/heads. Gating on push state instead made
+//     the reaper a no-op for exactly the worktrees it exists to collect,
+//     because a merge queue that deletes the merged branch from origin leaves
+//     every merged bead's HEAD permanently unreached by any remote ref
+//     (gastownhall/gascity ga-uh1m). A failed probe protects the tree.
 //
 // When dryRun is true the reaper performs all discovery and classification and
 // emits bead.worktree.reap_skipped events describing what it would reap and
@@ -168,8 +176,8 @@ func reapClosedBeadWorktrees(
 				continue
 			}
 
-			// Extract a bead ID candidate from the worktree's leaf name.
-			beadID := extractBeadIDFromWorktreeName(cfg, base)
+			// Resolve which bead this worktree belongs to from its path.
+			beadID := extractBeadIDFromWorktreePath(cfg, rigWorktreeDir, worktreePath)
 			if beadID == "" {
 				continue
 			}
@@ -268,14 +276,21 @@ func reapClosedBeadWorktrees(
 				}
 			}
 
-			// Git safety gates, only if not already protected.
+			// Git safety gates, only if not already protected. A probe error
+			// protects the tree: an errored probe proves nothing, and treating
+			// it as a clean answer would fail open.
 			if reason == "" {
 				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
-				hasUnpushed, _ := wg.HasUnpushedCommitsResult()
-				hasStashes, _ := wg.HasStashesResult()
-				if hasUncommitted || hasUnpushed || hasStashes {
-					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unpushed=%v stashes=%v", hasUncommitted, hasUnpushed, hasStashes)
+				hasUnreachable, unreachableErr := wg.HasUnreachableCommitsResult()
+				hasStashes, stashErr := wg.HasStashesResult()
+				switch {
+				case unreachableErr != nil:
+					reason = fmt.Sprintf("git probe failed (failing closed): %v", unreachableErr)
+				case stashErr != nil:
+					reason = fmt.Sprintf("git probe failed (failing closed): %v", stashErr)
+				case hasUncommitted || hasUnreachable || hasStashes:
+					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unreachable=%v stashes=%v", hasUncommitted, hasUnreachable, hasStashes)
 				}
 			}
 
@@ -515,6 +530,30 @@ func rigRootByName(cfg *config.City, rigName string) string {
 		}
 	}
 	return ""
+}
+
+// extractBeadIDFromWorktreePath resolves which bead a worktree belongs to from
+// its path: from the leaf directory name, or — only when the leaf carries no
+// bead ID — from its parent directory name.
+//
+// The parent fallback covers worktrees laid out as
+// "<bead-id>-<slug>/worktree", where the leaf is a fixed literal and only the
+// parent names the bead. Reading the leaf alone resolved those to no bead at
+// all, so they were skipped before any safety gate ran and could never be
+// reaped or even reported as protected.
+//
+// The climb is exactly one level and stops at boundary (the rig's worktree
+// root), so it can never mistake an ancestor directory outside the rig's
+// worktree subtree for the owning bead.
+func extractBeadIDFromWorktreePath(cfg *config.City, boundary, worktreePath string) string {
+	if beadID := extractBeadIDFromWorktreeName(cfg, filepath.Base(worktreePath)); beadID != "" {
+		return beadID
+	}
+	parent := filepath.Dir(worktreePath)
+	if !isStrictlyUnderDir(boundary, parent) {
+		return ""
+	}
+	return extractBeadIDFromWorktreeName(cfg, filepath.Base(parent))
 }
 
 // extractBeadIDFromWorktreeName scans consecutive dash-separated segment pairs

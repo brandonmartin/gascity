@@ -122,6 +122,25 @@ func (f *prePushFixture) run(t *testing.T, stdin string) (int, string) {
 	return exitErr.ExitCode(), string(out)
 }
 
+// remoteBranch registers a remote-tracking ref, mirroring the
+// refs/remotes/origin/* a real clone carries. The hook's new-branch base
+// resolution diffs against these.
+func (f *prePushFixture) remoteBranch(t *testing.T, name, sha string) {
+	t.Helper()
+	f.git(t, "update-ref", "refs/remotes/origin/"+name, sha)
+}
+
+// commitFile commits one file on the current branch and returns the new sha.
+func (f *prePushFixture) commitFile(t *testing.T, name, body string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.repo, name), []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	f.git(t, "add", "-A")
+	f.git(t, "commit", "-q", "--no-verify", "-m", "add "+name)
+	return f.git(t, "rev-parse", "HEAD")
+}
+
 func (f *prePushFixture) read(t *testing.T, path string) string {
 	t.Helper()
 	body, err := os.ReadFile(path)
@@ -189,6 +208,100 @@ func TestPrePushHandlesEmptyRefList(t *testing.T) {
 	}
 	if got := f.read(t, f.makeRuns); got != "" {
 		t.Fatalf("push-time suite ran with no refs pushed: %q", got)
+	}
+}
+
+// TestPrePushSkipsSuiteForNewBranchWithoutGoChanges pins the fix for ga-vlhp:
+// a zero remote sha means "branch is new on the remote", not "no base exists".
+// Treating it as the latter ran the ~30min suite on every first push — including
+// branches touching zero Go files — which is every polecat's first push by
+// definition, and longer than a polecat's per-tool timeout.
+func TestPrePushSkipsSuiteForNewBranchWithoutGoChanges(t *testing.T) {
+	f := newPrePushFixture(t)
+	// origin already carries everything on main, touched.go included.
+	f.remoteBranch(t, "main", f.commitNew)
+
+	f.git(t, "checkout", "-q", "-b", "docs-only")
+	head := f.commitFile(t, "NOTES.md", "docs only\n")
+	zero := strings.Repeat("0", 40)
+	refLine := "refs/heads/docs-only " + head + " refs/heads/docs-only " + zero + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("push-time suite ran for a first push touching no Go files: %q", got)
+	}
+	if got := f.read(t, f.bdStdin); got != refLine {
+		t.Fatalf("beads received stdin %q, want %q", got, refLine)
+	}
+}
+
+// TestPrePushRunsSuiteForNewBranchWithGoChanges is the other half of the
+// ga-vlhp fix: cheapening the first-push path must not weaken the gate. A new
+// branch whose commits touch Go sources still runs the suite.
+func TestPrePushRunsSuiteForNewBranchWithGoChanges(t *testing.T) {
+	f := newPrePushFixture(t)
+	f.remoteBranch(t, "main", f.commitNew)
+
+	f.git(t, "checkout", "-q", "-b", "go-change")
+	head := f.commitFile(t, "added.go", "package fixture\n\nfunc Added() {}\n")
+	zero := strings.Repeat("0", 40)
+	refLine := "refs/heads/go-change " + head + " refs/heads/go-change " + zero + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("push-time suite skipped for a first push that changes Go sources (make invocations = %q)", got)
+	}
+}
+
+// TestPrePushRunsSuiteWhenNewBranchHasNoResolvableBase keeps the fallback
+// conservative: with no remote-tracking ref to diff against we cannot tell what
+// the branch adds, so the gate must run the suite rather than assume it is
+// clean.
+func TestPrePushRunsSuiteWhenNewBranchHasNoResolvableBase(t *testing.T) {
+	f := newPrePushFixture(t)
+	// Deliberately no refs/remotes/* in this fixture.
+	f.git(t, "checkout", "-q", "-b", "unmoored")
+	head := f.commitFile(t, "NOTES.md", "docs only\n")
+	zero := strings.Repeat("0", 40)
+	refLine := "refs/heads/unmoored " + head + " refs/heads/unmoored " + zero + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("push-time suite skipped with no resolvable base (make invocations = %q); the fallback must stay conservative", got)
+	}
+}
+
+// TestPrePushPrefersTightestNewBranchBase pins base selection when several
+// integration branches are candidates: the newest common ancestor wins, so the
+// diff covers exactly what this branch adds. A looser base would re-scan
+// already-published commits and re-run the suite for Go changes that were
+// gated when they landed.
+func TestPrePushPrefersTightestNewBranchBase(t *testing.T) {
+	f := newPrePushFixture(t)
+	// main lags at the pre-Go-file commit; develop carries touched.go.
+	f.remoteBranch(t, "main", f.commitOld)
+	f.remoteBranch(t, "develop", f.commitNew)
+
+	f.git(t, "checkout", "-q", "-b", "docs-off-develop", f.commitNew)
+	head := f.commitFile(t, "NOTES.md", "docs only\n")
+	zero := strings.Repeat("0", 40)
+	refLine := "refs/heads/docs-off-develop " + head + " refs/heads/docs-off-develop " + zero + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("push-time suite ran using a looser base than origin/develop: %q", got)
 	}
 }
 

@@ -476,7 +476,7 @@ Many agents run test suites against one core pool. The full-sweep entry points
 mechanism, so a sweep may legitimately *queue* before it runs — see TESTING.md,
 "Cross-invocation concurrency bound via push-gate slots".
 
-Three rules follow from that, all of them learned from real incidents:
+Four rules follow from that, all of them learned from real incidents:
 
 - **`exit 75` is not a test failure.** It means the run never started because
   the concurrency bound timed out. Re-run it; under `make` the distinguishing
@@ -489,6 +489,14 @@ Three rules follow from that, all of them learned from real incidents:
   `tail`'s exit 0, so a killed sweep reads as a pass. Check the command's own
   exit status, or `set -o pipefail`. An exit status above 128 means the sweep
   was signalled, not that it failed.
+- **Re-raise a captured exit status; appending it to a log is not reporting
+  it.** `cmd >log 2>&1; echo "EXIT=$?" >>log` leaves the *wrapper* exiting 0 —
+  `echo`'s status is what anything reading the wrapper sees. This applies to
+  agent tooling, not just to `make`: on 2026-07-27 that shape reported
+  "completed (exit code 0)" for both a `make` run that exited 2 and a `git
+  push` signalled at 141, so a failed gate read as passed and a push that never
+  landed read as landed (ga-vlhp). Capture and propagate:
+  `cmd >log 2>&1; rc=$?; echo "EXIT=$rc" >>log; exit "$rc"`.
 
 ## Code quality gates
 

@@ -1002,6 +1002,11 @@ reported explicitly by `scripts/go-test-observable`:
 - **Never read the result off a pipe.** `make test | tail` reports `tail`'s
   exit 0, so a SIGTERM'd sweep reads as a pass. Check the exit status of the
   command itself, or set `set -o pipefail` (see `PIPESTATUS`).
+- **A wrapper must re-raise the status it captured.**
+  `cmd >log 2>&1; echo "EXIT=$?" >>log` records the right number in the log and
+  still exits 0, because `echo` is the wrapper's last command. Whatever reads
+  the wrapper — a CI step, an agent's task notification — then sees a pass. Use
+  `cmd >log 2>&1; rc=$?; echo "EXIT=$rc" >>log; exit "$rc"` (ga-vlhp).
 
 Each run's JSON log is named for its owning worktree and pid
 (`gascity-<target>-<worktree>-<pid>.jsonl.*`). With several agents sweeping at

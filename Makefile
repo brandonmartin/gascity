@@ -12,13 +12,22 @@ BINARY     := gc
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
-# Version metadata injected via ldflags.
+# Version metadata injected via ldflags. These run git in the build directory,
+# so they resolve a worktree's `.git` gitdir pointer and describe the checkout
+# actually being compiled. The Go toolchain's own buildvcs stamping does not:
+# it identifies a repository by a `.git` *directory*, so from inside a worktree
+# it keeps walking up and stamps whichever repository encloses it. That makes
+# the toolchain stamp actively wrong for a worktree nested in another checkout
+# — a polecat worktree under the city directory picks up the city's commit and
+# the city's dirtiness (ga-u7fb) — so `build` below passes -buildvcs=false and
+# these variables are the single source of truth.
 VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DIRTY      := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo "-dirty" || true)
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -X main.version=$(VERSION) \
-           -X main.commit=$(COMMIT) \
+           -X main.commit=$(COMMIT)$(DIRTY) \
            -X main.date=$(BUILD_TIME)
 
 unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))
@@ -99,7 +108,7 @@ endif
 
 ## build: compile gc binary with version metadata
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 endif

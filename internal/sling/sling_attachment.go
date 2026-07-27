@@ -388,12 +388,21 @@ func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadC
 }
 
 func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
+	_, found, err := liveTrackingConvoy(store, itemID)
+	return found, err
+}
+
+// liveTrackingConvoy returns the first non-terminal convoy tracking itemID.
+// It is the shared live-root lookup behind both the convoy-recovery check
+// (which only needs existence) and auto-convoy reuse at the mint site (which
+// needs the convoy itself).
+func liveTrackingConvoy(store beads.Store, itemID string) (beads.Bead, bool, error) {
 	if store == nil {
-		return false, nil
+		return beads.Bead{}, false, nil
 	}
 	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
 	if err != nil {
-		return false, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
+		return beads.Bead{}, false, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
 	}
 	for _, convoy := range convoys {
 		// These are convoys by construction, so the convoy type's Ready
@@ -403,10 +412,10 @@ func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
 			continue
 		}
 		if !convoycore.IsTerminalStatus(convoy.Status) {
-			return true, nil
+			return convoy, true, nil
 		}
 	}
-	return false, nil
+	return beads.Bead{}, false, nil
 }
 
 // resolveConvoyRecovery maps needsConvoyRecovery onto a BeadCheckResult for an

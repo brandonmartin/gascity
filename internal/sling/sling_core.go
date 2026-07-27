@@ -627,6 +627,37 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			createAutoConvoy = false
 		}
 		if createAutoConvoy {
+			// Re-slinging a bead that still has a live root reuses that root
+			// instead of minting a second one. A bounced bead comes back with
+			// its routing metadata and assignee cleared (submit-and-exit, then
+			// the refinery's reject-to-pool), so CheckBeadStateWithOptions no
+			// longer reads it as routed and the duplicate-convoy guard in
+			// resolveConvoyRecovery never runs. The mint site is the one place
+			// every dispatch path passes through, so the reuse belongs here.
+			//
+			// The extra roots were never orphans — the drain closes them all
+			// together when the tracked bead goes terminal — but each one
+			// double-counts a single piece of in-flight work on the ready
+			// board until then (ga-qar0).
+			//
+			// Reuse is scoped to a root of the same ownership shape: the
+			// "owned" label suppresses convoy autoclose, so adopting a root
+			// that disagrees with this dispatch would silently change the
+			// lifecycle the caller asked for.
+			if existing, found, err := liveTrackingConvoy(deps.Store, beadID); err != nil {
+				// Unlike the recovery check (#2987), a lookup failure here
+				// falls through to minting. The costs are asymmetric at this
+				// site: a duplicate root is a cosmetic over-count that drains
+				// itself, while skipping the mint can leave the bead with no
+				// convoy at all, which breaks the dispatch that depends on it.
+				result.MetadataErrors = append(result.MetadataErrors,
+					fmt.Sprintf("checking for reusable auto-convoy: %v", err))
+			} else if found && slices.Contains(existing.Labels, "owned") == opts.Owned {
+				result.ConvoyID = existing.ID
+				createAutoConvoy = false
+			}
+		}
+		if createAutoConvoy {
 			var convoyLabels []string
 			if opts.Owned {
 				convoyLabels = []string{"owned"}

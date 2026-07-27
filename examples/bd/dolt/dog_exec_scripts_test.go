@@ -4512,7 +4512,10 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	// GC_DOCTOR_BACKUP_STALE_S is set well above worst-case test-process
+	// startup so the fresh backup's real age (mtime-to-doctor-read delta)
+	// can never cross the threshold under load (ga-11r).
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=3600")
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4562,7 +4565,10 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	// Hardened against the same fixture race as ga-11r even though this
+	// test doesn't currently assert fresh-not-stale: a low threshold here
+	// would immediately flake if that assertion is added later.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=3600")
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4724,7 +4730,9 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	// See ga-11r: threshold raised well above worst-case test-process
+	// startup so the fresh sibling backup can't race into "stale".
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=3600")
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}

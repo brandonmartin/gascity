@@ -170,3 +170,30 @@ type Attachment interface {
 	Observe(ctx context.Context, processNames []string) (LiveObservation, error) // ←ProcessAlive(names)+IsAttached+GetLastActivity
 	Close(ctx context.Context) error                                             // ←Stop (how-half)
 }
+
+// ConfirmingNudgeAttachment is an optional extension for attachments whose
+// runtime can report whether an injected nudge was actually SUBMITTED, not
+// merely typed into the agent's input box. It is the seam-side counterpart of
+// [ConfirmingNudgeProvider].
+//
+// Attachment.Nudge alone cannot express the distinction: it returns only an
+// error, and a lost submit key is not an error — the keystrokes reached the
+// runtime, the text is simply sitting drafted. Without this extension the seam
+// adapter has no channel for a terminal runtime's submit observation, so every
+// nudge routed through the seams reports a delivery and the caller's fallbacks
+// (wait-idle → queue, queued-claim release) become unreachable (ga-287).
+//
+// NudgeNowConfirm additionally skips the runtime's own wait-idle step, so an
+// attachment that implements this interface also keeps immediate delivery from
+// being downgraded to wait-idle when it is routed through the seams.
+//
+// The (true, nil) contract of [ConfirmingNudgeProvider] applies verbatim: an
+// attachment that cannot observe the agent reports true. Absence of a
+// confirmation signal is not evidence of a failed submit.
+type ConfirmingNudgeAttachment interface {
+	// NudgeConfirm mirrors Attachment.Nudge and reports whether it submitted.
+	NudgeConfirm(ctx context.Context, content []ContentBlock) (submitted bool, err error)
+	// NudgeNowConfirm injects without waiting for idle and reports whether it
+	// submitted.
+	NudgeNowConfirm(ctx context.Context, content []ContentBlock) (submitted bool, err error)
+}

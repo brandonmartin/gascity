@@ -179,7 +179,15 @@ type tmuxAttachment struct {
 	name string
 }
 
-var _ runtime.Attachment = (*tmuxAttachment)(nil)
+var (
+	_ runtime.Attachment = (*tmuxAttachment)(nil)
+	// tmux is the runtime that can actually observe a lost submit — typing the
+	// message and submitting it are separate keystrokes here — so it must expose
+	// that observation to the seam adapter. Dropping this interface would leave
+	// the adapter with only Nudge, whose error-only result cannot distinguish a
+	// landed submit from text left drafted in the input box (ga-287).
+	_ runtime.ConfirmingNudgeAttachment = (*tmuxAttachment)(nil)
+)
 
 // The five driving verbs delegate to the provider's native tmux driving.
 func (a *tmuxAttachment) Peek(_ context.Context, lines int) (string, error) {
@@ -188,6 +196,19 @@ func (a *tmuxAttachment) Peek(_ context.Context, lines int) (string, error) {
 
 func (a *tmuxAttachment) Nudge(_ context.Context, content []runtime.ContentBlock) error {
 	return a.p.Nudge(a.name, content)
+}
+
+// NudgeConfirm implements [runtime.ConfirmingNudgeAttachment], preserving the
+// wait-idle-then-submit behavior of Nudge while reporting whether the submit was
+// observed to land.
+func (a *tmuxAttachment) NudgeConfirm(_ context.Context, content []runtime.ContentBlock) (bool, error) {
+	return a.p.NudgeConfirm(a.name, content)
+}
+
+// NudgeNowConfirm implements [runtime.ConfirmingNudgeAttachment] for immediate
+// injection, skipping the wait-idle step Nudge performs.
+func (a *tmuxAttachment) NudgeNowConfirm(_ context.Context, content []runtime.ContentBlock) (bool, error) {
+	return a.p.NudgeNowConfirm(a.name, content)
 }
 
 func (a *tmuxAttachment) SendKeys(_ context.Context, keys ...string) error {

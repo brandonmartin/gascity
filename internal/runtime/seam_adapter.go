@@ -38,7 +38,14 @@ type seamProvider struct {
 	meta MetaStore // rt asserted to MetaStore; nil when the runtime carries no meta
 }
 
-var _ Provider = (*seamProvider)(nil)
+var (
+	_ Provider = (*seamProvider)(nil)
+	// The confirm pair is not optional for this adapter. Callers prefer
+	// ConfirmingNudgeProvider over Nudge, so losing it here does not fail loudly
+	// — it silently re-collapses every routed nudge to "delivered" and takes the
+	// unsubmitted-draft fallbacks down with it (ga-287). Pin it at compile time.
+	_ ConfirmingNudgeProvider = (*seamProvider)(nil)
+)
 
 // NewProviderFromSeams builds a legacy [Provider] backed by the given seams. If
 // rt also implements [MetaStore], SetMeta/GetMeta/RemoveMeta route to it.
@@ -163,6 +170,53 @@ func (s *seamProvider) Nudge(name string, content []ContentBlock) error {
 		return att.Nudge(context.Background(), content)
 	}
 	return nil
+}
+
+// NudgeConfirm implements [ConfirmingNudgeProvider] by carrying the attachment's
+// submit observation through the seam boundary.
+//
+// This is load-bearing rather than a convenience. The local tmux provider is
+// served through this adapter in production (tmux.NewSeamBackedWithConfig), and
+// a terminal runtime types the message and submits it as separate keystrokes —
+// so it, alone in the stack, can observe that the submit never landed and the
+// text is drafted in the agent's input box. Before this method existed the
+// adapter could not express that, so the tmux wrapper fell through to its
+// "cannot confirm, report delivered" branch and every routed nudge read as
+// delivered. That made the wait-idle → queue fallback and the queued
+// dispatcher's claim release unreachable, which is why an agent could sit on
+// drafted wake-text for hours while every status surface read healthy (ga-287).
+//
+// An attachment with no confirmation signal reports true, per the
+// [ConfirmingNudgeProvider] contract. A session with no live attachment reports
+// false: plain Nudge keeps its best-effort nil ("the keystrokes were handed
+// off"), but a message that reached no attachment plainly never ran, and
+// claiming a delivery there recreates the same silent success.
+func (s *seamProvider) NudgeConfirm(name string, content []ContentBlock) (bool, error) {
+	att, ok := s.attach(name)
+	if !ok {
+		return false, nil
+	}
+	if cp, ok := att.(ConfirmingNudgeAttachment); ok {
+		return cp.NudgeConfirm(context.Background(), content)
+	}
+	return true, att.Nudge(context.Background(), content)
+}
+
+// NudgeNowConfirm implements [ConfirmingNudgeProvider] for immediate delivery.
+// It routes to the attachment's own immediate path so an immediate nudge is not
+// silently downgraded to the runtime's internal wait-idle step — that mode is
+// how an operator recovers an already-stranded agent, so quietly re-routing it
+// through the mechanism that stranded the agent defeats the remedy. See
+// [seamProvider.NudgeConfirm] for the reporting contract.
+func (s *seamProvider) NudgeNowConfirm(name string, content []ContentBlock) (bool, error) {
+	att, ok := s.attach(name)
+	if !ok {
+		return false, nil
+	}
+	if cp, ok := att.(ConfirmingNudgeAttachment); ok {
+		return cp.NudgeNowConfirm(context.Background(), content)
+	}
+	return true, att.Nudge(context.Background(), content)
 }
 
 func (s *seamProvider) SetMeta(name, key, value string) error {

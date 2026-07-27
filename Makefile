@@ -849,8 +849,13 @@ test-k8s:
 ## .githooks is the single core.hooksPath owner; its hooks chain every
 ## beads-managed hook through .githooks/lib/beads-chain.sh, so reclaiming the
 ## path from beads' installer does not disable beads (ga-z1f5).
+## core.sshCommand keeps the push SSH session alive across a long push-time
+## gate: git opens the transport before running pre-push, so a gate that
+## outlives GitHub's idle timeout gets its pack write dropped on a dead
+## socket (exit 141) even though the gate itself passed (ga-7i1o).
 setup: install-tools
 	git config core.hooksPath .githooks
+	git config core.sshCommand 'ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=180 -o TCPKeepAlive=yes'
 	@./scripts/check-githooks-owner.sh
 	@echo "Done. Tools installed, pre-commit hook active."
 

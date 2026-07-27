@@ -16,6 +16,21 @@ zero="0000000000000000000000000000000000000000"
 repo_root="$(git rev-parse --show-toplevel)"
 remote="${1:-origin}"
 
+# git opens the SSH transport for this push BEFORE running this hook, then
+# reuses that same connection for the pack write after the hook exits. A gate
+# that runs long enough leaves the socket idle until GitHub's server closes it,
+# so a fully green gate still SIGPIPEs (exit 141) with the ref never moving
+# (ga-7i1o). This can't save the push currently running this hook -- the
+# transport is already open -- but it heals core.sshCommand for the *next*
+# push in this worktree, including retries of this one. `make setup` is the
+# primary point of coverage; this is defense-in-depth against .git/config
+# erosion (ga-fxhk) and worktrees that skipped setup. Only fills in a missing
+# keepalive -- never clobbers an operator's own core.sshCommand customization.
+case "$(git config --get core.sshCommand || true)" in
+  *ServerAliveInterval*) ;;
+  *) git config core.sshCommand 'ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=180 -o TCPKeepAlive=yes' ;;
+esac
+
 # Integration branches consulted when a pushed branch does not exist on the
 # remote yet. Space-separated; override for repos using other names.
 push_gate_base_branches="${PUSH_GATE_BASE_BRANCHES:-develop main master}"

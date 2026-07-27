@@ -324,3 +324,50 @@ exit 9
 		t.Fatalf("push-time suite ran after a beads rejection: %q", got)
 	}
 }
+
+// wantSSHKeepalive is the keepalive command this hook asserts. It must match
+// what a long-running push-time suite needs to outlast GitHub's idle-socket
+// timeout (ga-7i1o): git opens the SSH transport before this hook runs and
+// reuses it for the pack write after the hook exits, so a gate that runs long
+// enough leaves that socket idle until the far end closes it.
+const wantSSHKeepalive = "ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=180 -o TCPKeepAlive=yes"
+
+// TestPrePushSetsSshKeepaliveWhenUnset pins the fix for ga-7i1o: a push whose
+// gate runs long enough leaves the SSH transport idle until GitHub closes it,
+// so the pack write lands on a dead socket (exit 141) with the ref never
+// moving, even though the gate itself passed. core.sshCommand keepalives
+// prevent that; this hook must assert them itself so a worktree that never
+// ran `make setup` is still covered on its next push.
+func TestPrePushSetsSshKeepaliveWhenUnset(t *testing.T) {
+	f := newPrePushFixture(t)
+
+	code, out := f.run(t, "")
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+
+	got := f.git(t, "config", "--get", "core.sshCommand")
+	if got != wantSSHKeepalive {
+		t.Fatalf("core.sshCommand = %q, want %q", got, wantSSHKeepalive)
+	}
+}
+
+// TestPrePushPreservesExistingSshKeepalive guards the non-clobbering half of
+// ga-7i1o's fix: the hook runs on every push, so it must not overwrite an
+// operator's own core.sshCommand customization just because it already
+// mentions ServerAliveInterval under different settings.
+func TestPrePushPreservesExistingSshKeepalive(t *testing.T) {
+	f := newPrePushFixture(t)
+	custom := "ssh -o ServerAliveInterval=5 -o ProxyJump=bastion.example.com"
+	f.git(t, "config", "core.sshCommand", custom)
+
+	code, out := f.run(t, "")
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+
+	got := f.git(t, "config", "--get", "core.sshCommand")
+	if got != custom {
+		t.Fatalf("core.sshCommand = %q, want unchanged custom value %q", got, custom)
+	}
+}

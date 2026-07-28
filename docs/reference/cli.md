@@ -2637,6 +2637,11 @@ Show execution history for orders.
 Queries bead history for past order runs. Optionally filter by order
 name. Use --rig to filter by rig.
 
+The read is bounded by default: only the most recent runs are fetched.
+Widen it with --limit (0 fetches every retained run) or bound it by time
+with --since. On a city with a long order-run history an unbounded read
+costs tens of seconds, so prefer keeping a bound when triaging.
+
 ```
 gc order history [name] [flags]
 ```
@@ -2644,7 +2649,9 @@ gc order history [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | output JSONL summary |
+| `--limit` | int | `50` | maximum runs to show (0 = every retained run) |
 | `--rig` | string |  | rig name to filter order history |
+| `--since` | string |  | only show runs from within this duration ago (e.g. 1h, 24h) |
 
 ## gc order list
 

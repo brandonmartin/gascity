@@ -3817,7 +3817,7 @@ func TestRouteOrderHistory_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, tc.nilReason, false, &stdout, &stderr)
+			got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, tc.nilReason, orderHistoryBounds{}, false, &stdout, &stderr)
 
 			if got != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", got, tc.wantExit, stderr.String(), stdout.String())
@@ -3873,7 +3873,7 @@ func TestRouteOrderHistory_MultiOrderFallback(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	// Name empty → should not hit the API.
-	if got := routeOrderHistory(cityPath, cfg, "", "", aa, c, "", false, &stdout, &stderr); got != 0 {
+	if got := routeOrderHistory(cityPath, cfg, "", "", aa, c, "", orderHistoryBounds{}, false, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit = %d, stderr=%q", got, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "route=fallback reason=multi-order") {
@@ -3915,7 +3915,7 @@ func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", false, &stdout, &stderr); code != 0 {
+	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age: 45s") {

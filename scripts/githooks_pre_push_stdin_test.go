@@ -57,7 +57,10 @@ printf '%s\n' "$*" >> "$MAKE_RECORD"
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	for _, rel := range []string{".githooks/pre-push", ".githooks/lib/beads-chain.sh"} {
+	if err := os.MkdirAll(filepath.Join(repo, "scripts", "lib"), 0o755); err != nil {
+		t.Fatalf("mkdir scripts/lib: %v", err)
+	}
+	for _, rel := range []string{".githooks/pre-push", ".githooks/lib/beads-chain.sh", "scripts/lib/signal-status.sh"} {
 		body, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)

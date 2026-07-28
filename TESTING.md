@@ -1010,6 +1010,26 @@ reported explicitly by `scripts/go-test-observable`:
   the wrapper — a CI step, an agent's task notification — then sees a pass. Use
   `cmd >log 2>&1; rc=$?; echo "EXIT=$rc" >>log; exit "$rc"` (ga-vlhp).
 
+`scripts/lib/signal-status.sh` is the one definition of the killed-sweep rule,
+and both push-gate layers report through it, so a reaped gate says so instead
+of surfacing as a bare `make` error (ga-8qmy):
+
+- `scripts/test-local-parallel` labels a reaped job `[<job>] KILLED — ...` and
+  closes with `<mode> suite ABORTED — ... This is NOT a test failure`, rather
+  than the `One or more <mode> jobs failed` line it keeps for a real failure.
+  It handles both encodings: a shell's `128+N`, and the `125` GNU `xargs`
+  substitutes for it when a job in the fan-out is killed by a signal.
+- `.githooks/pre-push` waits on `make test-fast-parallel` instead of `exec`ing
+  it, so the hook outlives the suite and can classify how it ended. A killed
+  gate prints `PUSH GATE ABORTED` and states that the tree is neither verified
+  nor refuted; re-pushing is not the fix.
+
+The reaps that motivated this produced **zero FAIL lines**, which is the tell:
+a suite that was killed never judged anything, so an empty failure list is not
+evidence of health. What this cannot cover is a kill aimed at the whole
+process group — that takes the hook with it and leaves nothing inside the tree
+to narrate. Running the gate in its own session is the remaining gap.
+
 Each run's JSON log is named for its owning worktree and pid
 (`gascity-<target>-<worktree>-<pid>.jsonl.*`). With several agents sweeping at
 once the older anonymous names were indistinguishable in the shared temp dir,

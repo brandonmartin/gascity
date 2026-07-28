@@ -203,7 +203,11 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(content, `LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"`) {
 		t.Fatal("pre-push hook must not replace the canonical machine-aware default with a fixed three-job cap")
 	}
-	if !strings.Contains(content, "exec make test-fast-parallel") {
+	// Delegation is the invariant; `exec` is not. The hook now waits on the
+	// suite instead of replacing itself with it, so it can tell a signal
+	// death apart from a test failure (ga-8qmy) — see
+	// TestPrePushRunsTheGateAsAChild, which pins the absence of the exec.
+	if !strings.Contains(content, "make test-fast-parallel") {
 		t.Fatal("pre-push hook must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {

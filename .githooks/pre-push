@@ -138,4 +138,41 @@ fi
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+#
+# Run the gate as a child instead of `exec`ing it. This shell has to outlive
+# the suite to tell "the gate was killed" apart from "the gate failed": under
+# `exec` the hook process *is* make, so a signal death reaches git as a
+# generic hook failure and all the pushing agent sees is `make: *** wait: No
+# child processes` over an empty FAIL list — which reads as a flaky test and
+# gets retried straight into whatever did the killing (ga-8qmy). The cost is
+# one extra shell process for the length of the gate.
+#
+# This covers the cases where the suite dies but this hook survives. A kill
+# aimed at the whole process group takes this shell with it, and nothing
+# inside the tree can report that; running the gate in its own session is
+# tracked separately.
+# shellcheck source=../scripts/lib/signal-status.sh disable=SC1091
+. "$repo_root/scripts/lib/signal-status.sh"
+
+gate_status=0
+make test-fast-parallel || gate_status=$?
+
+if [ "$gate_status" -eq 0 ]; then
+  exit 0
+fi
+
+if gc_status_is_signal_death "$gate_status"; then
+  cat >&2 <<EOF
+pre-push: PUSH GATE ABORTED — the push-time suite was $(gc_signal_status_describe "$gate_status").
+pre-push: This is NOT a test failure. The suite was terminated before any test
+pre-push: reported a verdict, so this tree is neither verified nor refuted and
+pre-push: an empty FAIL list here means nothing.
+pre-push: Nothing was pushed.
+pre-push:
+pre-push: Do not simply re-push. A gate reaped once is usually reaped the same
+pre-push: way again; find what terminated it first. See the "Shared-Host Test
+pre-push: Conventions" section of TESTING.md.
+EOF
+fi
+
+exit "$gate_status"

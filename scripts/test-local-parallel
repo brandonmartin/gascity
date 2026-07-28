@@ -25,6 +25,16 @@ cd "$repo_root"
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
 
+# Shared "killed, not failed" classification (ga-8qmy). A sweep terminated by
+# a signal produced no verdict at all, so reporting it as a failing job sends
+# the next agent looking for a regression that does not exist. Both the
+# per-job line and the closing verdict route through this library; the worker
+# below re-sources it because each xargs job is a fresh shell.
+gc_signal_status_lib="$repo_root/scripts/lib/signal-status.sh"
+export GC_SIGNAL_STATUS_LIB="$gc_signal_status_lib"
+# shellcheck source=lib/signal-status.sh disable=SC1091
+source "$gc_signal_status_lib"
+
 # Cross-invocation concurrency bound (ga-owh20p): at most
 # PUSH_GATE_MAX_CONCURRENT heavy-suite invocations run at once, city-wide,
 # regardless of caller (pre-push hook, direct `make`, or CI) — this is the
@@ -247,6 +257,7 @@ set +e
   fi
   printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
   set -euo pipefail
+  . "$GC_SIGNAL_STATUS_LIB"
   spec="$1"
   label="${spec%%::*}"
   command="${spec#*::}"
@@ -289,7 +300,7 @@ set +e
     echo "[$label] ok"
   else
     status=$?
-    echo "[$label] failed with exit ${status}; log: ${log}" >&2
+    gc_report_job_outcome "$label" "$status" "$log" >&2
     sed -n '"'"'1,240p'"'"' "$log" >&2
     exit "$status"
   fi
@@ -304,7 +315,7 @@ if [[ "$status" -eq 0 ]]; then
   fi
   echo "All ${mode} jobs passed"
 else
-  echo "One or more ${mode} jobs failed; logs are in ${log_dir}" >&2
+  gc_report_suite_outcome "$mode" "$status" "$log_dir" >&2
 fi
 
 exit "$status"

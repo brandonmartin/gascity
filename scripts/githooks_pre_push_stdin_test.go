@@ -41,6 +41,11 @@ func newPrePushFixture(t *testing.T) *prePushFixture {
 		"GIT_CONFIG_SYSTEM="+filepath.Join(recordDir, "gitconfig-system"),
 		"BD_STDIN_RECORD="+f.bdStdin,
 		"MAKE_RECORD="+f.makeRuns,
+		// The push gate's verified-tree dedup reads both of these. Inheriting
+		// an operator's values would retune every suite-ran/suite-skipped
+		// assertion in this package.
+		"PUSH_GATE_VERIFIED_TTL_SECONDS=",
+		"PUSH_GATE_IGNORE_VERIFIED=",
 	)
 
 	// `bd` records exactly what the chain handed it on stdin.
@@ -60,7 +65,7 @@ printf '%s\n' "$*" >> "$MAKE_RECORD"
 	if err := os.MkdirAll(filepath.Join(repo, "scripts", "lib"), 0o755); err != nil {
 		t.Fatalf("mkdir scripts/lib: %v", err)
 	}
-	for _, rel := range []string{".githooks/pre-push", ".githooks/lib/beads-chain.sh", "scripts/lib/signal-status.sh"} {
+	for _, rel := range []string{".githooks/pre-push", ".githooks/lib/beads-chain.sh", "scripts/lib/signal-status.sh", "scripts/lib/verified-tree.sh"} {
 		body, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)

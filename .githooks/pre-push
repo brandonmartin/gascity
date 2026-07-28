@@ -136,6 +136,31 @@ if [ "$go_changed" -eq 0 ]; then
   exit 0
 fi
 
+# Push-gate dedup (ga-4rr4). On a refinery merge this hook is the *second* gate
+# over one tree: the run-tests step already ran the identical fast suite over
+# the identical merged content, and is now pushing that content past this hook.
+# Measured at ~12min followed by ~16min on one branch, against a queue of them.
+#
+# Neither gate can be deleted. The refinery needs a verdict *before* pushing,
+# because that is what distinguishes "this branch is bad" (reject to the pool)
+# from "the push flaked" (retry) — a distinction this rig leans on. So the
+# second gate reads the first one's verdict rather than re-deriving it. The
+# marker names one exact tree hash, only a clean worktree has such a name, and
+# it expires; scripts/lib/verified-tree.sh documents why each of those is
+# load-bearing. It also covers the retry case directly: a push reaped mid-hook
+# no longer costs a second full suite on the way back through.
+#
+# Deliberately placed below the beads chain and the ownership guard so only the
+# duplicated *suite* is skipped. A push superseded by a mayor ruling must still
+# be stopped, however green its tree.
+# shellcheck source=../scripts/lib/verified-tree.sh disable=SC1091
+. "$repo_root/scripts/lib/verified-tree.sh"
+if gc_verified_tree_is_fresh fast; then
+  echo "pre-push: this exact tree already passed the fast suite; skipping the duplicate run."
+  echo "pre-push: force the real run with 'PUSH_GATE_IGNORE_VERIFIED=1 git push ...'."
+  exit 0
+fi
+
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
 #

@@ -993,6 +993,51 @@ leaves unconfined (`test-acceptance*`, `test-integration`,
 `test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct
 `go test` invocations) are outside it too.
 
+#### Skipping a suite that already passed on this exact tree
+
+A refinery merge used to pay for the fast suite twice. The refinery's
+`run-tests` step verifies the merged tree, then pushes it — and
+`.githooks/pre-push` verifies the same merged tree again. Measured on one
+branch (`ga-4rr4`): ~12min, then ~16min over identical content, with eleven
+branches queued behind it.
+
+Neither gate could simply be dropped. The refinery needs its own verdict
+*before* pushing, because that is what separates "this branch is bad" (reject
+to the pool) from "the push flaked" (retry) — a distinction this rig leans on
+after repeated push-infra flakiness (`ga-2byy`, `ga-lsm4`, `ga-b60l`,
+`ga-xiaj`). So the second gate reads the first one's verdict instead of
+re-deriving it.
+
+`scripts/test-local-parallel` is the only layer that learns a suite passed, so
+a green run records the tree it judged under
+`<common-git-dir>/verified-trees/<mode>.<tree-sha>`;
+`.githooks/pre-push` consults that record before running
+`make test-fast-parallel`. `scripts/lib/verified-tree.sh` owns both sides.
+Three properties keep the shortcut sound:
+
+- **Content-addressed.** The key is `HEAD`'s tree hash, so a marker cannot
+  outlive what it vouches for — one new commit and it no longer matches. It is
+  keyed by suite too, so a `fast` verdict never satisfies a `full` gate.
+- **Clean trees only.** Uncommitted edits are not in `HEAD`'s tree hash, so a
+  dirty worktree has no name here: it is neither recorded nor honored. This is
+  what stops untested edits from riding out on a marker earned by other
+  content. It also means a developer running the suite over uncommitted work
+  records nothing, which is the intended behavior, not a fault.
+- **Time-bounded.** A tree hash pins content but not the toolchain or host
+  around it, so a verdict expires after
+  `PUSH_GATE_VERIFIED_TTL_SECONDS` (default 14400 — four hours; `0` disables
+  reuse without deleting any state).
+
+The dedup sits *below* the beads chain and the bead ownership guard in
+`pre-push`, so only the duplicated suite is skipped: a push superseded by a
+mayor ruling is still stopped, however green its tree. To force the real run
+for one invocation — chasing a suspected flake, say — use
+`PUSH_GATE_IGNORE_VERIFIED=1 git push ...`.
+
+This also covers push retries. A push reaped mid-hook (`ga-8qmy`) or lost to a
+dead SSH socket (`ga-7i1o`) no longer costs a second full suite on the way back
+through.
+
 #### Reading a sweep's result correctly
 
 Two failure modes on a shared host masquerade as test results. Both are

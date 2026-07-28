@@ -35,6 +35,19 @@ export GC_SIGNAL_STATUS_LIB="$gc_signal_status_lib"
 # shellcheck source=lib/signal-status.sh disable=SC1091
 source "$gc_signal_status_lib"
 
+# Push-gate dedup (ga-4rr4). This script is the only layer that learns a suite
+# passed, so a green run records the exact tree it judged and the next gate
+# over that same content — in practice .githooks/pre-push, moments later on a
+# refinery merge — reads the verdict instead of re-deriving it.
+#
+# The tree is captured here and handed back at the end: if the content moved
+# while the suite ran, the verdict describes neither tree and is dropped. An
+# empty value (a dirty worktree, the normal case when a developer runs this
+# over uncommitted work) simply means this run records nothing.
+# shellcheck source=lib/verified-tree.sh disable=SC1091
+source "$repo_root/scripts/lib/verified-tree.sh"
+verified_tree_before="$(gc_verified_tree_id)" || verified_tree_before=""
+
 # Cross-invocation concurrency bound (ga-owh20p): at most
 # PUSH_GATE_MAX_CONCURRENT heavy-suite invocations run at once, city-wide,
 # regardless of caller (pre-push hook, direct `make`, or CI) — this is the
@@ -313,6 +326,7 @@ if [[ "$status" -eq 0 ]]; then
   if [[ "$cleanup_log_dir" -eq 1 ]]; then
     rm -rf "$log_dir"
   fi
+  gc_verified_tree_record "$mode" "$verified_tree_before"
   echo "All ${mode} jobs passed"
 else
   gc_report_suite_outcome "$mode" "$status" "$log_dir" >&2

@@ -466,6 +466,9 @@ install_guard_hook() {
     # must fail loudly if it is missing rather than silently lose the
     # "killed, not failed" diagnostic -- so the fixture has to carry it.
     cp "$REPO_ROOT/scripts/lib/signal-status.sh" "$repo/scripts/lib/signal-status.sh"
+    # Same for the verified-tree dedup the hook consults before running the
+    # gate (ga-4rr4): another hard dependency the fixture has to carry.
+    cp "$REPO_ROOT/scripts/lib/verified-tree.sh" "$repo/scripts/lib/verified-tree.sh"
     # .githooks owns core.hooksPath, so pre-push forwards to beads through this
     # helper before the guard runs. Copy the real one for the same reason the
     # hook itself is copied rather than re-implemented.

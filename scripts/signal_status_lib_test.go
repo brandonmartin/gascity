@@ -202,3 +202,28 @@ func TestPrePushRunsTheGateAsAChild(t *testing.T) {
 		t.Fatal("pre-push execs the push-time suite again; the hook must outlive it to report a signal death (ga-8qmy)")
 	}
 }
+
+// TestTestingMdDescribesPrePushAsChild keeps the push-gate slots prose from
+// drifting back to "exec make test-fast-parallel" after ga-8qmy. The same
+// document already states the child-process shape later; this pins the
+// earlier path so the two cannot contradict again (ga-mj7w).
+func TestTestingMdDescribesPrePushAsChild(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), "TESTING.md"))
+	if err != nil {
+		t.Fatalf("read TESTING.md: %v", err)
+	}
+	text := string(body)
+	// Stale parenthetical left by ga-8qmy's own TESTING.md addition.
+	if strings.Contains(text, "(`exec make test-fast-parallel`)") {
+		t.Fatal("TESTING.md still describes pre-push as `exec make test-fast-parallel`; it must wait on make as a child (ga-8qmy / ga-mj7w)")
+	}
+	// Positive anchor: the corrected slots section and the signal-status
+	// section both need the child wording so a partial rewrite cannot
+	// reintroduce the contradiction by deleting only one of them.
+	if !strings.Contains(text, "waits on `make test-fast-parallel` as a child") {
+		t.Fatal("TESTING.md push-gate slots section must say pre-push waits on make as a child")
+	}
+	if !strings.Contains(text, "waits on `make test-fast-parallel` instead of `exec`ing") {
+		t.Fatal("TESTING.md signal-status section must keep the child-process wording from ga-8qmy")
+	}
+}

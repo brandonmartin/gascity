@@ -76,6 +76,89 @@ new_branch_base() {
   return 0
 }
 
+# Paths whose content decides what this gate costs and how it behaves: the hook
+# bodies themselves plus the libraries they source. Gate fixes land here.
+push_gate_policy_paths="${PUSH_GATE_POLICY_PATHS:-.githooks scripts/lib scripts/push-ownership-guard.sh}"
+
+# The remote integration branch this checkout's gate policy is measured against.
+#
+# Two refs are deliberately NOT consulted first. The pushed branch's own
+# upstream is wrong because after a first push a branch tracks its own remote
+# copy, and measuring staleness against yourself always reports zero.
+# `refs/remotes/<remote>/HEAD` is wrong because it is the host's default-branch
+# pointer, which on a fork names the branch mirroring upstream rather than the
+# one the fork merges into: here it names `main`, which sits 8 commits behind
+# `develop` on gate paths precisely because fork work never lands there. Basing
+# the notice on it would understate the gap and print a `git rebase` onto a
+# branch that carries none of the fixes.
+#
+# So the configured integration list wins — it already encodes that preference,
+# develop-first — and remote HEAD is the fallback for repos whose trunk is named
+# something else entirely.
+gate_policy_base_ref() {
+  local head_ref name
+  for name in $push_gate_base_branches; do
+    if git show-ref --verify --quiet "refs/remotes/$remote/$name"; then
+      printf '%s' "refs/remotes/$remote/$name"
+      return 0
+    fi
+  done
+  head_ref="$(git symbolic-ref --quiet "refs/remotes/$remote/HEAD" 2>/dev/null || true)"
+  if [ -n "$head_ref" ] && git rev-parse --verify --quiet "$head_ref^{commit}" >/dev/null 2>&1; then
+    printf '%s' "$head_ref"
+    return 0
+  fi
+  return 0
+}
+
+# --no-verify is the obvious-looking way out of a gate that feels broken, and it
+# is the worst one available: it disables this hook wholesale, so the push skips
+# the beads chain and the bead-ownership guard along with the suite. Say so at
+# each point an agent is most likely to reach for it (ga-igiu).
+warn_no_verify_is_not_the_escape_hatch() {
+  cat >&2 <<'EOF'
+pre-push:
+pre-push: Do NOT reach for 'git push --no-verify'. It does not skip only the
+pre-push: slow part — it disables this hook entirely, including the beads chain
+pre-push: and the bead-ownership guard, and publishes a tree nothing verified.
+EOF
+}
+
+# git runs hooks from the worktree being pushed FROM, never from the branch
+# being pushed TO, so a gate fix merged to the integration branch stays inert
+# here until this branch rebases onto it (ga-igiu). The branches that suffer
+# most from a slow gate are the long-lived ones, which are also the least likely
+# to have rebased, and bead status reading "fixed" actively misleads: the only
+# sound check is whether the fix is an ancestor of this checkout. Naming the gap
+# turns a silent tax into one actionable line, at the moment the cost is paid.
+warn_if_gate_policy_stale() {
+  local base behind noun
+  base="$(gate_policy_base_ref)"
+  if [ -z "$base" ]; then
+    return 0
+  fi
+  # Word splitting on the path list is intentional, matching the treatment of
+  # push_gate_base_branches above.
+  # shellcheck disable=SC2086
+  behind="$(git rev-list --count "HEAD..$base" -- $push_gate_policy_paths 2>/dev/null || true)"
+  case "$behind" in
+    '' | 0) return 0 ;;
+  esac
+  if [ "$behind" -eq 1 ]; then
+    noun="commit"
+  else
+    noun="commits"
+  fi
+  cat >&2 <<EOF
+pre-push: NOTICE — this checkout's push gate is $behind $noun behind ${base#refs/remotes/}.
+pre-push: Hooks run from the worktree you push FROM, not the branch you push TO,
+pre-push: so gate fixes already merged there are not active here and this push
+pre-push: pays the older, slower gate. Pick them up with:
+pre-push:     git fetch $remote && git rebase ${base#refs/remotes/}
+EOF
+  warn_no_verify_is_not_the_escape_hatch
+}
+
 # The ref list arrives once on stdin but two consumers need it: the beads chain
 # and the Go-change scan below. Buffer it and replay it to each.
 refs_stdin="$(cat)"
@@ -179,6 +262,10 @@ fi
 # shellcheck source=../scripts/lib/signal-status.sh disable=SC1091
 . "$repo_root/scripts/lib/signal-status.sh"
 
+# Sits here, below the dedup, so it accompanies a cost actually about to be
+# paid: a push that skips the suite was charged nothing by a stale gate.
+warn_if_gate_policy_stale
+
 gate_status=0
 make test-fast-parallel || gate_status=$?
 
@@ -199,5 +286,10 @@ pre-push: way again; find what terminated it first. See the "Shared-Host Test
 pre-push: Conventions" section of TESTING.md.
 EOF
 fi
+
+# A red gate — failed or reaped — is the other moment the bypass looks
+# attractive, and a reaped one especially so: it reports no FAIL lines at all,
+# which reads as flake.
+warn_no_verify_is_not_the_escape_hatch
 
 exit "$gate_status"

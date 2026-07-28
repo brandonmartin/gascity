@@ -1074,6 +1074,49 @@ This also covers push retries. A push reaped mid-hook (`ga-8qmy`) or lost to a
 dead SSH socket (`ga-7i1o`) no longer costs a second full suite on the way back
 through.
 
+#### Gate policy is branch-scoped, and says so when it is stale
+
+git runs hooks from the worktree you push **from**, never from the branch you
+push **to**. Every fix above therefore reaches a branch only once that branch
+rebases onto the branch carrying it. A branch cut beforehand keeps paying the
+cost the fix removed, and closed bead status is no evidence otherwise — the only
+sound check is `git merge-base --is-ancestor <fix> <branch-head>`.
+
+The population this hurts is the one least likely to have rebased. On `ga-igiu`
+a branch 110 commits behind `develop` ran the full suite on every push, with no
+SSH keepalive, because it predated both fixes by a day; the agent burned over an
+hour, read the cost as a flaky test, and parked with `--no-verify` staged.
+
+So `pre-push` measures itself. Before running the suite — and only then, since a
+push that skips the suite was charged nothing — it counts commits on the remote
+integration branch touching `.githooks`, `scripts/lib`, or
+`scripts/push-ownership-guard.sh` that this checkout lacks
+(`PUSH_GATE_POLICY_PATHS` overrides the set), and prints how far behind it is
+with the `git rebase` that fixes it.
+
+Which branch counts as "current" is the load-bearing part, and two obvious
+answers are both wrong. The pushed branch's own upstream is its own remote copy
+after a first push — always zero commits ahead of itself. And
+`refs/remotes/origin/HEAD` is the host's default-branch pointer, which on this
+fork names `main`: the pristine upstream mirror that by design receives no fork
+work, and therefore sits 8 commits behind `develop` on gate paths. Basing the
+notice on it would understate the gap and print `git rebase origin/main`, which
+the branching rules forbid. So `PUSH_GATE_BASE_BRANCHES` (`develop main master`,
+develop-first) decides, and remote HEAD is only the fallback for a repo whose
+trunk is named something else.
+
+This is advisory: it explains a cost, it never blocks a push. And it cannot
+reach the branches that motivated it, since a checkout predating this code has
+no staleness check either. It stops the *next* generation of long-lived branches
+from paying silently.
+
+The same notice, and both red-gate paths, warn against `git push --no-verify`
+explicitly. It reads like a way to skip a slow suite; it actually disables the
+hook wholesale — the beads chain and the bead-ownership guard included — so the
+push lands unverified *and* unclaimed, past the guard that stops a push a mayor
+ruling has superseded. A gate this hook cannot pass is an escalation, not a
+bypass.
+
 #### Reading a sweep's result correctly
 
 Two failure modes on a shared host masquerade as test results. Both are

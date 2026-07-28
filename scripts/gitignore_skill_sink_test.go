@@ -1,3 +1,14 @@
+//go:build integration
+
+// This guard drives a real git binary — `git ls-files` against this
+// checkout, plus `git init`/`git status` over a scratch fixture — because
+// the property under test is git's own traversal semantics (git does not
+// descend into an ignored directory). Re-implementing those rules
+// in-process would test our reading of gitignore rather than gitignore.
+// Spawning processes puts it in the integration tier, not the untagged
+// fast sweep whose subprocess budget is a ratchet
+// (internal/testpolicy/resourcecensus).
+
 package scripts_test
 
 import (

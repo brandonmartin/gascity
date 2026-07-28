@@ -2074,18 +2074,23 @@ rotate_log_if_oversized() {
             ;;
         ''|*[!0-9]*) keep=$DOLT_LOG_KEEP_DEFAULT ;;
     esac
+    # Each step returns explicitly rather than leaning on `set -e`: errexit is
+    # suppressed for the whole body when a function runs as a non-final command
+    # of an AND-OR list, which is exactly how the caller invokes this one. Under
+    # that suppression a failed cp would otherwise fall through to the truncate
+    # below and discard the log with no generation saved.
     if [ "$keep" -gt 0 ]; then
-        rm -f "$LOG_FILE.$keep"
+        rm -f "$LOG_FILE.$keep" || return 1
         i=$((keep - 1))
         while [ "$i" -ge 1 ]; do
             if [ -f "$LOG_FILE.$i" ]; then
-                mv -f "$LOG_FILE.$i" "$LOG_FILE.$((i + 1))"
+                mv -f "$LOG_FILE.$i" "$LOG_FILE.$((i + 1))" || return 1
             fi
             i=$((i - 1))
         done
-        cp -f "$LOG_FILE" "$LOG_FILE.1"
+        cp -f "$LOG_FILE" "$LOG_FILE.1" || return 1
     fi
-    : > "$LOG_FILE"
+    : > "$LOG_FILE" || return 1
 }
 
 # database_journal_corrupt probes one database directory offline and reports
@@ -2396,8 +2401,11 @@ op_start() {
         write_config_yaml
 
         # Bound the log before this generation appends to it. Must precede the
-        # offset snapshot below, which anchors the startup-output read.
-        rotate_log_if_oversized
+        # offset snapshot below, which anchors the startup-output read. Report
+        # and continue on failure: the data plane outranks log hygiene, matching
+        # the Go start path.
+        rotate_log_if_oversized \
+            || echo "gc-beads-bd: dolt log rotation failed for $LOG_FILE; continuing start" >&2
 
         local log_offset=0
         if [ -f "$LOG_FILE" ]; then

@@ -26,6 +26,10 @@ const (
 var (
 	errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
 	errSessionTargetRejectedByConfig  = errors.New("session target rejected by config")
+	// errBackgroundNudgeUnsubmitted marks a background nudge the runtime
+	// accepted but never observed submit — the message is drafted in the
+	// agent's input box and has not run. See backgroundNudgeOutcome.
+	errBackgroundNudgeUnsubmitted = errors.New("background nudge accepted but never submitted")
 )
 
 type apiSessionTargetNotFoundError struct {
@@ -662,8 +666,29 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 	if err != nil {
 		return err
 	}
-	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
-	return err
+	result, nudgeErr := handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	return backgroundNudgeOutcome(id, result, nudgeErr)
+}
+
+// backgroundNudgeOutcome maps a background nudge's result onto an error.
+//
+// An unsubmitted draft is a FAILURE here, not a delivery. Every nudge caller in
+// cmd/gc answers a Delivered:false by enqueueing a redelivery, but a background
+// message has no queue to fall back to — so discarding the flag turns a strand
+// the runtime explicitly observed (text drafted in the agent's input box, turn
+// never started) into a silently lost message with a clean nil return and an
+// empty error log. That is the detect-then-drop half of ga-8tno.
+//
+// The runtime-level failure keeps its own identity: a send that never reached
+// the agent and a send parked in its input box need different recovery.
+func backgroundNudgeOutcome(id string, result worker.NudgeResult, err error) error {
+	if err != nil {
+		return err
+	}
+	if !result.Delivered {
+		return fmt.Errorf("%w: session %s", errBackgroundNudgeUnsubmitted, id)
+	}
+	return nil
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for

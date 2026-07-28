@@ -36,7 +36,24 @@ type seamProvider struct {
 	rt   Runtime
 	tp   Transport
 	meta MetaStore // rt asserted to MetaStore; nil when the runtime carries no meta
+	// settle paces the stranded-submit retries (see recoverStrandedNudge). Nil
+	// means time.Sleep; tests replace it so the retry logic runs without real
+	// time passing.
+	settle func(time.Duration)
 }
+
+// nudgeStrandRetryDelays paces the retries that recover a stranded submit, one
+// entry per retry. The delays GROW rather than repeat because a confirming
+// attachment only reports a strand after polling the pane through its own
+// submit budget — by then the pane has already absorbed several submit
+// keystrokes within a couple of seconds, and what it needs is time to settle,
+// not another keystroke immediately.
+//
+// The budget is deliberately small. Delivery runs on the caller's critical path
+// (`gc sling`, `gc mail notify`, the queue dispatcher), so this bounds the added
+// latency of an already-failed nudge to a few seconds and then hands ownership
+// back to the caller's queued-redelivery fallback.
+var nudgeStrandRetryDelays = []time.Duration{time.Second, 2 * time.Second}
 
 var (
 	_ Provider = (*seamProvider)(nil)
@@ -191,15 +208,24 @@ func (s *seamProvider) Nudge(name string, content []ContentBlock) error {
 // false: plain Nudge keeps its best-effort nil ("the keystrokes were handed
 // off"), but a message that reached no attachment plainly never ran, and
 // claiming a delivery there recreates the same silent success.
+//
+// A submit the attachment reports as never landed is RETRIED here rather than
+// handed straight back as a failure — see [seamProvider.recoverStrandedNudge].
 func (s *seamProvider) NudgeConfirm(name string, content []ContentBlock) (bool, error) {
 	att, ok := s.attach(name)
 	if !ok {
 		return false, nil
 	}
-	if cp, ok := att.(ConfirmingNudgeAttachment); ok {
-		return cp.NudgeConfirm(context.Background(), content)
+	cp, ok := att.(ConfirmingNudgeAttachment)
+	if !ok {
+		return true, att.Nudge(context.Background(), content)
 	}
-	return true, att.Nudge(context.Background(), content)
+	ctx := context.Background()
+	submitted, err := cp.NudgeConfirm(ctx, content)
+	if err != nil || submitted {
+		return submitted, err
+	}
+	return s.recoverStrandedNudge(ctx, cp, content)
 }
 
 // NudgeNowConfirm implements [ConfirmingNudgeProvider] for immediate delivery.
@@ -213,10 +239,69 @@ func (s *seamProvider) NudgeNowConfirm(name string, content []ContentBlock) (boo
 	if !ok {
 		return false, nil
 	}
-	if cp, ok := att.(ConfirmingNudgeAttachment); ok {
-		return cp.NudgeNowConfirm(context.Background(), content)
+	cp, ok := att.(ConfirmingNudgeAttachment)
+	if !ok {
+		return true, att.Nudge(context.Background(), content)
 	}
-	return true, att.Nudge(context.Background(), content)
+	ctx := context.Background()
+	submitted, err := cp.NudgeNowConfirm(ctx, content)
+	if err != nil || submitted {
+		return submitted, err
+	}
+	return s.recoverStrandedNudge(ctx, cp, content)
+}
+
+// recoverStrandedNudge re-attempts a nudge the attachment accepted but never
+// observed submit — the text is drafted in the agent's input box and will sit
+// there until something resubmits it.
+//
+// Detection alone was never the remedy (ga-287 -> ga-61tq -> ga-8tno). Reporting
+// submitted=false only tells the CALLER to fall back, and the callers split two
+// ways: those that cannot queue drop the message outright, and those that can
+// re-run the identical delivery against the identical pane. Neither converges,
+// so every recurrence needed a human or a patrol agent to re-nudge by hand.
+//
+// What that manual recovery actually supplied was a FRESH ATTEMPT AFTER THE PANE
+// SETTLED, not a different delivery mode: `--delivery wait-idle` and
+// `--delivery immediate` terminate in the same submit (internal/session/chat.go
+// passes immediate=true on the wait-idle path), so "escalate to immediate" is
+// not an escalation at all. Supplying the retry here makes a strand self-heal at
+// the one layer every routed nudge passes through, which is also the only layer
+// that can tell a strand from a delivery.
+//
+// Two properties make the retry safe:
+//
+//   - No double-submit. A confirming attachment reports false only after polling
+//     the pane and never seeing the turn start, so the message provably has not
+//     run. A landed submit returns before reaching here.
+//   - Bounded. The budget is a few seconds (nudgeStrandRetryDelays); after that
+//     ownership returns to the caller's queued-redelivery fallback rather than
+//     holding delivery's critical path open.
+//
+// The retry re-types the message, so a recovered strand can show the text twice
+// in one prompt — the same artifact a manual re-nudge produces, and strictly
+// better than a message that never runs.
+func (s *seamProvider) recoverStrandedNudge(ctx context.Context, cp ConfirmingNudgeAttachment, content []ContentBlock) (bool, error) {
+	for _, delay := range nudgeStrandRetryDelays {
+		s.settleBeforeRetry(delay)
+		// Immediate, not the wait-idle confirm: the pane was just observed idle
+		// through a full submit budget, so another wait would be pure latency.
+		submitted, err := cp.NudgeNowConfirm(ctx, content)
+		if err != nil || submitted {
+			return submitted, err
+		}
+	}
+	return false, nil
+}
+
+// settleBeforeRetry waits out one entry of the retry pacing, through the
+// injected hook when a test supplied one.
+func (s *seamProvider) settleBeforeRetry(d time.Duration) {
+	if s.settle != nil {
+		s.settle(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 func (s *seamProvider) SetMeta(name, key, value string) error {

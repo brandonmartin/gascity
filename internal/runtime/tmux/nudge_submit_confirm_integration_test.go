@@ -7,10 +7,38 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// fakeAgentStartupSettle gives the fake agent TUI time to reach its input loop
+// before a test drives it.
+const fakeAgentStartupSettle = 300 * time.Millisecond
+
+// startFakeAgentSession builds the fake agent TUI, starts it in a uniquely named
+// tmux session with env, registers teardown, and waits for it to come up.
+//
+// It is the single owner of this file's session setup: the per-test copies were
+// identical, and folding them here keeps one tmux and one fixed-sleep dependency
+// for the whole file instead of one per test.
+func startFakeAgentSession(t *testing.T, tm *Tmux, label string, env map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
+	sessionName := fmt.Sprintf("gt-test-%s-%d", label, time.Now().UnixNano()%100000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+	time.Sleep(fakeAgentStartupSettle)
+	return sessionName
+}
 
 // buildBusyOnEnterBinary compiles a fake agent TUI that echoes stdin and, after
 // receiving GC_TEST_BUSY_AFTER Enter keystrokes (default 1), prints an
@@ -72,19 +100,10 @@ func TestNudgeSessionConfirmsSubmitForClaude(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
-	dir := t.TempDir()
-	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
-	sessionName := fmt.Sprintf("gt-test-nudge-confirm-%d", time.Now().UnixNano()%100000)
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+	sessionName := startFakeAgentSession(t, tm, "nudge-confirm", map[string]string{
 		"GC_PROVIDER":        "claude",
 		"GC_TEST_BUSY_AFTER": "1",
-	}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+	})
 
 	if err := tm.NudgeSession(sessionName, "hello-confirm"); err != nil {
 		t.Fatalf("NudgeSession: %v", err)
@@ -111,19 +130,10 @@ func TestNudgeSessionReEntersUntilSubmittedForClaude(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
-	dir := t.TempDir()
-	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
-	sessionName := fmt.Sprintf("gt-test-nudge-reenter-%d", time.Now().UnixNano()%100000)
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+	sessionName := startFakeAgentSession(t, tm, "nudge-reenter", map[string]string{
 		"GC_PROVIDER":        "claude",
 		"GC_TEST_BUSY_AFTER": "2", // drop the first Enter, submit on the second
-	}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+	})
 
 	if err := tm.NudgeSession(sessionName, "hello-reenter"); err != nil {
 		t.Fatalf("NudgeSession: %v", err)
@@ -154,21 +164,12 @@ func TestNudgeSessionConfirmReportsUnsubmittedDraftForClaude(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
-	dir := t.TempDir()
-	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
-	sessionName := fmt.Sprintf("gt-test-nudge-strand-%d", time.Now().UnixNano()%100000)
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+	sessionName := startFakeAgentSession(t, tm, "nudge-strand", map[string]string{
 		"GC_PROVIDER": "claude",
 		// Higher than submitEnterMaxSends, so no Enter this path can send ever
 		// drives the agent busy — the turn-exited pane that swallows the submit.
 		"GC_TEST_BUSY_AFTER": "99",
-	}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+	})
 
 	submitted, err := tm.NudgeSessionConfirm(sessionName, "hello-strand")
 	if err != nil {
@@ -206,23 +207,14 @@ func TestNudgeSessionConfirmIgnoresStaleBusyFrameForClaude(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
-	dir := t.TempDir()
-	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
-	sessionName := fmt.Sprintf("gt-test-nudge-stale-busy-%d", time.Now().UnixNano()%100000)
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+	sessionName := startFakeAgentSession(t, tm, "nudge-stale-busy", map[string]string{
 		"GC_PROVIDER": "claude",
 		// Never busy on Enter: the draft strands, exactly as the reported
 		// turn-exited pane does.
 		"GC_TEST_BUSY_AFTER": "99",
 		// Scroll a finished turn's busy footer up out of the live footer region.
 		"GC_TEST_STALE_BUSY_FILLER": "40",
-	}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+	})
 
 	out, err := tm.CapturePane(sessionName, promptObservationLines)
 	if err != nil {
@@ -254,23 +246,14 @@ func TestWaitForIdleIgnoresStaleBusyFrameForClaude(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
-	dir := t.TempDir()
-	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
-	sessionName := fmt.Sprintf("gt-test-idle-stale-busy-%d", time.Now().UnixNano()%100000)
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+	sessionName := startFakeAgentSession(t, tm, "idle-stale-busy", map[string]string{
 		"GC_PROVIDER": "claude",
 		// A finished turn's busy footer, scrolled up out of the live footer by
 		// continued transcript output, with the agent now idle at its prompt.
 		"GC_TEST_STALE_BUSY_FILLER": "40",
 		"GC_TEST_IDLE_PROMPT":       "1",
 		"GC_TEST_BUSY_AFTER":        "99",
-	}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+	})
 
 	out, err := tm.CapturePane(sessionName, promptObservationLines)
 	if err != nil {
@@ -282,5 +265,62 @@ func TestWaitForIdleIgnoresStaleBusyFrameForClaude(t *testing.T) {
 
 	if err := tm.WaitForIdle(context.Background(), sessionName, 3*time.Second); err != nil {
 		t.Fatalf("WaitForIdle on an idle pane = %v, want nil; a finished turn's busy frame in scrollback held the wait open:\n%s", err, out)
+	}
+}
+
+// TestSeamBackedNudgeConfirmRecoversStrandedSubmitForClaude proves the ga-8tno
+// self-heal end-to-end on real tmux, through the constructor production uses
+// (NewSeamBackedWithConfig — every routed nudge in the city goes through it).
+//
+// The fixture holds the agent idle for the whole of submitEnterAndConfirm's
+// budget, so the first attempt strands exactly as the reported turn-exited pane
+// does: text in the input box, turn never started, submitted=false. Every
+// earlier fix stopped there — the strand was correctly DETECTED and then either
+// dropped (callers with no queue) or re-run identically (callers with one), so
+// recovery always needed a human to re-nudge.
+//
+// The next Enter after that budget is one only the seam adapter's retry can
+// send, which makes "did the message ever run?" the assertion: a true result
+// here means a stranded agent un-parked itself with nobody watching.
+func TestSeamBackedNudgeConfirmRecoversStrandedSubmitForClaude(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	tm := testTmux()
+	sessionName := startFakeAgentSession(t, tm, "seam-strand-recover", map[string]string{
+		"GC_PROVIDER": "claude",
+		// One more Enter than a single confirm attempt can send, so the first
+		// attempt provably exhausts itself without the agent going busy.
+		"GC_TEST_BUSY_AFTER": strconv.Itoa(submitEnterMaxSends + 1),
+	})
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	// The fixture never shows an idle prompt, so the default wait would burn its
+	// full window before typing. This test is about what happens AFTER the
+	// submit strands, so keep the wait short rather than paying for it twice.
+	cfg.NudgeIdleTimeout = time.Second
+	sp := NewSeamBackedWithConfig(cfg)
+	cp, ok := sp.(runtime.ConfirmingNudgeProvider)
+	if !ok {
+		t.Fatal("seam-backed tmux provider does not implement runtime.ConfirmingNudgeProvider; the strand can be neither reported nor recovered")
+	}
+
+	submitted, err := cp.NudgeConfirm(sessionName, runtime.TextContent("hello-seam-recover"))
+	if err != nil {
+		t.Fatalf("NudgeConfirm: %v", err)
+	}
+	out, captureErr := tm.CapturePaneAll(sessionName)
+	if captureErr != nil {
+		t.Fatalf("CapturePaneAll: %v", captureErr)
+	}
+	if !submitted {
+		t.Fatalf("NudgeConfirm reported submitted=false for a pane that accepts a later Enter; the strand was detected and then dropped instead of retried (ga-8tno):\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("ENTER#%d", submitEnterMaxSends+1)) {
+		t.Fatalf("no Enter was sent beyond the first attempt's budget, so no retry happened:\n%s", out)
+	}
+	if !strings.Contains(out, "esc to interrupt") {
+		t.Fatalf("pane never reached submitted/busy state after the retry:\n%s", out)
 	}
 }

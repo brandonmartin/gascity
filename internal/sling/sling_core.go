@@ -666,11 +666,17 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			// double-counts a single piece of in-flight work on the ready
 			// board until then (ga-qar0).
 			//
-			// Reuse is scoped to a root of the same ownership shape: the
+			// Reuse is scoped to roots of the same ownership shape: the
 			// "owned" label suppresses convoy autoclose, so adopting a root
 			// that disagrees with this dispatch would silently change the
 			// lifecycle the caller asked for.
-			if existing, found, err := liveTrackingConvoy(deps.Store, beadID); err != nil {
+			//
+			// Reuse alone only holds the line at one root; it cannot converge
+			// a bead that already carries several, because every re-sling
+			// picks the same first root and leaves the rest untouched. So the
+			// re-sling also reaps the predecessors it superseded (ga-5jnq).
+			// Owned roots are exempt — their lifecycle is the caller's.
+			if live, err := liveTrackingConvoys(deps.Store, beadID); err != nil {
 				// Unlike the recovery check (#2987), a lookup failure here
 				// falls through to minting. The costs are asymmetric at this
 				// site: a duplicate root is a cosmetic over-count that drains
@@ -678,9 +684,21 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 				// convoy at all, which breaks the dispatch that depends on it.
 				result.MetadataErrors = append(result.MetadataErrors,
 					fmt.Sprintf("checking for reusable auto-convoy: %v", err))
-			} else if found && slices.Contains(existing.Labels, "owned") == opts.Owned {
-				result.ConvoyID = existing.ID
-				createAutoConvoy = false
+			} else {
+				matching := make([]beads.Bead, 0, len(live))
+				for _, root := range live {
+					if slices.Contains(root.Labels, "owned") == opts.Owned {
+						matching = append(matching, root)
+					}
+				}
+				if len(matching) > 0 {
+					result.ConvoyID = matching[0].ID
+					createAutoConvoy = false
+					if !opts.Owned {
+						result.MetadataErrors = append(result.MetadataErrors,
+							reapSupersededConvoyRoots(deps.Store, matching[1:], matching[0].ID)...)
+					}
+				}
 			}
 		}
 		if createAutoConvoy {

@@ -147,6 +147,12 @@ add_push_gate_lock_selftest_job() {
   add_job "push-gate-lock-selftest" "bash scripts/test-push-gate-lock.sh"
 }
 
+# Same shell-job reasoning as the block above: the verified-tree dedup's
+# self-test must stay out of the Go AST scan, so it is driven directly too.
+add_verified_tree_selftest_job() {
+  add_job "verified-tree-selftest" "bash scripts/test-verified-tree.sh"
+}
+
 add_cmd_gc_shards() {
   local label_prefix="$1"
   local gc_fast_unit="$2"
@@ -198,6 +204,7 @@ case "$mode" in
     add_fsys_compile_job
     add_unit_core_job
     add_push_gate_lock_selftest_job
+    add_verified_tree_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
     ;;
   cmd-gc-process)
@@ -211,6 +218,7 @@ case "$mode" in
     add_fsys_compile_job
     add_unit_core_job
     add_push_gate_lock_selftest_job
+    add_verified_tree_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
     add_productmetrics_testhook_job
     add_integration_jobs

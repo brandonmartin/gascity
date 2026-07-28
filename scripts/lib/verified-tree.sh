@@ -135,13 +135,16 @@ gc_verified_tree_prune() {
   _gvt_dir="$(gc_verified_tree_dir)" || return 0
   [ -d "$_gvt_dir" ] || return 0
   _gvt_ttl="$(gc_verified_tree_ttl_seconds)"
-  _gvt_now="$(date +%s)"
+  _gvt_now="$(date +%s)" || return 0
 
   for _gvt_file in "$_gvt_dir"/*; do
     [ -f "$_gvt_file" ] || continue
     _gvt_mtime="$(gc_verified_tree_mtime "$_gvt_file")" || continue
     if [ "$(( _gvt_now - _gvt_mtime ))" -ge "$_gvt_ttl" ]; then
-      rm -f "$_gvt_file"
+      # An unremovable marker is a housekeeping miss, not a verdict. Under the
+      # runner's `set -e` an unguarded rm here would abort a suite that had
+      # already passed — the one thing this library must never do.
+      rm -f "$_gvt_file" 2>/dev/null || true
     fi
   done
 
@@ -186,7 +189,7 @@ gc_verified_tree_record() {
     rm -f "$_gvt_tmp"
     return 0
   }
-  mv -f "$_gvt_tmp" "$_gvt_marker" 2>/dev/null || rm -f "$_gvt_tmp"
+  mv -f "$_gvt_tmp" "$_gvt_marker" 2>/dev/null || rm -f "$_gvt_tmp" 2>/dev/null || true
 
   return 0
 }
@@ -208,7 +211,7 @@ gc_verified_tree_is_fresh() {
   _gvt_mtime="$(gc_verified_tree_mtime "$_gvt_marker")" || return 1
 
   _gvt_ttl="$(gc_verified_tree_ttl_seconds)"
-  _gvt_now="$(date +%s)"
+  _gvt_now="$(date +%s)" || return 1
   _gvt_age=$(( _gvt_now - _gvt_mtime ))
 
   # A marker dated in the future came from a clock change, not from a run that

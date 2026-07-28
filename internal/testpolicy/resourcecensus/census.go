@@ -188,9 +188,11 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeCmdGCUntagged,
-			Resource:        ResourceEnvironment,
-			BaselineCalls:   4332,
+			Scope:    ScopeCmdGCUntagged,
+			Resource: ResourceEnvironment,
+			// 4332 -> 4333: same single t.Setenv as the small-debt entry below
+			// (GC_TESTENV_PASSTHROUGH in captureProductMetricsDirectChildEnv, ga-vxs6).
+			BaselineCalls:   4333,
 			BaselineFiles:   203,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -466,9 +468,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeCmdGCUntagged,
-			Resource:        ResourceEnvironment,
-			BaselineCalls:   4325,
+			Scope:    ScopeCmdGCUntagged,
+			Resource: ResourceEnvironment,
+			// 4325 -> 4326 for the single t.Setenv that declares
+			// GC_TESTENV_PASSTHROUGH in captureProductMetricsDirectChildEnv
+			// (ga-vxs6). GC_DISABLE_USAGE_METRICS became an internal/testenv
+			// leak vector because an ambient value flips the productmetrics
+			// state projection; the child-env spies that assert cmd/gc
+			// deliberately seeds that same var are re-executed test binaries,
+			// so they must name it as passthrough or the scrub erases the
+			// evidence they exist to check. File count is unchanged.
+			BaselineCalls:   4326,
 			BaselineFiles:   203,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,

@@ -110,6 +110,11 @@ type CityRuntime struct {
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
+	// reapSkips carries worktree-reaper skip history between ticks so an
+	// unchanged skip is reported once instead of on every sweep. Owned by the
+	// serial tick, like the other per-tick state above.
+	reapSkips *reapSkipTracker
+
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
 	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
@@ -304,6 +309,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		orderRescanLast:         time.Now(),
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
 		rec:                     p.Rec,
+		reapSkips:               newReapSkipTracker(),
 		poolSessions:            p.PoolSessions,
 		poolDeathHandlers:       p.PoolDeathHandlers,
 		forceStopShutdown:       p.ForceStopShutdown,
@@ -1157,7 +1163,7 @@ func (cr *CityRuntime) tick(
 		// addition to the authoritative /proc cwd scan. Real removal supersedes
 		// dry-run when both flags are set.
 		liveSessionDirs := liveSessionWorktreeDirs(sessionBeads)
-		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.stderr)
+		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
 		recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
 			"reaped":    len(report.Reaped),
 			"protected": len(report.Protected),

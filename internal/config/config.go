@@ -2589,9 +2589,13 @@ type DaemonConfig struct {
 	// what it protected, without removing anything. This is the safe
 	// staged-rollout surface: an operator enables dry-run first, confirms via
 	// `gc events` that no live worktree appears in the would-reap set, then
-	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
-	// effect when AutoReapClosedBeadWorktrees is already true (real removal
-	// supersedes it). Defaults to false.
+	// enables AutoReapClosedBeadWorktrees for real removal. Those events are
+	// edge-triggered: each worktree is reported when the patrol first
+	// classifies it and again whenever its verdict changes, not once per
+	// tick, so the would-reap set is complete right after dry-run is enabled
+	// rather than reprinted every sweep. Dry-run has no effect when
+	// AutoReapClosedBeadWorktrees is already true (real removal supersedes
+	// it). Defaults to false.
 	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
 	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
 	// in minutes, before a closed-bead worktree becomes eligible for reap

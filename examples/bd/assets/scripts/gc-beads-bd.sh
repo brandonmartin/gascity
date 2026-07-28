@@ -44,6 +44,13 @@ CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
+# dolt.log rotation defaults, duplicated from cmd/gc/dolt_log_rotate.go.
+# rotate_log_if_oversized runs on the fallback launch path, which is reached
+# precisely when GC_BIN is unset — so it cannot ask the Go helper for these.
+# TestDoltLogRotationFallbackMatchesManagedDefaults pins both to the Go constants.
+DOLT_LOG_MAX_BYTES_DEFAULT=16777216
+DOLT_LOG_KEEP_DEFAULT=3
+
 # Probed once in the parent shell — dolt_data_lock_holder runs in $(...)
 # subshells, so a lazily-set memo there would never persist. Without flock
 # the dolt store lock guard (gastownhall/gascity#3174) cannot probe and
@@ -2029,6 +2036,58 @@ log_tail_has_journal_corruption() {
     tail -c 65536 "$LOG_FILE" 2>/dev/null | journal_corruption_signature
 }
 
+# rotate_log_if_oversized copy-truncates $LOG_FILE once it passes the size cap,
+# retaining up to N prior generations as dolt.log.1 .. dolt.log.N (.1 newest).
+#
+# Copy-truncate, never rename: a server still running from an earlier launch
+# attempt holds this log open in append mode, and renaming it would leave that
+# server writing to the detached inode while the fresh dolt.log stayed empty.
+#
+# This is the fallback launch path (no GC_BIN, so no scope watchdog to enforce
+# the cap while a generation runs), so rotation happens per launch attempt.
+# That bounds accumulation across server generations — the shape that produced
+# the observed 69MB single file (ga-fyu0) — but not one very long generation.
+rotate_log_if_oversized() {
+    local max_bytes keep size i
+    max_bytes=${GC_DOLT_LOG_MAX_BYTES:-$DOLT_LOG_MAX_BYTES_DEFAULT}
+    case "$max_bytes" in
+        -*)
+            case "${max_bytes#-}" in
+                ''|*[!0-9]*) max_bytes=$DOLT_LOG_MAX_BYTES_DEFAULT ;;
+                *) return 0 ;;  # negative disables rotation
+            esac
+            ;;
+        ''|*[!0-9]*) max_bytes=$DOLT_LOG_MAX_BYTES_DEFAULT ;;
+    esac
+    [ "$max_bytes" -gt 0 ] || return 0
+    [ -f "$LOG_FILE" ] || return 0
+    size=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
+    [ "$size" -gt "$max_bytes" ] || return 0
+
+    keep=${GC_DOLT_LOG_KEEP:-$DOLT_LOG_KEEP_DEFAULT}
+    case "$keep" in
+        -*)
+            case "${keep#-}" in
+                ''|*[!0-9]*) keep=$DOLT_LOG_KEEP_DEFAULT ;;
+                *) keep=0 ;;  # negative retains no generations
+            esac
+            ;;
+        ''|*[!0-9]*) keep=$DOLT_LOG_KEEP_DEFAULT ;;
+    esac
+    if [ "$keep" -gt 0 ]; then
+        rm -f "$LOG_FILE.$keep"
+        i=$((keep - 1))
+        while [ "$i" -ge 1 ]; do
+            if [ -f "$LOG_FILE.$i" ]; then
+                mv -f "$LOG_FILE.$i" "$LOG_FILE.$((i + 1))"
+            fi
+            i=$((i - 1))
+        done
+        cp -f "$LOG_FILE" "$LOG_FILE.1"
+    fi
+    : > "$LOG_FILE"
+}
+
 # database_journal_corrupt probes one database directory offline and reports
 # whether dolt refuses to load it with a journal-corruption error. Only safe
 # while the managed server is down — offline dolt commands contend with a
@@ -2335,6 +2394,10 @@ op_start() {
 
         # Write managed config.yaml with timeouts and GC settings.
         write_config_yaml
+
+        # Bound the log before this generation appends to it. Must precede the
+        # offset snapshot below, which anchors the startup-output read.
+        rotate_log_if_oversized
 
         local log_offset=0
         if [ -f "$LOG_FILE" ]; then

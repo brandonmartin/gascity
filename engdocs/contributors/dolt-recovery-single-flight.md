@@ -91,6 +91,64 @@ That default is duplicated in two shell fallbacks, because `gc` only exports
 (sizes the near-capacity advisory). `TestDoltMaxConnectionsFallbacksMatchManagedDefault`
 pins both to the Go constant.
 
+## Invariant 4: the read-timeout reap flood is expected, not a wedge signal
+
+Invariant 3 absorbs overload with the read timeout. The visible consequence is
+that every reaped connection produces a log line, at error severity, from
+dolt's own listener:
+
+```
+level=error msg="Error reading packet from client N (127.0.0.1:PORT):
+read tcp ...: i/o timeout\nio.ReadFull(header size) failed"
+```
+
+That is the fix working as designed. It is also the steady state — one
+observed server reached connection id ~1.1M in 15h — so the line carries no
+information about health. It used to: before `read_timeout_millis` dropped to
+15s it was the documented first symptom of the alive-but-deaf wedge. Anyone
+still pattern-matching the old runbook against this log will cry wolf
+constantly, or miss a real wedge inside the noise.
+
+**Diagnose the wedge on the socket, not on this line.** The signatures that
+still mean something are `ss -lnt | grep <port>` coming back empty while the
+pid is alive, and `use of closed network connection` — the string
+`native_dolt_store.go` already treats as a reconnect trigger.
+
+Two things keep the log readable, and neither changes dolt's severity — dolt
+owns that:
+
+- **`gc dolt logs` collapses the flood by default.** Consecutive reap lines
+  become one counted notice in the position the run occupied; `--raw` is the
+  unfiltered tail. The filter matches `Error reading packet from client` *and*
+  `i/o timeout` together, so a reap naming any other cause, and a timeout from
+  any other subsystem, both pass through untouched.
+- **`dolt.log` is size-capped** (`cmd/gc/dolt_log_rotate.go`), default 16 MiB
+  with 3 retained generations, overridable via `GC_DOLT_LOG_MAX_BYTES` (0
+  disables) and `GC_DOLT_LOG_KEEP`. Before the cap existed one city carried a
+  69MB single file spanning many server generations.
+
+Rotation is **copy-truncate, never rename**. Both spawn paths hand the server
+a descriptor opened `O_APPEND` and it holds that descriptor for the whole
+generation, so renaming the live log would leave the server writing to the
+detached inode while the fresh `dolt.log` stayed empty until the next restart.
+Truncating in place keeps the inode, and `O_APPEND` puts the next write at
+offset 0. `TestRotateManagedDoltLogPreservesLiveAppendWriter` pins exactly
+that.
+
+Rotation runs at start (`startManagedDoltProcessWithOptions`, before the offset
+snapshot that anchors the startup-output read) *and* on the scope watchdog's
+existing poll (`dolt_scope_watchdog.go`), because neither alone is sufficient:
+start-time rotation bounds accumulation *across* generations, and the watchdog
+is the only process that outlives the starter and can bound one generation that
+runs for days. A rotation failure is reported and never blocks a start — the
+data plane outranks log hygiene.
+
+`gc-beads-bd.sh` carries a third copy, `rotate_log_if_oversized`, for the same
+reason it duplicates the connection cap: that fallback launch path runs only
+when `GC_BIN` is unset, which is exactly when it cannot call the Go helper. It
+gets no watchdog either, so it rotates per launch attempt — enough to bound
+accumulation across generations, not one long-lived generation.
+
 ## When you change this code
 
 - Reproduce the herd, not just the single-process path. The end-to-end shape is

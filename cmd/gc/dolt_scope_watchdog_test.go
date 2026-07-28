@@ -181,6 +181,14 @@ func TestManagedDoltScopeWatchdogHelper(t *testing.T) {
 	if interval := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS")); interval != "" {
 		t.Setenv(managedDoltScopeWatchdogIntervalEnv, interval)
 	}
+	// Same re-export shape as the interval above: the caller's sanitized env
+	// drops plain GC_* keys, so the log-rotation knobs ride GC_TEST_ vars.
+	if maxBytes := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG_MAX_BYTES")); maxBytes != "" {
+		t.Setenv(managedDoltLogMaxBytesEnv, maxBytes)
+	}
+	if keep := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG_KEEP")); keep != "" {
+		t.Setenv(managedDoltLogKeepEnv, keep)
+	}
 	statePath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_STATE"))
 	configPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_CONFIG"))
 	logPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG"))
@@ -340,6 +348,89 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 			t.Fatalf("watchdog pid %d still alive after its server exited", watchdogPID)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestManagedDoltScopeWatchdogRotatesOversizedLog is the ga-fyu0 regression:
+// a server generation that runs for days outlives its starter, so start-time
+// rotation alone cannot bound dolt.log. The watchdog is the only process still
+// on the cadence, and it must enforce the size cap — copy-truncating in place
+// so both its own O_APPEND handle and the server's keep writing to the same
+// inode.
+func TestManagedDoltScopeWatchdogRotatesOversizedLog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process semantics required")
+	}
+	dir := t.TempDir()
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	statePath := filepath.Join(dir, "state")
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// Stand in for the accumulated by-design reap flood: oversized, and
+	// carrying a marker that must survive into the retained generation.
+	const seedMarker = "SEEDED-PRE-ROTATION-CONTENT"
+	seed := seedMarker + "\n" + strings.Repeat("noise line\n", 500)
+	if err := os.WriteFile(logPath, []byte(seed), 0o644); err != nil {
+		t.Fatalf("write oversized log: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
+	cmd.Env = sanitizedBaseEnv(
+		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
+		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
+		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
+		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG_MAX_BYTES=1024",
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG_KEEP=2",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
+	t.Cleanup(func() {
+		cleanupManagedDoltTestPID(t, doltPID)
+		cleanupManagedDoltTestPID(t, watchdogPID)
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		generation, readErr := os.ReadFile(logPath + ".1")
+		if readErr == nil && strings.Contains(string(generation), seedMarker) {
+			break
+		}
+		if time.Now().After(deadline) {
+			logData, _ := os.ReadFile(logPath)
+			t.Fatalf("watchdog did not rotate oversized log within the deadline; live log:\n%s", logData)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	live, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read live log: %v", err)
+	}
+	if strings.Contains(string(live), seedMarker) {
+		t.Fatalf("live log still carries pre-rotation content:\n%s", live)
+	}
+	if int64(len(live)) > 1024 {
+		t.Fatalf("live log = %d bytes after rotation, want <= 1024", len(live))
+	}
+	// The watchdog must still be able to write through its own handle after
+	// the truncate — the copy-truncate invariant, observed end to end.
+	if !strings.Contains(string(live), "rotated "+logPath) {
+		t.Fatalf("watchdog did not report the rotation through its own log handle:\n%s", live)
+	}
+	if !pidAlive(watchdogPID) {
+		t.Fatalf("watchdog pid %d died across log rotation", watchdogPID)
+	}
+	if !pidAlive(doltPID) {
+		t.Fatalf("fake dolt pid %d died across log rotation", doltPID)
 	}
 }
 

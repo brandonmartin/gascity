@@ -255,6 +255,19 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			<-done
 			return 0
 		case <-ticker.C:
+			// Start-time rotation alone cannot bound a generation that runs
+			// for days: the observed server reached connection id ~1.1M in
+			// 15h, one by-design read-timeout reap line each (ga-fyu0). The
+			// watchdog is the only process that outlives the starter and
+			// already wakes on this cadence, so the size cap is enforced here.
+			// Copy-truncate keeps the inode, so the server's O_APPEND
+			// descriptor — and this one — keep writing across the rotation.
+			if rotated, rotateErr := managedDoltRotateLogFn(logFilePath); rotateErr != nil {
+				fmt.Fprintf(logFile, "gc scope watchdog: dolt log rotation failed for %s: %v\n", logFilePath, rotateErr) //nolint:errcheck
+			} else if rotated {
+				fmt.Fprintf(logFile, "gc scope watchdog: rotated %s past %d bytes (keeping %d generations)\n", //nolint:errcheck
+					logFilePath, managedDoltLogMaxBytes(), managedDoltLogKeep())
+			}
 			if !managedDoltScopeGone(configFile) {
 				goneStreak = 0
 				continue

@@ -209,6 +209,16 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, err
 		}
 
+		// Bound the log before this generation starts appending to it, so a
+		// city that has accumulated generations of by-design read-timeout reap
+		// noise does not hand the next one an unreadable file (ga-fyu0). The
+		// data plane matters more than log hygiene: a rotation failure is
+		// reported and the start continues. Rotation must precede the offset
+		// snapshot below, which anchors the startup-output read.
+		if _, rotateErr := managedDoltRotateLogFn(layout.LogFile); rotateErr != nil {
+			fmt.Fprintf(os.Stderr, "managed-dolt start: log rotation failed for %s: %v\n", layout.LogFile, rotateErr) //nolint:errcheck
+		}
+
 		logOffset, err := managedDoltLogSize(layout.LogFile)
 		if err != nil {
 			return report, err

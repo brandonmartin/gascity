@@ -353,27 +353,106 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	return nil
 }
 
-// ReadFilteredTail reads the trailing matching events from path. A positive
-// limit returns at most that many events in chronological order; limit <= 0
-// falls back to ReadFiltered.
+// ReadFilteredTail reads the trailing matching events from path and sibling
+// rotation archives. A positive limit returns at most that many events in
+// chronological order; limit <= 0 falls back to ReadFiltered.
+//
+// The active log is scanned first (backward from the tail). If that alone
+// cannot fill the page — the common case right after rotation, when the active
+// file holds only the rotation anchor — sibling .gz archives are walked
+// newest-first (seq-stamped filenames, so older archives are never gunzipped
+// once limit is satisfied).
 func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
 		return ReadFiltered(path, filter)
 	}
+
+	var active []Event
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading events tail: %w", err)
+		}
+		// Missing active file: fall through to archives (if any).
+	} else {
+		info, err := f.Stat()
+		if err != nil {
+			f.Close() //nolint:errcheck // best-effort on error path
+			return nil, fmt.Errorf("stat events tail: %w", err)
+		}
+		active, err = readFilteredTailFromFile(f, info.Size(), filter, limit)
+		f.Close() //nolint:errcheck // read-only file
+		if err != nil {
+			return nil, err
+		}
+		if len(active) >= limit {
+			return active, nil
+		}
+	}
+
+	need := limit - len(active)
+	archives, err := archiveFilesIn(filepath.Dir(path))
+	if err != nil || len(archives) == 0 {
+		if len(active) == 0 {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("reading events tail: %w", err)
+		return active, nil
 	}
-	defer f.Close() //nolint:errcheck // read-only file
 
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat events tail: %w", err)
+	// Newest-first: archiveFilesIn is FirstSeq ascending.
+	var fromArchives []Event
+	for i := len(archives) - 1; i >= 0 && need > 0; i-- {
+		info := archives[i]
+		if !archiveOverlapsFilter(info, filter) {
+			continue
+		}
+		archivePath := filepath.Join(filepath.Dir(path), info.Basename)
+		chunk, err := lastMatchingFromArchive(archivePath, filter, need)
+		if err != nil {
+			return nil, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+		}
+		if len(chunk) == 0 {
+			continue
+		}
+		fromArchives = append(chunk, fromArchives...)
+		need = limit - len(fromArchives) - len(active)
 	}
-	return readFilteredTailFromFile(f, info.Size(), filter, limit)
+
+	if len(fromArchives) == 0 {
+		if len(active) == 0 {
+			return nil, nil
+		}
+		return active, nil
+	}
+	return append(fromArchives, active...), nil
+}
+
+// lastMatchingFromArchive gunzip-streams path and returns the last n events
+// that match filter, in chronological order. n must be positive. The full
+// archive is scanned because gzip streams are not seekable backward; callers
+// bound the number of archives opened by walking newest-first and stopping
+// once the outer limit is filled.
+func lastMatchingFromArchive(path string, filter Filter, n int) ([]Event, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	ring := make([]Event, 0, n)
+	err := streamArchive(path, filter, func(e Event) bool {
+		if !matchesFilter(e, filter) {
+			return true
+		}
+		if len(ring) < n {
+			ring = append(ring, e)
+			return true
+		}
+		copy(ring, ring[1:])
+		ring[n-1] = e
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ring, nil
 }
 
 func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {

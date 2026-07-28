@@ -780,6 +780,102 @@ func TestReadFilteredTailLimitModesAndMissingFile(t *testing.T) {
 	}
 }
 
+// TestReadFilteredTailWalksArchivesNewestFirst guards the just-rotated
+// short-page bug (ga-gm2o): after rotation the active log may hold only the
+// rotation anchor (~1 event), so a positive-limit tail must walk sibling .gz
+// archives newest-first until the page is full.
+func TestReadFilteredTailWalksArchivesNewestFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+
+	// Older archive: seqs 1-3.
+	olderSrc := filepath.Join(dir, "older-src.jsonl")
+	writeJSONLEvents(t, olderSrc, 1, 2, 3)
+	olderGZ := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), 1, 3))
+	if err := gzipAndArchive(olderSrc, olderGZ, &stderr); err != nil {
+		t.Fatalf("gzip older archive: %v", err)
+	}
+
+	// Newer archive: seqs 4-6 (the just-rotated window).
+	newerSrc := filepath.Join(dir, "newer-src.jsonl")
+	writeJSONLEvents(t, newerSrc, 4, 5, 6)
+	newerGZ := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 5, 0, 0, time.UTC), 4, 6))
+	if err := gzipAndArchive(newerSrc, newerGZ, &stderr); err != nil {
+		t.Fatalf("gzip newer archive: %v", err)
+	}
+
+	// Fresh active log after rotation: only the rotation-anchor event.
+	writeJSONLEvents(t, path, 7)
+
+	// Want the newest 4 matching events: archive 4,5,6 + active 7.
+	// Without archive walk the answer would be only [7].
+	got, err := ReadFilteredTail(path, Filter{}, 4)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail: %v", err)
+	}
+	if want := []uint64{4, 5, 6, 7}; !equalSeqs(seqsOf(got), want) {
+		t.Fatalf("tail seqs = %v, want %v (archives not walked?)", seqsOf(got), want)
+	}
+
+	// limit=2 is satisfied by active+newest archive only — must not need the
+	// older archive's events in the page.
+	got, err = ReadFilteredTail(path, Filter{}, 2)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail limit=2: %v", err)
+	}
+	if want := []uint64{6, 7}; !equalSeqs(seqsOf(got), want) {
+		t.Fatalf("limit=2 tail seqs = %v, want %v", seqsOf(got), want)
+	}
+
+	// Type filter still applies across the archive/active boundary
+	// (writeJSONLEvents stamps BeadCreated on every line).
+	got, err = ReadFilteredTail(path, Filter{Type: BeadCreated}, 3)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail filtered: %v", err)
+	}
+	if want := []uint64{5, 6, 7}; !equalSeqs(seqsOf(got), want) {
+		t.Fatalf("filtered tail seqs = %v, want %v", seqsOf(got), want)
+	}
+}
+
+// TestReadFilteredTailArchivesOnlyWhenActiveMissing covers the cold-read case
+// where the active log is gone but archives remain (or never existed yet as
+// active after a partial restore). The tail must still return the newest page.
+func TestReadFilteredTailArchivesOnlyWhenActiveMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+
+	src := filepath.Join(dir, "src.jsonl")
+	writeJSONLEvents(t, src, 10, 11, 12)
+	gz := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), 10, 12))
+	if err := gzipAndArchive(src, gz, &stderr); err != nil {
+		t.Fatalf("gzip archive: %v", err)
+	}
+	// No active file at path.
+
+	got, err := ReadFilteredTail(path, Filter{}, 2)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail: %v", err)
+	}
+	if want := []uint64{11, 12}; !equalSeqs(seqsOf(got), want) {
+		t.Fatalf("archive-only tail seqs = %v, want %v", seqsOf(got), want)
+	}
+}
+
+func equalSeqs(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestReadLatestSeq(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

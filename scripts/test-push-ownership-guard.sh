@@ -457,10 +457,15 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 
 install_guard_hook() {
     local repo="$1"
-    mkdir -p "$repo/scripts" "$repo/.githooks/lib"
+    mkdir -p "$repo/scripts/lib" "$repo/.githooks/lib"
     cp "$LIB" "$repo/scripts/push-ownership-guard.sh"
     cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
+    # pre-push sources the shared signal-death classifier before running the
+    # gate (ga-8qmy). It is a hard dependency, not an optional one -- the hook
+    # must fail loudly if it is missing rather than silently lose the
+    # "killed, not failed" diagnostic -- so the fixture has to carry it.
+    cp "$REPO_ROOT/scripts/lib/signal-status.sh" "$repo/scripts/lib/signal-status.sh"
     # .githooks owns core.hooksPath, so pre-push forwards to beads through this
     # helper before the guard runs. Copy the real one for the same reason the
     # hook itself is copied rather than re-implemented.

@@ -123,8 +123,16 @@ run_observable_go_test() {
   # dies on the Go test timeout instead (ga-8yfu). Forwarded here rather than in
   # base_env because only this exec consults the gate — the direct `go test`
   # product environment is a deliberately curated contract.
+  #
+  # GC_PUSH_GATE_CITY_ROOT rides along for the same reason and the same one
+  # exec. When no ancestor holds a slot — `make test` runs these shards
+  # directly — go-test-observable does gate, and it gates only when a city root
+  # resolves. base_env's env -i drops GC_CITY_*, so without this forward a
+  # shard whose worktree sits outside the city tree resolves no city at all and
+  # skips the cap entirely, or lands in a second, repo-level pool (ga-x36q).
   [[ -z "${GC_PUSH_GATE_HELD:-}" ]]   || observable_env+=("GC_PUSH_GATE_HELD=${GC_PUSH_GATE_HELD}")
   [[ -z "${GC_PUSH_GATE_NO_CAP:-}" ]] || observable_env+=("GC_PUSH_GATE_NO_CAP=${GC_PUSH_GATE_NO_CAP}")
+  [[ -z "${GC_PUSH_GATE_CITY_ROOT:-}" ]] || observable_env+=("GC_PUSH_GATE_CITY_ROOT=${GC_PUSH_GATE_CITY_ROOT}")
   run_in_test_env "${observable_env[@]}" \
     "$repo_root/scripts/go-test-observable" "$timing_name" -- "$@"
 }

@@ -971,10 +971,13 @@ from a real regression and cost a merge cycle to disprove.
 Two deliberate differences from the `test-local-parallel` wiring:
 
 - **It gates only inside a city.** The bound applies when
-  `push_gate_city_root` resolves — which every agent gets via `GC_CITY_PATH` —
-  rather than falling back to a repo-relative slot directory. Outside a city
-  (CI runners, a developer laptop) there is no fleet to contend with, and
-  queueing there would stall the one caller that was never the problem.
+  `push_gate_city_root` resolves — via `GC_PUSH_GATE_CITY_ROOT` under `make`,
+  `GC_CITY_PATH` otherwise, or the `$PWD` walk-up — rather than falling back
+  to a repo-relative slot directory. Outside a city (CI runners, a developer
+  laptop) there is no fleet to contend with, and queueing there would stall
+  the one caller that was never the problem. Note that "resolves" has to mean
+  the *same* root for every caller, or the bound splits; see "Keeping the pool
+  town-wide across the `env -i` scrub" below.
 - **It waits longer by default.** A `./...` sweep holds its slot for 10-15
   minutes, so `PUSH_GATE_MAX_WAIT_SECONDS` defaults to 1800 on this path; the
   library's 600s default would expire while the current holders were still
@@ -987,6 +990,39 @@ a runner that sees it inherits "already gated" instead of taking a second
 slot. Without that marker one logical invocation would double-count against
 the cap, and once every slot was held by such a parent each child would block
 against its own parent for the full wait bound.
+
+##### Keeping the pool town-wide across the `env -i` scrub
+
+One cap only bounds the fleet if every caller resolves the *same* slot
+directory, and the gated targets all run behind `TEST_ENV`'s `env -i`. That
+allowlist drops `GC_CITY_PATH`/`GC_CITY`/`GC_CITY_ROOT` on purpose, so
+agent-session vars cannot reach `go test` and write to a live city
+(`ga-w2kh1r`) — which leaves `push_gate_city_root` nothing but its `$PWD`
+walk-up. The walk-up finds `city.toml` for a caller inside the city tree and
+finds nothing for one outside it, and "nothing" is not an error here: it
+falls back to a repo-level pool.
+
+That asymmetry produced two live pools at once (`ga-x36q`). Polecats pushing
+from worktrees under the city used `<city>/.gc/gate-slots`; the refinery,
+whose merge worktree is a `mktemp -d` under `$TMPDIR`, used the repository's
+common git dir instead. Each pool honoured `PUSH_GATE_MAX_CONCURRENT`
+independently, so the effective town-wide concurrency was twice the
+configured cap — measured at load 70.5 on a 24-core box, with the gascity
+merge gate taking 40min+ against a 10-15min norm.
+
+`GC_PUSH_GATE_CITY_ROOT` closes it. The `Makefile` resolves it on the outer
+side of the scrub (from `GC_CITY_PATH`/`GC_CITY`/`GC_CITY_ROOT`, whichever is
+set) and forwards it through the allowlist; `scripts/test-go-test-shard`
+forwards it across its own `env -i` onto the one exec that consults the gate.
+`push_gate_city_root` checks it first and validates it exactly like the vars
+it stands in for. Nothing in Go reads it, so it restores the gate's view of
+the city without putting `GC_CITY_*` back in front of `go test`. Outside a
+city it is simply empty and the degrade path is unchanged.
+
+`TestPushGateMarkersSurviveTestEnvScrubs` pins all three forwards
+(`GC_PUSH_GATE_HELD`, `GC_PUSH_GATE_NO_CAP`, `GC_PUSH_GATE_CITY_ROOT`) at both
+`env -i` boundaries, because dropping any of them fails silently: the cap
+still looks configured, it just stops being one cap.
 
 Beyond those two entry points the bound does not apply: the same targets axis 2
 leaves unconfined (`test-acceptance*`, `test-integration`,

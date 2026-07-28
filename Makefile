@@ -358,6 +358,19 @@ vet:
 ## GC_PUSH_GATE_HELD. Dropping it here re-arms the cap inside a sweep that
 ## already holds a slot, so the nested runner queues behind its own parent for
 ## the full wait bound and dies on the Go test timeout instead (ga-8yfu).
+##
+## GC_PUSH_GATE_CITY_ROOT is the third: it carries the city root across this
+## very scrub, and it exists because of it. push_gate_city_root reads
+## GC_CITY_PATH/GC_CITY/GC_CITY_ROOT, all of which are dropped above on
+## purpose, leaving it only a $$PWD walk-up — which finds city.toml for a
+## caller inside the city tree and nothing for one outside it. The refinery
+## pushes from a mktemp merge worktree under $$TMPDIR, so it resolved a
+## repo-level slot pool while polecats used the city pool: two disjoint pools,
+## each enforcing PUSH_GATE_MAX_CONCURRENT, town-wide concurrency at twice the
+## configured cap (ga-x36q). Forwarding the resolved root under a gate-only
+## name keeps one pool without putting GC_CITY_* back in front of `go test` —
+## no Go code reads GC_PUSH_GATE_CITY_ROOT, so it cannot redirect a bd client
+## the way the vars it stands in for would.
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
@@ -376,6 +389,7 @@ TEST_ENV = env -i \
 	GC_TEST_NO_SLICE="$${GC_TEST_NO_SLICE-}" \
 	GC_PUSH_GATE_HELD="$${GC_PUSH_GATE_HELD-}" \
 	GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" \
+	GC_PUSH_GATE_CITY_ROOT="$${GC_PUSH_GATE_CITY_ROOT:-$${GC_CITY_PATH:-$${GC_CITY:-$${GC_CITY_ROOT-}}}}" \
 	XDG_RUNTIME_DIR="$$XDG_RUNTIME_DIR" \
 	GOPATH="$(GOPATH_VAL)" \
 	GOCACHE="$(GOCACHE_VAL)" \

@@ -168,6 +168,29 @@ NOFLOCK_OUT="$(LIB="$LIB" DIR="$WORK/noflock-slots" PATH="$WORK/empty-bin" \
 assert_contains "no_flock.warns_and_names_flock" "$NOFLOCK_OUT" "flock(1) not found"
 assert_contains "no_flock.returns_zero_empty_fd" "$NOFLOCK_OUT" "rc=0 fd=[]"
 
+# ---------------- mkdir failure: degrade best-effort, never misreport as timeout ----------------
+# Port of upstream 4f37e7b89 (#4683), the third fix in this family. An
+# uncreatable slot dir returned the same `1` as a real wait-bound expiry, so
+# the caller printed "giving up after the wait bound" for a condition that
+# never waited and will never clear — which invites exactly the wrong remedy
+# (retry, or bypass the cap). A blocked FILE stands in for the unwritable
+# parent, so this holds even as root, where a permission bit would not.
+BLOCKED_PARENT="$WORK/blocked-parent"
+: >"$BLOCKED_PARENT"
+MKDIRFAIL_OUT="$(LIB="$LIB" DIR="$BLOCKED_PARENT/gate-slots" \
+    PUSH_GATE_MAX_CONCURRENT=1 PUSH_GATE_MAX_WAIT_SECONDS=5 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '. "$LIB"; z=preset; push_gate_acquire_slot "$DIR" z holder-G; echo "rc=$? fd=[$z]"' 2>&1)"
+assert_contains "mkdir_fail.warns_cannot_create_slot_dir" "$MKDIRFAIL_OUT" "cannot create slot dir"
+assert_contains "mkdir_fail.returns_zero_empty_fd"        "$MKDIRFAIL_OUT" "rc=0 fd=[]"
+# The misreporting was the actual harm, so assert the absence of the timeout
+# message directly rather than relying on rc=0 to imply it.
+case "$MKDIRFAIL_OUT" in
+    *"timed out"*)
+        record_fail "mkdir_fail.never_reports_timeout" "found 'timed out' in output: $MKDIRFAIL_OUT" ;;
+    *)
+        record_pass "mkdir_fail.never_reports_timeout" ;;
+esac
+
 # ---------------- malformed tunables fall back to their documented defaults ----------------
 # Each bad value must be rejected by name and replaced, never fed to
 # arithmetic (`-1`, `abc`) or turned into a busy loop / zero-slot sweep (`0`).
@@ -214,6 +237,39 @@ if RESOLVED_BOGUS="$(cd "$BOGUS/nested" && GC_CITY_PATH="$BOGUS" GC_CITY="" GC_C
     assert_true "city_root.rejects_unvalidated_env" test "$RESOLVED_BOGUS" != "$BOGUS"
 else
     record_pass "city_root.rejects_unvalidated_env"
+fi
+
+# ---------------- city-root resolution: the gate-only pass-through (ga-x36q) ----------------
+# The Makefile's TEST_ENV allowlist deliberately drops GC_CITY_PATH/GC_CITY/
+# GC_CITY_ROOT so agent-session vars cannot reach `go test` and write to a live
+# city (ga-w2kh1r), and every gated target runs behind that `env -i`. The scrub
+# also blinds this resolver, which then has only the $PWD walk-up left: callers
+# inside the city tree still find city.toml, callers outside it do not, and the
+# two land in different slot pools.
+#
+# GC_PUSH_GATE_CITY_ROOT is the narrow repair. The Makefile computes it on the
+# outer side of the scrub and forwards it; nothing in Go reads it, so it cannot
+# reintroduce the ga-w2kh1r hazard that removing GC_CITY_* fixed. It is checked
+# FIRST — a value forwarded deliberately across a scrub boundary is a stronger
+# statement of intent than an ambient var — and validated exactly like the rest.
+PG_CITY="$WORK/pushgate-city"
+mkdir -p "$PG_CITY/rigs/proj"
+: >"$PG_CITY/city.toml"
+
+# Stands in for the refinery's mktemp merge worktree: outside the city tree
+# entirely, so the walk-up can never reach city.toml no matter how far it goes.
+PG_OUTSIDE="$WORK/pushgate-outside/target"
+mkdir -p "$PG_OUTSIDE"
+
+RESOLVED_PG="$(cd "$PG_OUTSIDE" && GC_PUSH_GATE_CITY_ROOT="$PG_CITY" GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_city_root)"
+assert_eq "city_root.push_gate_env_survives_scrub" "$RESOLVED_PG" "$PG_CITY"
+
+# Same validation as the other env vars: an unvalidated value must fall through
+# to walk-up rather than redirect the pool somewhere arbitrary.
+if RESOLVED_PG_BOGUS="$(cd "$BOGUS/nested" && GC_PUSH_GATE_CITY_ROOT="$BOGUS" GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_city_root)"; then
+    assert_true "city_root.rejects_unvalidated_push_gate_env" test "$RESOLVED_PG_BOGUS" != "$BOGUS"
+else
+    record_pass "city_root.rejects_unvalidated_push_gate_env"
 fi
 
 # ---------------- city-root resolution: walk-up discovery ----------------
@@ -338,6 +394,25 @@ if push_gate_acquire_slot "$SLOTS_LINKED_A" FD_LINKED "linked-holder"; then
 else
     record_fail "slots_dir.linked_worktree_can_acquire" "resolved slot directory is not usable: $SLOTS_LINKED_A"
 fi
+
+# ---------------- slots dir: one pool town-wide across the env -i scrub (ga-x36q) ----------------
+# The live split, measured on a 24-core host with both cap fixes already
+# landed: a polecat pushing from a worktree *under* the city resolved
+# <city>/.gc/gate-slots by walk-up, while the refinery pushing from its mktemp
+# merge worktree under $TMPDIR fell through to the repo's common git dir. Two
+# disjoint pools ran at once, each honouring PUSH_GATE_MAX_CONCURRENT, so the
+# effective town-wide concurrency was twice the configured cap — the same
+# over-subscription whose absence caused the ga-8i9z I/O collapse.
+#
+# $LINKED_A is the refinery-shaped caller: a linked worktree outside the city,
+# already asserted above to fall back to the common git dir when nothing names
+# a city. Forwarding the city root must pull it back into the city pool, and
+# land it in the *same* pool as a caller inside the city tree.
+PG_INSIDE="$PG_CITY/rigs/proj"
+SLOTS_PG_INSIDE="$(cd "$PG_INSIDE" && GC_PUSH_GATE_CITY_ROOT="$PG_CITY" GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_slots_dir)"
+SLOTS_PG_OUTSIDE="$(cd "$LINKED_A" && GC_PUSH_GATE_CITY_ROOT="$PG_CITY" GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK" push_gate_slots_dir)"
+assert_eq "slots_dir.forwarded_city_root_beats_repo_fallback" "$SLOTS_PG_OUTSIDE" "$PG_CITY/.gc/gate-slots"
+assert_eq "slots_dir.one_pool_across_the_scrub" "$SLOTS_PG_OUTSIDE" "$SLOTS_PG_INSIDE"
 
 # ---------------- static wiring assertions against test-local-parallel ----------------
 assert_true "wiring.sources_lib"   grep -q 'push-gate-lock-lib.sh' "$LOCAL_PARALLEL"

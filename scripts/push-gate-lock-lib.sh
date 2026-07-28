@@ -68,18 +68,37 @@
 #   - Malformed tunables fall back to their documented defaults with a
 #     diagnostic naming the offending variable; they never reach arithmetic
 #     or `sleep` unvalidated.
-#   - A timed-out acquire returns 1 (shell-false). This library never calls
-#     `exit` itself — mapping a timeout to process exit code 75 is the
-#     caller's job (scripts/test-local-parallel), keeping this file a pure,
-#     testable function library.
+#   - A timed-out acquire returns 1 (shell-false), and ONLY a timed-out
+#     acquire returns 1 — every degrade case (missing flock(1), a slot dir
+#     that cannot be created) prints its own diagnostic and returns 0 with an
+#     empty fd instead, so callers can trust that a 1 always means a real
+#     wait-bound expiry, never an environment defect misreported as fleet
+#     contention. This library never calls `exit` itself — mapping a timeout
+#     to process exit code 75 is the caller's job
+#     (scripts/test-local-parallel), keeping this file a pure, testable
+#     function library.
 #
 # FUNCTIONS
 #   push_gate_city_root
-#       Print the resolved city root. Tries GC_CITY_PATH, GC_CITY,
-#       GC_CITY_ROOT in turn — each is validated (must contain city.toml or
-#       a legacy .gc/ runtime root) before being trusted, so a stray or
-#       malicious env var can't redirect the lock directory anywhere
-#       arbitrary (mirrors cmd/gc/main.go's validateCityPath intent). Falls
+#       Print the resolved city root. Tries GC_PUSH_GATE_CITY_ROOT,
+#       GC_CITY_PATH, GC_CITY, GC_CITY_ROOT in turn — each is validated (must
+#       contain city.toml or a legacy .gc/ runtime root) before being trusted,
+#       so a stray or malicious env var can't redirect the lock directory
+#       anywhere arbitrary (mirrors cmd/gc/main.go's validateCityPath intent).
+#       GC_PUSH_GATE_CITY_ROOT comes first because it is the one value set
+#       deliberately to cross an `env -i` scrub, and it exists only because
+#       every gated target runs behind one: the Makefile's TEST_ENV allowlist
+#       drops GC_CITY_PATH/GC_CITY/GC_CITY_ROOT so agent-session vars cannot
+#       reach `go test` and write to a live city (ga-w2kh1r). That leaves this
+#       resolver nothing but the $PWD walk-up below, which succeeds for a
+#       caller inside the city tree and fails for one outside it — so a
+#       refinery pushing from a mktemp merge worktree under $TMPDIR silently
+#       got its own repo-level pool while polecats used the city pool, two
+#       disjoint pools each enforcing PUSH_GATE_MAX_CONCURRENT (ga-x36q).
+#       Carrying the city root under its own name keeps the pool town-wide
+#       without putting GC_CITY_* back in front of `go test`: no Go code reads
+#       GC_PUSH_GATE_CITY_ROOT, so it cannot redirect a bd/beads client the
+#       way the vars it stands in for would. Falls
 #       back to a directory walk-up from $PWD looking for city.toml (or,
 #       failing that, the first ancestor with a legacy .gc/ root),
 #       ceiling-bounded at $HOME. Best-effort bash port of
@@ -100,13 +119,16 @@
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
 #       (default 15); each is validated and falls back to its default on a
 #       malformed value. holder_label defaults to
-#       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. Sweeps
-#       slots 0..N-1 non-blocking; acquires the first free one immediately
-#       (fd assigned to the caller's <fd_out_var>, return 0). If all slots
-#       are busy: prints an immediate unbuffered diagnostic naming current
-#       holders (FR5), then re-sweeps every POLL_SECONDS until a slot frees
-#       or MAX_WAIT_SECONDS elapses. Returns 0 (acquired) or 1 (timed out —
-#       caller should `exit 75`).
+#       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. If the slot
+#       dir cannot be created (e.g. an unwritable parent), degrades the same
+#       way as a missing flock(1): diagnostic to stderr, empty fd, return 0 —
+#       never conflated with a timeout. Otherwise sweeps slots 0..N-1
+#       non-blocking; acquires the first free one immediately (fd assigned to
+#       the caller's <fd_out_var>, return 0). If all slots are busy: prints an
+#       immediate unbuffered diagnostic naming current holders (FR5), then
+#       re-sweeps every POLL_SECONDS until a slot frees or MAX_WAIT_SECONDS
+#       elapses. Returns 0 (acquired) or 1 (timed out — caller should
+#       `exit 75`).
 #   push_gate_describe_slots <slot_dir> <max_concurrent>
 #       Print one "slot-<i>: <holder line>" line per currently-occupied
 #       slot, for the FR5 wait message and FR8 operator diagnostics. A slot
@@ -226,7 +248,7 @@ _push_gate_ignored_runtime_roots() {
 # stray GC_CITY_PATH can't redirect the lock directory arbitrarily.
 push_gate_city_root() {
     local _pgc_var _pgc_candidate _pgc_abs
-    for _pgc_var in GC_CITY_PATH GC_CITY GC_CITY_ROOT; do
+    for _pgc_var in GC_PUSH_GATE_CITY_ROOT GC_CITY_PATH GC_CITY GC_CITY_ROOT; do
         _pgc_candidate="${!_pgc_var:-}"
         [[ -n "$_pgc_candidate" ]] || continue
         _pgc_abs="$(cd "$_pgc_candidate" 2>/dev/null && pwd)" || continue
@@ -380,7 +402,18 @@ push_gate_acquire_slot() {
     local _pgl_host
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
 
-    mkdir -p "$_pgl_slot_dir" 2>/dev/null || return 1
+    # An uncreatable slot dir (a parent path component that is a file, an
+    # unwritable parent) is a degrade case, not a wait-bound timeout — the
+    # same `return 1` used to mean both, so the caller printed "giving up
+    # after the wait bound" for a condition that never waited and will never
+    # clear, sending operators after fleet contention that did not exist
+    # (upstream 4f37e7b89 / #4683). Degrade best-effort instead, exactly as a
+    # missing flock(1) does.
+    if ! mkdir -p "$_pgl_slot_dir" 2>/dev/null; then
+        echo "push-gate: cannot create slot dir $_pgl_slot_dir — running without a cross-invocation cap" >&2
+        eval "$_pgl_fd_var="
+        return 0
+    fi
 
     local _pgl_i _pgl_slot _pgl_fd _pgl_announced=0 _pgl_start=0
 

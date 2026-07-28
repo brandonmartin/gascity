@@ -54,11 +54,22 @@ func TestFixtureSpawnedChildrenNeverQueueOnThePushGate(t *testing.T) {
 // across the two `env -i` boundaries between an outer sweep and the nested
 // scripts/go-test-observable it eventually execs.
 //
-// Both scrubs are allowlists, and push-gate nesting is signaled purely by an
-// exported GC_PUSH_GATE_HELD. A marker dropped at either boundary re-arms the
-// cap inside a process tree that already holds a slot, and the failure is
-// silent: the nested runner queues behind its own parent until the wait bound
-// expires, surfacing as a package timeout rather than anything naming the gate.
+// Both scrubs are allowlists, and the gate's two pieces of cross-boundary
+// state are carried by nothing but exported variables:
+//
+//   - GC_PUSH_GATE_HELD signals "this process tree already holds a slot". A
+//     marker dropped at either boundary re-arms the cap inside a tree that
+//     already holds one, and the failure is silent: the nested runner queues
+//     behind its own parent until the wait bound expires, surfacing as a
+//     package timeout rather than anything naming the gate.
+//   - GC_PUSH_GATE_CITY_ROOT names the city whose pool to contend for. The
+//     scrubs drop GC_CITY_PATH/GC_CITY/GC_CITY_ROOT on purpose (ga-w2kh1r),
+//     which leaves push_gate_city_root only the $PWD walk-up — so a caller
+//     whose worktree sits outside the city tree silently resolves a
+//     *repo-level* pool instead. Two disjoint pools then each enforce
+//     PUSH_GATE_MAX_CONCURRENT and the town-wide cap doubles (ga-x36q).
+//     Dropping this forward is equally silent: the cap still appears to be
+//     configured, it just stops being one cap.
 func TestPushGateMarkersSurviveTestEnvScrubs(t *testing.T) {
 	t.Parallel()
 
@@ -69,8 +80,12 @@ func TestPushGateMarkersSurviveTestEnvScrubs(t *testing.T) {
 		forwards []string
 	}{
 		{
-			path:     "Makefile",
-			forwards: []string{`GC_PUSH_GATE_HELD="$${GC_PUSH_GATE_HELD-}"`, `GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}"`},
+			path: "Makefile",
+			forwards: []string{
+				`GC_PUSH_GATE_HELD="$${GC_PUSH_GATE_HELD-}"`,
+				`GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}"`,
+				`GC_PUSH_GATE_CITY_ROOT="$${GC_PUSH_GATE_CITY_ROOT:-$${GC_CITY_PATH:-$${GC_CITY:-$${GC_CITY_ROOT-}}}}"`,
+			},
 		},
 		{
 			// Appended to observable_env, not base_env: only the
@@ -81,6 +96,7 @@ func TestPushGateMarkersSurviveTestEnvScrubs(t *testing.T) {
 			forwards: []string{
 				`observable_env+=("GC_PUSH_GATE_HELD=${GC_PUSH_GATE_HELD}")`,
 				`observable_env+=("GC_PUSH_GATE_NO_CAP=${GC_PUSH_GATE_NO_CAP}")`,
+				`observable_env+=("GC_PUSH_GATE_CITY_ROOT=${GC_PUSH_GATE_CITY_ROOT}")`,
 			},
 		},
 	} {
@@ -94,7 +110,9 @@ func TestPushGateMarkersSurviveTestEnvScrubs(t *testing.T) {
 			for _, forward := range scrub.forwards {
 				if !strings.Contains(string(content), forward) {
 					t.Errorf("%s scrubs the environment without forwarding %s\n"+
-						"a nested runner then re-acquires a slot it already holds and blocks against its own parent",
+						"the gate then silently mis-scopes: a nested runner re-acquires a slot it "+
+						"already holds and blocks against its own parent, or a caller outside the "+
+						"city tree contends in a second, disjoint pool",
 						scrub.path, forward)
 				}
 			}

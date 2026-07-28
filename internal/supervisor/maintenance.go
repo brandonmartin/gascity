@@ -397,15 +397,20 @@ func (m *StoreMaintenanceLoop) executeCycleLocked(ctx context.Context) Maintenan
 	m.runStartedAt.Store(&started)
 	defer m.runStartedAt.Store(nil)
 
+	if m.checkDiskPreflight() {
+		// Disk is critically low — skip both the snapshot and CALL DOLT_GC.
+		// Snapshotting the store needs roughly as much free space as the
+		// store itself, so a critically-low store would fail the backup and
+		// still leave no room for GC. Running the pre-flight before the
+		// snapshot means a CRITICAL disk skips both stages rather than
+		// attempting a doomed backup that only consumes the last of the disk.
+		// The StoreDiskCritical event informs operators; C1
+		// (hold-on-store-unreachable) handles downstream safety.
+		return m.finishCycleLocked(started, "", nil)
+	}
 	snapshotPath, err := m.runSnapshot(ctx)
 	if err != nil {
 		return m.finishCycleLocked(started, snapshotPath, err)
-	}
-	if m.checkDiskPreflight() {
-		// Disk is critically low — skip CALL DOLT_GC to avoid growing the
-		// store further. The StoreDiskCritical event informs operators.
-		// C1 (hold-on-store-unreachable) handles downstream safety.
-		return m.finishCycleLocked(started, snapshotPath, nil)
 	}
 	if err := m.runDoltGC(ctx); err != nil {
 		return m.finishCycleLocked(started, snapshotPath, err)

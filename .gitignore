@@ -42,6 +42,24 @@ internal/api/dashboardspa/web/frontend/.playwright/
 /.claude/*
 !/.claude/skills/
 
+# Every agent session materializes its skill catalog into the provider's sink
+# (internal/materialize vendorSinks) under its WorkDir, which for a worker
+# agent is a worktree of this repo: one symlink per skill plus a
+# .gc-skill-ownership.json manifest, all pointing at machine-local cache
+# paths. That is runtime state, not work product — hide the sink by default
+# and re-expose only the skill trees this repo actually versions, so a
+# never-edited worktree is not born dirty.
+/.claude/skills/*
+!/.claude/skills/gascity-docs/
+
+# The remaining provider sinks version nothing, so the whole directory goes.
+# Root-anchored like the .claude rules above, to leave example-pack overlays
+# at any nested path untouched.
+/.codex/skills/
+/.gemini/skills/
+/.mimocode/skills/
+/.opencode/skills/
+
 # sync-project-agents writes local migration backups here; don't commit them.
 .agents/migration/
 .gc/

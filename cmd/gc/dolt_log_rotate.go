@@ -54,11 +54,17 @@ const (
 	defaultManagedDoltLogKeep = 3
 )
 
-// managedDoltLogMaxBytes resolves the rotation threshold for dolt.log,
-// honoring GC_DOLT_LOG_MAX_BYTES. An unset or unparseable value falls back to
-// defaultManagedDoltLogMaxBytes; a non-positive value disables rotation.
+// managedDoltLogMaxBytes resolves the rotation threshold for dolt.log from
+// GC_DOLT_LOG_MAX_BYTES.
 func managedDoltLogMaxBytes() int64 {
-	raw := strings.TrimSpace(os.Getenv(managedDoltLogMaxBytesEnv))
+	return managedDoltLogMaxBytesFor(os.Getenv(managedDoltLogMaxBytesEnv))
+}
+
+// managedDoltLogMaxBytesFor resolves the rotation threshold from a raw
+// environment value. An unset or unparseable value falls back to
+// defaultManagedDoltLogMaxBytes; a non-positive value disables rotation.
+func managedDoltLogMaxBytesFor(raw string) int64 {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return defaultManagedDoltLogMaxBytes
 	}
@@ -72,11 +78,17 @@ func managedDoltLogMaxBytes() int64 {
 	return value
 }
 
-// managedDoltLogKeep resolves how many rotated dolt.log generations to retain,
-// honoring GC_DOLT_LOG_KEEP. An unset or unparseable value falls back to
-// defaultManagedDoltLogKeep; a negative value retains none.
+// managedDoltLogKeep resolves how many rotated dolt.log generations to retain
+// from GC_DOLT_LOG_KEEP.
 func managedDoltLogKeep() int {
-	raw := strings.TrimSpace(os.Getenv(managedDoltLogKeepEnv))
+	return managedDoltLogKeepFor(os.Getenv(managedDoltLogKeepEnv))
+}
+
+// managedDoltLogKeepFor resolves the retained-generation count from a raw
+// environment value. An unset or unparseable value falls back to
+// defaultManagedDoltLogKeep; a negative value retains none.
+func managedDoltLogKeepFor(raw string) int {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return defaultManagedDoltLogKeep
 	}

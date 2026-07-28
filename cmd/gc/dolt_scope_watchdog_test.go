@@ -89,6 +89,60 @@ func TestManagedDoltScopeWatchdogInterval(t *testing.T) {
 	}
 }
 
+// managedDoltScopeWatchdogRun is one helper-process run: the scope anchor the
+// watchdog polls, the log it and its server share, and the two supervised
+// PIDs. Paths are fixed under the run's directory so a caller can seed the log
+// before starting.
+type managedDoltScopeWatchdogRun struct {
+	configPath  string
+	logPath     string
+	doltPID     int
+	watchdogPID int
+	output      []byte
+}
+
+// startManagedDoltScopeWatchdogHelper runs TestManagedDoltScopeWatchdogHelper
+// in a child process, which starts a fake dolt server under a real scope
+// watchdog, records both PIDs, and exits — the production lifecycle, where gc
+// goes away and the watchdog keeps supervising. It returns once both PIDs are
+// readable, with cleanup registered for each.
+//
+// The scope anchor is dir/dolt-config.yaml and the log is dir/dolt.log; extra
+// entries are appended to the child's environment, which is sanitized, so
+// production knobs must ride in as GC_TEST_ control vars.
+func startManagedDoltScopeWatchdogHelper(t *testing.T, dir string, extraEnv ...string) managedDoltScopeWatchdogRun {
+	t.Helper()
+	run := managedDoltScopeWatchdogRun{
+		configPath: filepath.Join(dir, "dolt-config.yaml"),
+		logPath:    filepath.Join(dir, "dolt.log"),
+	}
+	if err := os.WriteFile(run.configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	statePath := filepath.Join(dir, "state")
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
+	cmd.Env = sanitizedBaseEnv(append([]string{
+		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
+		"GC_TEST_MANAGED_DOLT_HELPER_STATE=" + statePath,
+		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG=" + run.configPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG=" + run.logPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR=" + writeFakeDoltSQLServer(t),
+		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
+	}, extraEnv...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	run.output = output
+	run.doltPID, run.watchdogPID = readManagedDoltTestState(t, statePath)
+	t.Cleanup(func() {
+		cleanupManagedDoltTestPID(t, run.doltPID)
+		cleanupManagedDoltTestPID(t, run.watchdogPID)
+	})
+	return run
+}
+
 // TestManagedDoltScopeWatchdogKillsServerWhenScopeDeleted exercises the full
 // production supervision loop: a helper process starts a fake dolt server
 // under the scope watchdog, the test deletes the config file (the scope
@@ -98,68 +152,40 @@ func TestManagedDoltScopeWatchdogKillsServerWhenScopeDeleted(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process semantics required")
 	}
-	dir := t.TempDir()
-	fakeDoltDir := writeFakeDoltSQLServer(t)
-	statePath := filepath.Join(dir, "state")
-	configPath := filepath.Join(dir, "dolt-config.yaml")
-	logPath := filepath.Join(dir, "dolt.log")
-	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
-	cmd.Env = sanitizedBaseEnv(
-		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
-		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
-		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
-		// TestMain scrubs non-GC_TEST_ GC_* keys, so the interval rides a
-		// GC_TEST_ control var and the helper re-exports it for the watchdog.
-		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, output)
-	}
-	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
-	t.Cleanup(func() {
-		cleanupManagedDoltTestPID(t, doltPID)
-		cleanupManagedDoltTestPID(t, watchdogPID)
-	})
+	run := startManagedDoltScopeWatchdogHelper(t, t.TempDir())
 
 	// Control window: with the config present, the server must stay alive
 	// across several poll intervals — and so must its watchdog (the spawner
 	// helper has already exited, the production lifecycle shape).
 	time.Sleep(300 * time.Millisecond)
-	if !pidAlive(doltPID) {
-		logData, _ := os.ReadFile(logPath)
-		t.Fatalf("fake dolt pid %d exited while scope was alive; helper output:\n%s\nwatchdog log:\n%s", doltPID, output, logData)
+	if !pidAlive(run.doltPID) {
+		logData, _ := os.ReadFile(run.logPath)
+		t.Fatalf("fake dolt pid %d exited while scope was alive; helper output:\n%s\nwatchdog log:\n%s", run.doltPID, run.output, logData)
 	}
-	if !pidAlive(watchdogPID) {
-		logData, _ := os.ReadFile(logPath)
-		t.Fatalf("watchdog pid %d died while scope was alive; watchdog log:\n%s", watchdogPID, logData)
+	if !pidAlive(run.watchdogPID) {
+		logData, _ := os.ReadFile(run.logPath)
+		t.Fatalf("watchdog pid %d died while scope was alive; watchdog log:\n%s", run.watchdogPID, logData)
 	}
 
 	// Delete the scope anchor; the watchdog should confirm twice and reap.
-	if err := os.Remove(configPath); err != nil {
+	if err := os.Remove(run.configPath); err != nil {
 		t.Fatalf("remove config: %v", err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for pidAlive(doltPID) {
+	for pidAlive(run.doltPID) {
 		if time.Now().After(deadline) {
-			logData, _ := os.ReadFile(logPath)
-			t.Fatalf("fake dolt pid %d still alive after scope deletion; watchdog log:\n%s", doltPID, logData)
+			logData, _ := os.ReadFile(run.logPath)
+			t.Fatalf("fake dolt pid %d still alive after scope deletion; watchdog log:\n%s", run.doltPID, logData)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	for pidAlive(watchdogPID) {
+	for pidAlive(run.watchdogPID) {
 		if time.Now().After(deadline) {
-			t.Fatalf("watchdog pid %d still alive after reaping its server", watchdogPID)
+			t.Fatalf("watchdog pid %d still alive after reaping its server", run.watchdogPID)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	logData, _ := os.ReadFile(logPath)
+	logData, _ := os.ReadFile(run.logPath)
 	if !strings.Contains(string(logData), "gone for") {
 		t.Errorf("watchdog log missing the scope-gone termination decision; log:\n%s", logData)
 	}
@@ -178,16 +204,17 @@ func TestManagedDoltScopeWatchdogHelper(t *testing.T) {
 		t.Fatal("missing fake dolt dir")
 	}
 	t.Setenv("PATH", fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if interval := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS")); interval != "" {
-		t.Setenv(managedDoltScopeWatchdogIntervalEnv, interval)
-	}
-	// Same re-export shape as the interval above: the caller's sanitized env
-	// drops plain GC_* keys, so the log-rotation knobs ride GC_TEST_ vars.
-	if maxBytes := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG_MAX_BYTES")); maxBytes != "" {
-		t.Setenv(managedDoltLogMaxBytesEnv, maxBytes)
-	}
-	if keep := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG_KEEP")); keep != "" {
-		t.Setenv(managedDoltLogKeepEnv, keep)
+	// TestMain scrubs non-GC_TEST_ GC_* keys from this child's environment, so
+	// every production knob a caller wants to set rides in on a GC_TEST_
+	// control var and is re-exported here under its real name.
+	for control, production := range map[string]string{
+		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS": managedDoltScopeWatchdogIntervalEnv,
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG_MAX_BYTES":        managedDoltLogMaxBytesEnv,
+		"GC_TEST_MANAGED_DOLT_HELPER_LOG_KEEP":             managedDoltLogKeepEnv,
+	} {
+		if value := strings.TrimSpace(os.Getenv(control)); value != "" {
+			t.Setenv(production, value)
+		}
 	}
 	statePath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_STATE"))
 	configPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_CONFIG"))
@@ -252,38 +279,12 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 		t.Skip("POSIX process semantics required")
 	}
 	dir := t.TempDir()
-	fakeDoltDir := writeFakeDoltSQLServer(t)
-	statePath := filepath.Join(dir, "state")
 	identityPath := filepath.Join(dir, "identity")
-	configPath := filepath.Join(dir, "dolt-config.yaml")
-	logPath := filepath.Join(dir, "dolt.log")
-	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
-	cmd.Env = sanitizedBaseEnv(
-		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
-		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
-		"GC_TEST_MANAGED_DOLT_HELPER_IDENTITY="+identityPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
-		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, output)
-	}
-	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
-	t.Cleanup(func() {
-		cleanupManagedDoltTestPID(t, doltPID)
-		cleanupManagedDoltTestPID(t, watchdogPID)
-	})
+	run := startManagedDoltScopeWatchdogHelper(t, dir, "GC_TEST_MANAGED_DOLT_HELPER_IDENTITY="+identityPath)
 
 	ticks, identity := readManagedDoltScopeIdentityState(t, identityPath)
 	if ticks == 0 && identity == "" {
-		logData, _ := os.ReadFile(logPath)
+		logData, _ := os.ReadFile(run.logPath)
 		t.Fatalf("scope watchdog reported no start identity (ticks=%d identity=%q); PID-reuse guard disabled; log:\n%s", ticks, identity, logData)
 	}
 }
@@ -295,47 +296,21 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process semantics required")
 	}
-	dir := t.TempDir()
-	fakeDoltDir := writeFakeDoltSQLServer(t)
-	statePath := filepath.Join(dir, "state")
-	configPath := filepath.Join(dir, "dolt-config.yaml")
-	logPath := filepath.Join(dir, "dolt.log")
-	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
-	cmd.Env = sanitizedBaseEnv(
-		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
-		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
-		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
-		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, output)
-	}
-	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
-	t.Cleanup(func() {
-		cleanupManagedDoltTestPID(t, doltPID)
-		cleanupManagedDoltTestPID(t, watchdogPID)
-	})
+	run := startManagedDoltScopeWatchdogHelper(t, t.TempDir())
 
 	time.Sleep(300 * time.Millisecond)
-	if !pidAlive(doltPID) {
-		logData, _ := os.ReadFile(logPath)
-		t.Fatalf("fake dolt pid %d reaped while scope present; watchdog log:\n%s", doltPID, logData)
+	if !pidAlive(run.doltPID) {
+		logData, _ := os.ReadFile(run.logPath)
+		t.Fatalf("fake dolt pid %d reaped while scope present; watchdog log:\n%s", run.doltPID, logData)
 	}
-	if !pidAlive(watchdogPID) {
-		logData, _ := os.ReadFile(logPath)
-		t.Fatalf("watchdog pid %d died while scope present; watchdog log:\n%s", watchdogPID, logData)
+	if !pidAlive(run.watchdogPID) {
+		logData, _ := os.ReadFile(run.logPath)
+		t.Fatalf("watchdog pid %d died while scope present; watchdog log:\n%s", run.watchdogPID, logData)
 	}
 
 	// Kill the server directly (the `gc stop` shape); the watchdog must
 	// notice and exit instead of lingering.
-	proc, err := os.FindProcess(doltPID)
+	proc, err := os.FindProcess(run.doltPID)
 	if err != nil {
 		t.Fatalf("find dolt pid: %v", err)
 	}
@@ -343,9 +318,9 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 		t.Fatalf("kill dolt pid: %v", err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for pidAlive(watchdogPID) {
+	for pidAlive(run.watchdogPID) {
 		if time.Now().After(deadline) {
-			t.Fatalf("watchdog pid %d still alive after its server exited", watchdogPID)
+			t.Fatalf("watchdog pid %d still alive after its server exited", run.watchdogPID)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -362,56 +337,29 @@ func TestManagedDoltScopeWatchdogRotatesOversizedLog(t *testing.T) {
 		t.Skip("POSIX process semantics required")
 	}
 	dir := t.TempDir()
-	fakeDoltDir := writeFakeDoltSQLServer(t)
-	statePath := filepath.Join(dir, "state")
-	configPath := filepath.Join(dir, "dolt-config.yaml")
-	logPath := filepath.Join(dir, "dolt.log")
-	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
 	// Stand in for the accumulated by-design reap flood: oversized, and
-	// carrying a marker that must survive into the retained generation.
+	// carrying a marker that must survive into the retained generation. The
+	// log has to exist before the helper starts appending to it.
 	const seedMarker = "SEEDED-PRE-ROTATION-CONTENT"
 	seed := seedMarker + "\n" + strings.Repeat("noise line\n", 500)
-	if err := os.WriteFile(logPath, []byte(seed), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "dolt.log"), []byte(seed), 0o644); err != nil {
 		t.Fatalf("write oversized log: %v", err)
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
-	cmd.Env = sanitizedBaseEnv(
-		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
-		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
-		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
-		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
-		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
+	// This is also the only coverage of rotateManagedDoltLogIfOversized's env
+	// wiring: both knobs travel from the environment into a real watchdog.
+	run := startManagedDoltScopeWatchdogHelper(t, dir,
 		"GC_TEST_MANAGED_DOLT_HELPER_LOG_MAX_BYTES=1024",
 		"GC_TEST_MANAGED_DOLT_HELPER_LOG_KEEP=2",
 	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, output)
-	}
-	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
-	t.Cleanup(func() {
-		cleanupManagedDoltTestPID(t, doltPID)
-		cleanupManagedDoltTestPID(t, watchdogPID)
-	})
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		generation, readErr := os.ReadFile(logPath + ".1")
-		if readErr == nil && strings.Contains(string(generation), seedMarker) {
-			break
-		}
-		if time.Now().After(deadline) {
-			logData, _ := os.ReadFile(logPath)
-			t.Fatalf("watchdog did not rotate oversized log within the deadline; live log:\n%s", logData)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// The generation is published by rename, so non-empty means complete.
+	generation := waitForTestNonEmptyFile(t, run.logPath+".1", 10*time.Second)
+	if !strings.Contains(generation, seedMarker) {
+		t.Fatalf("rotated generation is missing the pre-rotation content:\n%s", generation)
 	}
 
-	live, err := os.ReadFile(logPath)
+	live, err := os.ReadFile(run.logPath)
 	if err != nil {
 		t.Fatalf("read live log: %v", err)
 	}
@@ -423,14 +371,14 @@ func TestManagedDoltScopeWatchdogRotatesOversizedLog(t *testing.T) {
 	}
 	// The watchdog must still be able to write through its own handle after
 	// the truncate — the copy-truncate invariant, observed end to end.
-	if !strings.Contains(string(live), "rotated "+logPath) {
+	if !strings.Contains(string(live), "rotated "+run.logPath) {
 		t.Fatalf("watchdog did not report the rotation through its own log handle:\n%s", live)
 	}
-	if !pidAlive(watchdogPID) {
-		t.Fatalf("watchdog pid %d died across log rotation", watchdogPID)
+	if !pidAlive(run.watchdogPID) {
+		t.Fatalf("watchdog pid %d died across log rotation", run.watchdogPID)
 	}
-	if !pidAlive(doltPID) {
-		t.Fatalf("fake dolt pid %d died across log rotation", doltPID)
+	if !pidAlive(run.doltPID) {
+		t.Fatalf("fake dolt pid %d died across log rotation", run.doltPID)
 	}
 }
 

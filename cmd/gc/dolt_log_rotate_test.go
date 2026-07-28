@@ -4,10 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -265,9 +262,8 @@ func TestManagedDoltLogMaxBytesResolution(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(managedDoltLogMaxBytesEnv, tc.value)
-			if got := managedDoltLogMaxBytes(); got != tc.want {
-				t.Fatalf("managedDoltLogMaxBytes() = %d, want %d", got, tc.want)
+			if got := managedDoltLogMaxBytesFor(tc.value); got != tc.want {
+				t.Fatalf("managedDoltLogMaxBytesFor(%q) = %d, want %d", tc.value, got, tc.want)
 			}
 		})
 	}
@@ -287,39 +283,18 @@ func TestManagedDoltLogKeepResolution(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(managedDoltLogKeepEnv, tc.value)
-			if got := managedDoltLogKeep(); got != tc.want {
-				t.Fatalf("managedDoltLogKeep() = %d, want %d", got, tc.want)
+			if got := managedDoltLogKeepFor(tc.value); got != tc.want {
+				t.Fatalf("managedDoltLogKeepFor(%q) = %d, want %d", tc.value, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestRotateManagedDoltLogIfOversizedHonorsEnvironment(t *testing.T) {
-	dir := t.TempDir()
-	path := writeManagedDoltLogFixture(t, dir, 4096)
-
-	t.Setenv(managedDoltLogMaxBytesEnv, "1024")
-	t.Setenv(managedDoltLogKeepEnv, "1")
-
-	rotated, err := rotateManagedDoltLogIfOversized(path)
-	if err != nil {
-		t.Fatalf("rotateManagedDoltLogIfOversized: %v", err)
-	}
-	if !rotated {
-		t.Fatal("rotated = false, want true")
-	}
-	if data, readErr := os.ReadFile(path); readErr != nil {
-		t.Fatalf("read log: %v", readErr)
-	} else if len(data) != 0 {
-		t.Fatalf("live log size = %d, want 0", len(data))
-	}
-	if data, readErr := os.ReadFile(path + ".1"); readErr != nil {
-		t.Fatalf("read rotated generation: %v", readErr)
-	} else if len(data) != 4096 {
-		t.Fatalf("rotated generation size = %d, want 4096", len(data))
-	}
-}
+// rotateManagedDoltLogIfOversized is a one-line composition of the two
+// resolvers above and rotateManagedDoltLog, all three exhaustively covered
+// here. Its wiring — that GC_DOLT_LOG_MAX_BYTES and GC_DOLT_LOG_KEEP reach the
+// right parameters — is covered end to end, in a real process, by
+// TestManagedDoltScopeWatchdogRotatesOversizedLog.
 
 // TestStartManagedDoltRotatesLogBeforeSpawn pins the start-path half of the
 // wiring: the size cap is applied before the generation begins appending, and
@@ -390,201 +365,5 @@ func TestStartManagedDoltSurvivesLogRotationFailure(t *testing.T) {
 	}
 	if !spawned {
 		t.Fatal("a failed log rotation blocked the managed dolt start")
-	}
-}
-
-// TestDoltLogRotationFallbackMatchesManagedDefaults keeps the shell-side copies
-// of the log size cap and retention count equal to the Go constants.
-//
-// The fallback launch path in gc-beads-bd.sh runs exactly when GC_BIN is unset,
-// which is also when it cannot ask the Go helper for these values — so the
-// literals there are the managed defaults on that path. Drift is invisible at
-// runtime: the log simply grows past the cap the Go path enforces, which is the
-// unbounded-file condition ga-fyu0 exists to close.
-func TestDoltLogRotationFallbackMatchesManagedDefaults(t *testing.T) {
-	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
-	data, err := os.ReadFile(scriptPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", scriptPath, err)
-	}
-
-	tests := []struct {
-		name    string
-		pattern *regexp.Regexp
-		want    string
-	}{
-		{
-			name:    "size cap",
-			pattern: regexp.MustCompile(`DOLT_LOG_MAX_BYTES_DEFAULT=(\d+)`),
-			want:    strconv.FormatInt(defaultManagedDoltLogMaxBytes, 10),
-		},
-		{
-			name:    "retained generations",
-			pattern: regexp.MustCompile(`DOLT_LOG_KEEP_DEFAULT=(\d+)`),
-			want:    strconv.Itoa(defaultManagedDoltLogKeep),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			matches := tt.pattern.FindAllStringSubmatch(string(data), -1)
-			if len(matches) == 0 {
-				t.Fatalf("no %s literal found in %s — update this test if the script moved it", tt.pattern, scriptPath)
-			}
-			for _, match := range matches {
-				if match[1] != tt.want {
-					t.Errorf("%s has %q, want %s (the Go managed default)", scriptPath, match[0], tt.want)
-				}
-			}
-		})
-	}
-}
-
-// runShellLogRotation exercises the real rotate_log_if_oversized from
-// gc-beads-bd.sh. The function is extracted from the shipped script rather than
-// restated here, so the test cannot drift from the code it guards; sourcing the
-// whole script is not an option because its top level parses argv and
-// dispatches an op.
-func runShellLogRotation(t *testing.T, logFile string, env ...string) {
-	t.Helper()
-	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
-	driver := `set -e
-eval "$(sed -n '/^DOLT_LOG_MAX_BYTES_DEFAULT=/p;/^DOLT_LOG_KEEP_DEFAULT=/p;/^rotate_log_if_oversized() {$/,/^}$/p' "$1")"
-LOG_FILE="$2"
-rotate_log_if_oversized
-`
-	cmd := exec.Command("sh", "-c", driver, "sh", scriptPath, logFile)
-	// Scrub the knobs from the inherited environment: an agent session that
-	// exports them would otherwise silently override each case's fixture.
-	shellEnv := make([]string, 0, len(os.Environ())+len(env))
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "GC_DOLT_LOG_") {
-			continue
-		}
-		shellEnv = append(shellEnv, entry)
-	}
-	shellEnv = append(shellEnv, env...)
-	cmd.Env = shellEnv
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("shell rotation failed: %v\n%s", err, out)
-	}
-}
-
-// TestShellFallbackRotationBoundsTheLog covers the launch path taken when
-// GC_BIN is unset: no Go helper, no scope watchdog, so this per-attempt
-// rotation is the only thing bounding accumulation across generations.
-func TestShellFallbackRotationBoundsTheLog(t *testing.T) {
-	dir := t.TempDir()
-	logFile := filepath.Join(dir, "dolt.log")
-	if err := os.WriteFile(logFile, []byte("oversized content\n"), 0o644); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
-	if err := os.WriteFile(logFile+".1", []byte("previous generation\n"), 0o644); err != nil {
-		t.Fatalf("write generation: %v", err)
-	}
-
-	runShellLogRotation(t, logFile, "GC_DOLT_LOG_MAX_BYTES=4", "GC_DOLT_LOG_KEEP=2")
-
-	if data, err := os.ReadFile(logFile); err != nil {
-		t.Fatalf("read live log: %v", err)
-	} else if len(data) != 0 {
-		t.Fatalf("live log = %q, want empty (truncated in place)", data)
-	}
-	if data, err := os.ReadFile(logFile + ".1"); err != nil {
-		t.Fatalf("read generation 1: %v", err)
-	} else if string(data) != "oversized content\n" {
-		t.Fatalf("generation 1 = %q, want the rotated live log", data)
-	}
-	if data, err := os.ReadFile(logFile + ".2"); err != nil {
-		t.Fatalf("read generation 2: %v", err)
-	} else if string(data) != "previous generation\n" {
-		t.Fatalf("generation 2 = %q, want the aged generation 1", data)
-	}
-	if _, err := os.Stat(logFile + ".3"); !os.IsNotExist(err) {
-		t.Fatalf("stat generation 3 = %v, want not-exist (keep=2 bounds retention)", err)
-	}
-}
-
-func TestShellFallbackRotationLeavesLogUnderCapAlone(t *testing.T) {
-	dir := t.TempDir()
-	logFile := filepath.Join(dir, "dolt.log")
-	if err := os.WriteFile(logFile, []byte("small\n"), 0o644); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
-
-	runShellLogRotation(t, logFile, "GC_DOLT_LOG_MAX_BYTES=1048576")
-
-	if data, err := os.ReadFile(logFile); err != nil {
-		t.Fatalf("read live log: %v", err)
-	} else if string(data) != "small\n" {
-		t.Fatalf("live log = %q, want untouched", data)
-	}
-	if _, err := os.Stat(logFile + ".1"); !os.IsNotExist(err) {
-		t.Fatalf("stat generation 1 = %v, want not-exist", err)
-	}
-}
-
-// TestShellFallbackRotationHonorsDisableAndKeepZero pins the two off-switches
-// to the same meaning the Go resolver gives them.
-func TestShellFallbackRotationHonorsDisableAndKeepZero(t *testing.T) {
-	for _, disable := range []string{"0", "-1"} {
-		t.Run("disabled by "+disable, func(t *testing.T) {
-			dir := t.TempDir()
-			logFile := filepath.Join(dir, "dolt.log")
-			if err := os.WriteFile(logFile, []byte("kept\n"), 0o644); err != nil {
-				t.Fatalf("write log: %v", err)
-			}
-			runShellLogRotation(t, logFile, "GC_DOLT_LOG_MAX_BYTES="+disable)
-			if data, err := os.ReadFile(logFile); err != nil {
-				t.Fatalf("read live log: %v", err)
-			} else if string(data) != "kept\n" {
-				t.Fatalf("live log = %q, want untouched (rotation disabled)", data)
-			}
-		})
-	}
-
-	t.Run("keep zero retains no generations", func(t *testing.T) {
-		dir := t.TempDir()
-		logFile := filepath.Join(dir, "dolt.log")
-		if err := os.WriteFile(logFile, []byte("dropped\n"), 0o644); err != nil {
-			t.Fatalf("write log: %v", err)
-		}
-		runShellLogRotation(t, logFile, "GC_DOLT_LOG_MAX_BYTES=1", "GC_DOLT_LOG_KEEP=0")
-		if data, err := os.ReadFile(logFile); err != nil {
-			t.Fatalf("read live log: %v", err)
-		} else if len(data) != 0 {
-			t.Fatalf("live log = %q, want empty", data)
-		}
-		if _, err := os.Stat(logFile + ".1"); !os.IsNotExist(err) {
-			t.Fatalf("stat generation 1 = %v, want not-exist", err)
-		}
-	})
-}
-
-// TestShellFallbackRotationPreservesLiveAppendWriter is the shell-side copy of
-// the copy-truncate invariant: a server left running from an earlier launch
-// attempt holds this log open in append mode.
-func TestShellFallbackRotationPreservesLiveAppendWriter(t *testing.T) {
-	dir := t.TempDir()
-	logFile := filepath.Join(dir, "dolt.log")
-	writer, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatalf("open live writer: %v", err)
-	}
-	defer func() { _ = writer.Close() }()
-	if _, err := writer.Write([]byte("pre-rotation output\n")); err != nil {
-		t.Fatalf("seed live log: %v", err)
-	}
-
-	runShellLogRotation(t, logFile, "GC_DOLT_LOG_MAX_BYTES=1", "GC_DOLT_LOG_KEEP=1")
-
-	if _, err := writer.Write([]byte("post-rotation output\n")); err != nil {
-		t.Fatalf("write through live handle after rotation: %v", err)
-	}
-	data, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("read live log: %v", err)
-	}
-	if string(data) != "post-rotation output\n" {
-		t.Fatalf("post-rotation log = %q, want only the post-rotation write", data)
 	}
 }

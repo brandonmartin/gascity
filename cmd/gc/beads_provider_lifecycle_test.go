@@ -4355,7 +4355,7 @@ func waitForProviderLifecycleCancel(t *testing.T, cancelCh <-chan context.Cancel
 
 func waitForProviderTestChildPID(t *testing.T, path string) int {
 	t.Helper()
-	pidText := waitForProviderTestNonEmptyFile(t, path, 5*time.Second)
+	pidText := waitForTestNonEmptyFile(t, path, 5*time.Second)
 	pid, err := strconv.Atoi(pidText)
 	if err != nil {
 		t.Fatalf("parse child pid: %v", err)
@@ -4363,22 +4363,25 @@ func waitForProviderTestChildPID(t *testing.T, path string) int {
 	return pid
 }
 
-func waitForProviderTestNonEmptyFile(t *testing.T, path string, timeout time.Duration) string {
+// waitForTestNonEmptyFile polls path until it holds non-blank content or
+// timeout elapses, and returns that content trimmed. It is the shared way to
+// observe a file another process publishes; a read error other than
+// not-exist is fatal rather than retried.
+func waitForTestNonEmptyFile(t *testing.T, path string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		pidBytes, err := os.ReadFile(path)
+		data, err := os.ReadFile(path)
 		if err == nil {
-			pid := strings.TrimSpace(string(pidBytes))
-			if pid != "" {
-				return pid
+			if content := strings.TrimSpace(string(data)); content != "" {
+				return content
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("read child pid: %v", err)
+			t.Fatalf("read %s: %v", path, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("child pid was not written within %s", timeout)
+	t.Fatalf("%s was not written within %s", path, timeout)
 	return ""
 }
 

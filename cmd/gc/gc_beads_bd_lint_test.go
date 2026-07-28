@@ -359,3 +359,46 @@ func repoRootForLint(t *testing.T) string {
 		dir = parent
 	}
 }
+
+// TestDoltLogRotationFallbackMatchesManagedDefaults keeps the shell-side copies
+// of the log size cap and retention count equal to the Go constants.
+//
+// The fallback launch path in gc-beads-bd.sh runs exactly when GC_BIN is unset,
+// which is also when it cannot ask the Go helper for these values — so the
+// literals there are the managed defaults on that path. Drift is invisible at
+// runtime: the log simply grows past the cap the Go path enforces, which is the
+// unbounded-file condition ga-fyu0 exists to close.
+func TestDoltLogRotationFallbackMatchesManagedDefaults(t *testing.T) {
+	scriptPath := gcBeadsBdSourcePath(t)
+	data := gcBeadsBdScriptSource(t)
+
+	tests := []struct {
+		name    string
+		pattern *regexp.Regexp
+		want    string
+	}{
+		{
+			name:    "size cap",
+			pattern: regexp.MustCompile(`DOLT_LOG_MAX_BYTES_DEFAULT=(\d+)`),
+			want:    strconv.FormatInt(defaultManagedDoltLogMaxBytes, 10),
+		},
+		{
+			name:    "retained generations",
+			pattern: regexp.MustCompile(`DOLT_LOG_KEEP_DEFAULT=(\d+)`),
+			want:    strconv.Itoa(defaultManagedDoltLogKeep),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches := tt.pattern.FindAllStringSubmatch(data, -1)
+			if len(matches) == 0 {
+				t.Fatalf("no %s literal found in %s — update this test if the script moved it", tt.pattern, scriptPath)
+			}
+			for _, match := range matches {
+				if match[1] != tt.want {
+					t.Errorf("%s has %q, want %s (the Go managed default)", scriptPath, match[0], tt.want)
+				}
+			}
+		})
+	}
+}

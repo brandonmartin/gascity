@@ -2747,11 +2747,16 @@ func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 func TestRunSetupCommandActivityStreamingSurvivesIdleWindow(t *testing.T) {
 	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
 
+	// Idle budget must tolerate host scheduler jitter under parallel unit-core
+	// load: a 300ms idle with 100ms sleeps flaked when the shell was descheduled
+	// between echos (stdout only reached "progress 1"). Keep total wall time
+	// well above idle so the test still proves output resets the idle clock.
+	const idle = 2 * time.Second
 	err := ops.runSetupCommand(
 		context.Background(),
-		"for i in 1 2 3 4 5 6 7 8 9 10; do echo progress $i; sleep 0.1; done; exit 0",
+		"for i in $(seq 1 40); do echo progress $i; sleep 0.08; done; exit 0",
 		map[string]string{},
-		300*time.Millisecond, // idle budget — total runtime (~1s) far exceeds it
+		idle, // total runtime (~3.2s) exceeds idle even when sleeps stretch
 	)
 	if err != nil {
 		t.Fatalf("streaming setup command killed despite visible progress: %v", err)

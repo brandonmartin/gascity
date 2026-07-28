@@ -26,6 +26,7 @@ import (
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -7186,7 +7187,10 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Under unit-core parallel load a 1.5s wake window and 3s outer deadline
+	// were insufficient for event → transcript reload → SSE emit. Use the
+	// standard goroutine-race budget (TESTING.md deadline rule).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
@@ -7197,7 +7201,7 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+	if body := waitForRecorderSubstring(t, rec, "hello", testutil.GoroutineRaceTimeout); !strings.Contains(body, "hello") {
 		t.Fatalf("stream body missing initial turn: %s", body)
 	}
 
@@ -7224,7 +7228,7 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "event wake turn", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "event wake turn", testutil.GoroutineRaceTimeout)
 
 	cancel()
 	<-done
@@ -7256,7 +7260,7 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
@@ -7267,7 +7271,7 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+	if body := waitForRecorderSubstring(t, rec, "hello", testutil.GoroutineRaceTimeout); !strings.Contains(body, "hello") {
 		t.Fatalf("raw stream body missing initial transcript: %s", body)
 	}
 
@@ -7291,7 +7295,7 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "raw event wake", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "raw event wake", testutil.GoroutineRaceTimeout)
 
 	cancel()
 	<-done

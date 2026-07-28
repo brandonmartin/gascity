@@ -1634,44 +1634,61 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			barrier, err := root.acquireLock(context.Background(), uploaderLockName)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var armed atomic.Bool
-			injected := errors.New("injected peer-successor root sync failure")
+			var armed, injectDone atomic.Bool
+			var successor persistedState
+			syncFail := errors.New("injected peer-successor root sync failure")
 			deps := defaultTestServiceDependencies(home, 2)
 			crossDeviceOpens := 0
 			deps.storageHooks.metadata = func(path string, metadata storageMetadata) storageMetadata {
-				if armed.Load() && test.crossTree && path == queuePath {
+				// Match on base name: storage may pass cleaned absolute paths.
+				if armed.Load() && test.crossTree && (path == queuePath || filepath.Base(path) == queueDirectoryName) {
 					metadata.dev ^= 1 << 63
 				}
 				return metadata
 			}
 			deps.storageHooks.beforeDirectoryOpen = func(path string) error {
-				if armed.Load() && test.crossTree && path == queuePath {
+				if armed.Load() && test.crossTree && (path == queuePath || filepath.Base(path) == queueDirectoryName) {
 					crossDeviceOpens++
 				}
 				return nil
 			}
 			deps.storageHooks.beforeStep = func(step storageStep) error {
 				if armed.Load() && test.failSync && step == storageStepDirectorySync {
-					return injected
+					return syncFail
 				}
 				return nil
 			}
+			// Inject the peer successor only after disable is durable and just
+			// before the uploader lock. Polling for disabled state and writing
+			// from the test goroutine raced beginDisable under unit-core load
+			// (observed class disable-write-failed instead of storage-failure).
+			deps.beforeDisableUploaderLock = func() {
+				owner := readStateFixture(t, home)
+				successor = cleanupSuccessorState(owner)
+				if test.change != nil {
+					test.change(&successor)
+				}
+				writeStateFixture(t, home, successor)
+				armed.Store(test.failSync || test.crossTree)
+				injectDone.Store(true)
+			}
 			deps.disableUploaderWait = testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
-			call := startDisableAndPurge(t, service)
-			owner := waitForMetricsState(t, home, func(state persistedState) bool {
-				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
-			})
-			successor := cleanupSuccessorState(owner)
-			if test.change != nil {
-				test.change(&successor)
+			// Hold the uploader lock so DisableAndPurge reaches
+			// beforeDisableUploaderLock deterministically, then release so
+			// cleanup proceeds against the injected successor.
+			barrier, err := root.acquireLock(context.Background(), uploaderLockName)
+			if err != nil {
+				t.Fatal(err)
 			}
-			writeStateFixture(t, home, successor)
-			armed.Store(test.failSync || test.crossTree)
+			call := startDisableAndPurge(t, service)
+			deadline := time.Now().Add(testutil.GoroutineRaceTimeout)
+			for !injectDone.Load() && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if !injectDone.Load() {
+				t.Fatal("timed out waiting for peer-successor inject hook")
+			}
 			if err := barrier.Release(); err != nil {
 				t.Fatal(err)
 			}
@@ -1686,7 +1703,7 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 			if after := readStateFixture(t, home); after != successor {
 				t.Fatalf("unproven peer successor mutated state:\nwant=%#v\nafter=%#v", successor, after)
 			}
-			if test.failSync && !errors.Is(outcome.err, injected) {
+			if test.failSync && !errors.Is(outcome.err, syncFail) {
 				t.Fatalf("peer sync error lost cause: %v", outcome.err)
 			}
 			if test.crossTree && (!errors.Is(outcome.err, syscall.EXDEV) || crossDeviceOpens != 0) {
@@ -2238,7 +2255,8 @@ func requirePurgeErrorClass(t *testing.T, err error, want PurgeErrorClass) {
 	t.Helper()
 	var classified *PurgeError
 	if !errors.As(err, &classified) || classified.Class != want {
-		t.Fatalf("purge error = %v, want class %q", err, want)
+		// Surface Unwrap cause: PurgeError.Error only prints the class.
+		t.Fatalf("purge error = %v (cause: %v), want class %q", err, errors.Unwrap(err), want)
 	}
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestEventList(t *testing.T) {
@@ -226,33 +228,38 @@ func TestEventStream(t *testing.T) {
 	state := newFakeState(t)
 	ep := state.eventProv.(*events.Fake)
 	h := newTestCityHandler(t, state)
+	server := httptest.NewServer(h)
+	defer server.Close()
 
-	// Create a context with timeout to avoid hanging.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Head-start streams pin afterSeq via LatestSeq before Watch. Recording
+	// before the stream is subscribed races under load: LatestSeq can land
+	// after the recorded event and the watcher never sees it. Open the stream
+	// first (headers flush only after Watch is established), then record.
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+cityURL(state, "/events/stream"), nil)
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
 
-	// Run the handler in a goroutine since it blocks.
-	done := make(chan struct{})
-	go func() {
-		h.ServeHTTP(rec, req)
-		close(done)
-	}()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET events stream: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
 
-	// Give the handler time to set up.
-	time.Sleep(50 * time.Millisecond)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want %q", ct, "text/event-stream")
+	}
 
-	// Record an event.
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker"})
 
-	// Wait for event to be delivered or timeout.
-	time.Sleep(100 * time.Millisecond)
-	cancel() // Stop the stream.
-	<-done
-
-	body := rec.Body.String()
+	body := readSSEUntil(t, resp.Body, `"type":"session.woke"`, testutil.GoroutineRaceTimeout)
 	// Event name is now "event" (documented in OpenAPI spec via sse.Register).
 	// The actual event type is in the JSON body's "type" field.
 	if !strings.Contains(body, "event: event") {
@@ -263,11 +270,6 @@ func TestEventStream(t *testing.T) {
 	}
 	if !strings.Contains(body, "id: 1") {
 		t.Errorf("SSE body missing event id, got: %s", body)
-	}
-
-	// Check SSE headers.
-	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
 	}
 }
 
@@ -321,19 +323,28 @@ func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
 	}
 
 	h := newTestCityHandler(t, state)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	// Same head-start LatestSeq race as TestEventStream: subscribe first, then record.
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+cityURL(state, "/events/stream"), nil)
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
 
-	done := make(chan struct{})
-	go func() {
-		h.ServeHTTP(rec, req)
-		close(done)
-	}()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET events stream: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
 
-	time.Sleep(50 * time.Millisecond)
 	state.eventProv.(*events.Fake).Record(events.Event{
 		Type:    events.BeadUpdated,
 		Actor:   "worker",
@@ -341,11 +352,7 @@ func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
 		Payload: payload,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
-	body := rec.Body.String()
+	body := readSSEUntil(t, resp.Body, `"workflow_id":"wf_123"`, testutil.GoroutineRaceTimeout)
 	if !strings.Contains(body, `"workflow":{"type":"workflow:event"`) {
 		t.Fatalf("SSE body missing workflow projection: %s", body)
 	}
@@ -354,6 +361,45 @@ func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
 	}
 	if !strings.Contains(body, `"scope_kind":"city"`) {
 		t.Fatalf("SSE body missing logical scope: %s", body)
+	}
+}
+
+// readSSEUntil reads from an SSE response body until want appears or timeout.
+// Used by head-start stream tests that must record events only after subscribe.
+func readSSEUntil(t *testing.T, body io.Reader, want string, timeout time.Duration) string {
+	t.Helper()
+	type result struct {
+		data string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var buf strings.Builder
+		tmp := make([]byte, 4096)
+		for {
+			n, err := body.Read(tmp)
+			if n > 0 {
+				buf.Write(tmp[:n])
+				if strings.Contains(buf.String(), want) {
+					ch <- result{data: buf.String()}
+					return
+				}
+			}
+			if err != nil {
+				ch <- result{data: buf.String(), err: err}
+				return
+			}
+		}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil && !strings.Contains(r.data, want) {
+			t.Fatalf("SSE read failed before %q: %v; body=%s", want, r.err, r.data)
+		}
+		return r.data
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for SSE substring %q", want)
+		return ""
 	}
 }
 

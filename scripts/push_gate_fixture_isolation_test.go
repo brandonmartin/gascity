@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,10 +152,22 @@ printf ACQUIRED`,
 
 // holdPushGateSlot locks slotFile for the rest of the test, so the probe faces
 // a fully occupied slot directory.
+//
+// The holder announces ownership on stdout the moment flock(1) hands it the
+// lock, and only then replaces itself with the long sleep that keeps the slot
+// occupied. Waiting on that marker is a lifecycle signal, not elapsed wall
+// time: it costs nothing on the happy path, and the timeout below fires only
+// when the holder genuinely fails to lock.
 func holdPushGateSlot(t *testing.T, slotFile string) {
 	t.Helper()
 
-	holder := exec.Command("flock", slotFile, "sleep", "300")
+	const heldMarker = "HELD"
+
+	holder := exec.Command("flock", slotFile, "bash", "-c", "printf "+heldMarker+"; exec sleep 300")
+	announced, err := holder.StdoutPipe()
+	if err != nil {
+		t.Fatalf("pipe push-gate slot holder stdout: %v", err)
+	}
 	if err := holder.Start(); err != nil {
 		t.Fatalf("start push-gate slot holder: %v", err)
 	}
@@ -162,14 +176,27 @@ func holdPushGateSlot(t *testing.T, slotFile string) {
 		_ = holder.Wait()
 	})
 
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if err := exec.Command("flock", "-n", slotFile, "true").Run(); err != nil {
-			return // the holder owns the lock; the probe now faces a full slot set
+	held := make(chan error, 1)
+	go func() {
+		marker := make([]byte, len(heldMarker))
+		if _, err := io.ReadFull(announced, marker); err != nil {
+			held <- err
+			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("push-gate slot holder never locked %s", slotFile)
+		if string(marker) != heldMarker {
+			held <- fmt.Errorf("announced %q, want %q", marker, heldMarker)
+			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		held <- nil
+	}()
+
+	select {
+	case err := <-held:
+		if err != nil {
+			t.Fatalf("push-gate slot holder never locked %s: %v", slotFile, err)
+		}
+		// The holder owns the lock; the probe now faces a full slot set.
+	case <-time.After(30 * time.Second):
+		t.Fatalf("push-gate slot holder never locked %s within 30s", slotFile)
 	}
 }

@@ -1025,7 +1025,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
 		sessionBeads,
-		dsResult.PoolScaleCheckPartialTemplates,
+		effectivePoolPartialRetentionTemplates(dsResult),
 	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
@@ -1238,7 +1238,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			if _, err := os.Stat(abs); err == nil {
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashPathContent(abs),
+					Probed: true, ContentHash: runtime.HashHookSettingsContent(abs, rel),
 				})
 			}
 		}

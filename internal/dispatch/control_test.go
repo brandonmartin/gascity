@@ -713,6 +713,59 @@ func TestProcessRetryControlRetriesInvalidWorkerResultContract(t *testing.T) {
 	}
 }
 
+// TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry reproduces
+// gc-e2xqk end to end: a typed deliverable close must not mint attempt 2.
+func TestProcessRetryControlFoldsTypedCoordinatorOutcomeWithoutRetry(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review.attempt.1",
+			"gc.attempt":          "1",
+			"gc.outcome.producer": "formula-step",
+		},
+	})
+	// gc-outcome-close records work_id = the closed bead's own ID.
+	disposition := fmt.Sprintf(`{"contract_version":1,"disposition":"deliverable","work_id":%q,"recorded_by":"formula-step","reason":"done","producer":"formula-step"}`, attempt1.ID)
+	if err := store.SetMetadata(attempt1.ID, "gc.coordinator_outcome.producer_disposition", disposition); err != nil {
+		t.Fatalf("set producer_disposition: %v", err)
+	}
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass (no spurious retry)", result)
+	}
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = status %q outcome %q, want closed/pass", after.Status, after.Metadata["gc.outcome"])
+	}
+}
+
 func TestProcessRetryControlClosesEnclosingScopeOnFailure(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()

@@ -350,7 +350,8 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 // The limit is pushed to the backing (AllowBackingCreatedLimit): this read
 // projects a newest-first listing, so the bound is over created_at — the very
 // column the sort key uses — and a bounded backing read returns the same prefix
-// the client-side cut would. Fetching the full retained corpus and trimming
+// the client-side cut would, up to which of two runs sharing a `created_at`
+// lands on the last row. Fetching the full retained corpus and trimming
 // afterwards is what made `gc order history` cost 22s on a city with 11k+
 // order-run rows (ga-klv). At the limit boundary the backing breaks created_at
 // ties by id ASC rather than the canonical id DESC, so which of two runs sharing

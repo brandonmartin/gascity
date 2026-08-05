@@ -252,6 +252,9 @@ type orderHistoryBounds struct {
 // rejected at the edge so a typo fails loudly instead of silently widening the
 // read to everything.
 func parseOrderHistoryBounds(limit int, since string) (orderHistoryBounds, error) {
+	if limit < 0 {
+		return orderHistoryBounds{}, fmt.Errorf("--limit %d: want a non-negative count (0 fetches every retained run)", limit)
+	}
 	bounds := orderHistoryBounds{Limit: limit}
 	trimmed := strings.TrimSpace(since)
 	if trimmed == "" {
@@ -1371,6 +1374,14 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 	// missing route=api.
 	if name == "" {
 		logRoute(stderr, "order history", "fallback", "multi-order")
+		return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
+	}
+
+	// The API has no wire representation for an unlimited read: omitting
+	// `limit` selects the server's own default (20), not "everything". Stay
+	// on the local iterator so `--limit 0` keeps meaning every retained run.
+	if bounds.Limit <= 0 {
+		logRoute(stderr, "order history", "fallback", "unlimited")
 		return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
 	}
 

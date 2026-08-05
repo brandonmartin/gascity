@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -217,6 +221,66 @@ func TestOrderHistoryLimitReachesStoreQuery(t *testing.T) {
 		if q.Limit != 5 {
 			t.Fatalf("query %d: Limit = %d, want 5 pushed into the read", i, q.Limit)
 		}
+	}
+}
+
+// TestOrderHistoryUnlimitedAvoidsAPIRoute pins the routing half of the
+// `--limit 0` contract. The API has no wire representation for an unlimited
+// read: GetOrderHistory omits `limit` when it is non-positive, and the server
+// then applies its own default of 20 rows. An API-routed `--limit 0` would
+// therefore silently return 20 runs while the flag help promises every
+// retained one, so an unbounded read must stay on the local iterator.
+func TestOrderHistoryUnlimitedAvoidsAPIRoute(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1") // force route=... lines into the stderr buffer
+
+	cityPath := writeOrderHistoryTestCity(t)
+	cfg, err := loadCityConfig(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	aa, code := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
+	if code != 0 {
+		t.Fatalf("loadAllOrders = %d", code)
+	}
+
+	// A live, healthy API client: the only reason to skip it here is the
+	// unlimited bound itself, so any hit proves the routing regressed.
+	var apiHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		okOrderHistoryHandler(t).ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{}, false, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=fallback reason=unlimited") {
+		t.Fatalf("stderr missing %q:\n%s", "route=fallback reason=unlimited", stderr.String())
+	}
+	if n := apiHits.Load(); n != 0 {
+		t.Fatalf("API handler hit %d times; an API-routed --limit 0 returns the server's 20-row default, not every retained run", n)
+	}
+}
+
+// TestOrderHistoryRejectsNegativeLimit keeps 0 as the only spelling of
+// "unlimited". A negative limit was previously accepted and read two different
+// ways — unlimited locally, the server's 20-row default over the API — so it
+// is rejected at the CLI edge instead.
+func TestOrderHistoryRejectsNegativeLimit(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newOrderHistoryCmd(&stdout, &stderr)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--limit", "-1"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("gc order history --limit -1 returned nil error, want a validation failure")
+	}
+	if combined := stdout.String() + stderr.String(); !strings.Contains(combined, "--limit") {
+		t.Fatalf("output = %q, want it to name --limit", combined)
 	}
 }
 

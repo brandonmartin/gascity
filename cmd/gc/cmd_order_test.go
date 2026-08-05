@@ -3823,7 +3823,7 @@ func TestRouteOrderHistory_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, tc.nilReason, orderHistoryBounds{}, false, &stdout, &stderr)
+			got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, tc.nilReason, orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr)
 
 			if got != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", got, tc.wantExit, stderr.String(), stdout.String())
@@ -3921,7 +3921,7 @@ func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{}, false, &stdout, &stderr); code != 0 {
+	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age: 45s") {

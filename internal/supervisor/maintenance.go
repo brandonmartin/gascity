@@ -489,9 +489,10 @@ func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
 	}
 }
 
-// checkDiskPreflight checks free space in cityPath's filesystem before a
-// disk-growing operation (CALL DOLT_GC). Returns true when the GC should be
-// skipped (CRITICAL), false when it may proceed. Side-effects: emits
+// checkDiskPreflight checks free space in cityPath's filesystem before the
+// disk-growing stages of a maintenance cycle (snapshot, then CALL DOLT_GC).
+// Returns true when both stages should be skipped (CRITICAL), false when the
+// cycle may proceed. Side-effects: emits
 // StoreDiskWarn or StoreDiskCritical events and logs to stderr.
 // Fails open: a probe error or a nil DiskFreeBytes always returns false.
 func (m *StoreMaintenanceLoop) checkDiskPreflight() bool {
@@ -507,7 +508,7 @@ func (m *StoreMaintenanceLoop) checkDiskPreflight() bool {
 	if free < m.diskMinFreeBytes {
 		m.emitDiskEvent(events.StoreDiskCritical, free)
 		fmt.Fprintf(m.stderr, //nolint:errcheck
-			"store-maintenance: disk CRITICAL — %.1f GiB free (floor %.1f GiB) on %s; skipping CALL DOLT_GC\n",
+			"store-maintenance: disk CRITICAL — %.1f GiB free (floor %.1f GiB) on %s; skipping snapshot and CALL DOLT_GC\n",
 			float64(free)/gib, float64(m.diskMinFreeBytes)/gib, m.cityPath)
 		return true
 	}

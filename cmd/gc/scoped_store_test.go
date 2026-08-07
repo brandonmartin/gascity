@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,104 @@ import (
 func noopBdRunner() beads.CommandRunner {
 	return func(string, string, ...string) ([]byte, error) {
 		return nil, nil
+	}
+}
+
+// TestScopedBdStoreForCityResolvesWorkspacePinnedBdBinary is the controller-path
+// regression for an authoritative external beads binding. The long-lived
+// city store replaces its bd command with the workspace-pinned executable,
+// but the short-lived, context-bound store used by controller reads must make
+// the same selection. BD_BIN alone is not a contract of the bd CLI: unless
+// the runner resolves it, exec still finds the ambient `bd` on PATH.
+//
+// The unconfigured subtest protects the opposite boundary: ordinary cities
+// continue to invoke the ambient command named exactly "bd".
+func TestScopedBdStoreForCityResolvesWorkspacePinnedBdBinary(t *testing.T) {
+	makeCity := func(t *testing.T, workspacePath string) string {
+		t.Helper()
+		cityDir := t.TempDir()
+		cityTOML := "[workspace]\nname = \"demo\"\n"
+		if workspacePath != "" {
+			cityTOML += "[workspace.env]\nPATH = " + strconv.Quote(workspacePath) + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return cityDir
+	}
+
+	t.Run("workspace-pinned", func(t *testing.T) {
+		pinnedDir := t.TempDir()
+		writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nprintf '[]\\n'\n")
+
+		ambientDir := t.TempDir()
+		writeExecutable(t, filepath.Join(ambientDir, "bd"), "#!/bin/sh\necho ambient-bd-was-used >&2\nexit 23\n")
+		t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		store, err := scopedBdStoreForCity(context.Background(), makeCity(t, pinnedDir))
+		if err != nil {
+			t.Fatalf("scopedBdStoreForCity: %v", err)
+		}
+		if _, err := store.List(beads.ListQuery{AllowScan: true}); err != nil {
+			t.Fatalf("List used ambient bd instead of workspace-pinned bd: %v", err)
+		}
+	})
+
+	t.Run("unconfigured", func(t *testing.T) {
+		ambientDir := t.TempDir()
+		writeExecutable(t, filepath.Join(ambientDir, "bd"), "#!/bin/sh\nprintf '[]\\n'\n")
+		t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		store, err := scopedBdStoreForCity(context.Background(), makeCity(t, ""))
+		if err != nil {
+			t.Fatalf("scopedBdStoreForCity: %v", err)
+		}
+		if _, err := store.List(beads.ListQuery{AllowScan: true}); err != nil {
+			t.Fatalf("List with default bd command: %v", err)
+		}
+	})
+}
+
+func TestRequireBdBinaryForCityAcceptsAbsoluteBDBinForCompleteBinding(t *testing.T) {
+	pinnedDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nexit 0\n")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinnedDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noBdDir := t.TempDir()
+	t.Setenv("PATH", noBdDir)
+
+	if err := requireBdBinaryForCity(cityDir); err != nil {
+		t.Fatalf("workspace-pinned bd preflight: %v", err)
+	}
+}
+
+func TestRequireBdBinaryForCityRejectsWorkspacePinWithoutCompleteBinding(t *testing.T) {
+	pinnedDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nexit 0\n")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinnedDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	if err := requireBdBinaryForCity(cityDir); err == nil {
+		t.Fatal("workspace pin without complete binding passed preflight, want ambient bd failure")
 	}
 }
 

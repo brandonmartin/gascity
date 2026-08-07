@@ -111,6 +111,32 @@ func TestFastParallelLeavesTimeoutDefaultToTheRunner(t *testing.T) {
 	}
 }
 
+// TestLocalParallelWithholdsTimeoutFromIntegrationJobs pins the one-way half of
+// the budget contract. scripts/test-integration-shard reads the same
+// GO_TEST_TIMEOUT with its own 30m default, so forwarding the fan-out's 20m to
+// the integration jobs would silently cut that budget by a third — a change
+// that looks like tidying up an inconsistency and reads as flakiness later.
+// The runner documents this in a comment; this test is what defends it.
+func TestLocalParallelWithholdsTimeoutFromIntegrationJobs(t *testing.T) {
+	script := localParallelScript(t)
+
+	if body := shellFunctionBody(t, script, "add_integration_jobs"); strings.Contains(body, "GO_TEST_TIMEOUT") {
+		t.Fatalf("integration jobspecs must not carry GO_TEST_TIMEOUT; scripts/test-integration-shard owns its own 30m default:\n%s", body)
+	}
+
+	match := perJobEnvAllowlist.FindStringSubmatch(script)
+	if match == nil {
+		t.Fatal("scripts/test-local-parallel no longer wraps each job in an `env -i` allowlist")
+	}
+	if strings.Contains(match[1], "GO_TEST_TIMEOUT") {
+		t.Fatalf("the per-job `env -i` allowlist names GO_TEST_TIMEOUT, so the fan-out's budget would reach the integration shards and cut 30m to 20m:\n%s", match[1])
+	}
+}
+
+// perJobEnvAllowlist captures the variable allowlist the worker shell passes
+// through `env -i` before invoking each jobspec.
+var perJobEnvAllowlist = regexp.MustCompile(`(?s)env -i \\(.*?)bash -lc`)
+
 // unitCoreJobCommand returns the `go test` command line the unit-core jobspec
 // hands to each worker shell, with the script's own shell variables resolved.
 func unitCoreJobCommand(t *testing.T) string {

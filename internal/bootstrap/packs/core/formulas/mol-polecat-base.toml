@@ -208,14 +208,27 @@ in under two days. Search the shared prefix, or the package name:
 ```bash
 if [ "$LOOKUP_RC" -eq 0 ] && [ -z "$EXISTING" ]; then
     SYMPTOM_FAMILY="<shared test prefix or failing package, e.g. TestDisableAndPurge>"
-    gc bd list --title-contains "$SYMPTOM_FAMILY" --status open,in_progress,blocked --json
+    FAMILY_MATCHES=$(gc bd list --title-contains "$SYMPTOM_FAMILY" --status open,in_progress,blocked --json)
+    FAMILY_RC=$?
+    if [ "$FAMILY_RC" -ne 0 ]; then
+        echo "Family lookup failed (rc=$FAMILY_RC). NOT filing — a failed lookup is not proof the bead is missing."
+    else
+        printf '%s' "$FAMILY_MATCHES" | jq -r '.[] | "\\(.id)\\t\\(.title)"'
+    fi
 fi
 ```
 
 Read what comes back rather than matching on the string alone. A hit whose
 symptom is genuinely the same defect — same package, same failure mode —
-means comment on it as in 3c. A hit that merely shares a prefix but fails
-for a different reason is not your bead; keep going to 3d.
+means comment on it as in 3c. Set it by hand — this one is a judgement
+call, so nothing assigns it for you:
+
+```bash
+EXISTING="<the bead id you judged to be the same defect>"
+```
+
+A hit that merely shares a prefix but fails for a different reason is not
+your bead; keep going to 3d.
 
 **3c. If `$EXISTING` is set — comment, do not file:**
 
@@ -232,11 +245,14 @@ polecat to redo merged work:
 
 ```bash
 CUTOFF=$(date -u -d '7 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-7d +%Y-%m-%d)
-gc bd list --title-contains "$SYMPTOM_KEY" --status closed --closed-after "$CUTOFF" --json
+CLOSED_MATCHES=$(gc bd list --title-contains "$SYMPTOM_KEY" --status closed --closed-after "$CUTOFF" --json)
+CLOSED_RC=$?
 ```
 
-On a match: re-fetch `origin/{{base_branch}}`, reset your worktree to the
-current tip, and re-run the pre-flight before filing anything.
+On a match — or on a non-zero `$CLOSED_RC`, since a failed lookup is not
+proof the fix has not landed — re-fetch `origin/{{base_branch}}`, reset your
+worktree to the current tip, and re-run the pre-flight before filing
+anything.
 
 **3e. Only now file it** — with the symptom key verbatim in the title, so
 the next polecat's 3b lookup finds your bead. Put the full failure,
@@ -251,7 +267,9 @@ gc mail send <rig>/witness -s "NOTICE: {{base_branch}} has failing pre-flights" 
 ```
 
 **Exit criteria:** Pre-flights pass, or the failure is recorded exactly once
-— a new bead you filed, or your comment on the bead that already had it."""
+— a new bead you filed, or your comment on the bead that already had it —
+or, when the ledger lookup itself was broken, witness has been notified
+instead."""
 
 [[steps]]
 id = "implement"

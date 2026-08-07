@@ -21,6 +21,13 @@ type formulaFile struct {
 }
 
 // readFormula decodes a formula TOML from the embedded core pack.
+//
+// file stays parameterized even though every current caller passes
+// mol-polecat-base.toml: the pack ships sibling formulas (mol-polecat-commit,
+// mol-polecat-report) that inherit these steps, and the next test to pin one of
+// them reads it through this same helper.
+//
+//nolint:unparam // see above
 func readFormula(t *testing.T, file string) formulaFile {
 	t.Helper()
 	data, err := fs.ReadFile(PackFS, "formulas/"+file)
@@ -122,6 +129,36 @@ func TestPolecatPreflightKeysOnTestFunctionNotSubtest(t *testing.T) {
 	createAt := strings.Index(step, "gc bd create")
 	if createAt >= 0 && familyAt > createAt {
 		t.Error("the family lookup must run before `gc bd create`, not after it")
+	}
+
+	// The family branch is a judgement call, so nothing auto-assigns the match —
+	// but the step must still tell the agent how to hand a family hit to 3c, or
+	// 3c's `gc bd comment "$EXISTING"` runs with an empty id.
+	if !strings.Contains(step, `EXISTING="<the bead id you judged to be the same defect>"`) {
+		t.Error("3b2 must show how to set $EXISTING for a family match; 3c cannot comment without it")
+	}
+	if !strings.Contains(step, "FAMILY_RC") {
+		t.Error("the family lookup must capture its exit status; a failed lookup is not an all-clear")
+	}
+}
+
+// TestPolecatPreflightChecksRecentlyClosedBeforeFiling pins the staleness gate.
+//
+// Re-filing a defect that already merged puts a ready bead in the pool, and the
+// next sling dispatches a polecat to redo merged work.
+func TestPolecatPreflightChecksRecentlyClosedBeforeFiling(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-polecat-base.toml"), "preflight-tests")
+
+	closedAt := strings.Index(step, "--closed-after")
+	if closedAt < 0 {
+		t.Fatal("preflight-tests must check recently-closed beads before filing; a stale baseline otherwise re-files merged work")
+	}
+	createAt := strings.Index(step, "gc bd create")
+	if createAt >= 0 && closedAt > createAt {
+		t.Error("the recently-closed check must run before `gc bd create`, not after it")
+	}
+	if !strings.Contains(step, "CLOSED_RC") {
+		t.Error("the recently-closed lookup must capture its exit status; a failed lookup is not proof the fix has not landed")
 	}
 }
 

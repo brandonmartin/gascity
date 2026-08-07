@@ -579,14 +579,16 @@ wins:
 LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
 ```
 
-Every job in a parallel runner — the `unit-core` package sweep and the `cmd/gc`
-shards alike — gets the same 20m per-package `go test` budget. A package's wall
+Both `go test` jobs in `make test-fast-parallel` — the `unit-core` package sweep
+and the `cmd/gc` shards — share one 20m per-package budget. A package's wall
 time under the fan-out is well above its runtime in isolation, so with Go's
 built-in 10m default (which the unit sweep alone used to inherit) contention
 panicked six packages with `test timed out after 10m0s` while they were still
 working through their test lists. The unit sweep and the shards contend for the
-same box, so they share one number rather than drifting onto two. Raise it on a
-slow or heavily shared host:
+same box, so they share one number rather than drifting onto two. The
+integration shards keep `scripts/test-integration-shard`'s own 30m default, and
+the `productmetrics-testhook` job scheduled by `full`/`cmd-gc-process` still
+inherits Go's 10m. Raise it on a slow or heavily shared host:
 
 ```bash
 GO_TEST_TIMEOUT=30m make test-fast-parallel

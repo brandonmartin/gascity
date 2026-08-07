@@ -63,14 +63,18 @@ unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
 
-# One per-package go test budget for every job in this runner. The fan-out runs
-# LOCAL_TEST_JOBS heavyweight test binaries at once, so a package's wall time
-# here is far above its runtime in isolation and Go's built-in 10m default fires
-# on aggregate load rather than on a real hang: six packages panicked with "test
-# timed out after 10m0s" while still working through their test lists, which made
-# this target unusable as the merge baseline (ga-9au). The unit sweep and the
-# cmd/gc shards contend for the same box, so they share one number — two
-# independently tuned budgets are what drifted apart before.
+# One per-package go test budget for the unit sweep and the cmd/gc shards. The
+# fan-out runs LOCAL_TEST_JOBS heavyweight test binaries at once, so a package's
+# wall time here is far above its runtime in isolation and Go's built-in 10m
+# default fires on aggregate load rather than on a real hang: six packages
+# panicked with "test timed out after 10m0s" while still working through their
+# test lists, which made this target unusable as the merge baseline (ga-9au).
+# The unit sweep and the cmd/gc shards contend for the same box, so they share
+# one number — two independently tuned budgets are what drifted apart before.
+# GO_TEST_TIMEOUT deliberately does not reach the integration jobs: it is not
+# in the per-job `env -i` allowlist below and is not prefixed onto their
+# jobspecs, so scripts/test-integration-shard keeps its own 30m default.
+# Adding it there would silently cut that budget from 30m to 20m.
 go_test_timeout="${GO_TEST_TIMEOUT:-20m}"
 
 if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then

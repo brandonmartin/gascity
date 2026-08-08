@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -236,5 +237,43 @@ func TestReapSkipTracker_TracksPathsIndependently(t *testing.T) {
 	}
 	if reasons := skipReasonsFor(t, fake, changing); len(reasons) != 2 {
 		t.Errorf("changing worktree emitted %d events, want 2: %q", len(reasons), reasons)
+	}
+}
+
+// TestReapSkipTracker_SuppressesQuarantineRepeats pins that the freshness
+// class deduplicates like every other skip class. The reason string is the
+// tracker's key, so any per-sweep-varying component in it (an elapsed age at
+// second resolution, say) silently defeats suppression for that whole class.
+//
+// The worktree is aged forward between passes — still well inside the default
+// quarantine window — because that is what real sweeps see: the controller
+// ticks every ~12s and the tree's elapsed age is different every time. Three
+// passes run back-to-back share one wall-clock second and would agree on any
+// age reading, so they cannot tell a stable reason from a volatile one.
+func TestReapSkipTracker_SuppressesQuarantineRepeats(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	wt := addClosedWorktreeWithAge(t, rigRoot, cityPath, "builder", "ga-quar001", 0)
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-quar001", Status: "closed"}}, nil)
+	cfg := reapTestConfig(rigRoot) // default quarantine window
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	fake := events.NewFake()
+	skips := newReapSkipTracker()
+	var stderr bytes.Buffer
+
+	for pass := 1; pass <= 3; pass++ {
+		backdateWorktreeGitFile(t, wt, time.Duration(pass)*time.Minute)
+		report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, fake, skips, &stderr)
+		if len(report.Protected) != 1 {
+			t.Fatalf("pass %d: Protected = %+v, want exactly 1 quarantine entry regardless of suppression", pass, report.Protected)
+		}
+	}
+
+	reasons := skipReasonsFor(t, fake, wt)
+	if len(reasons) != 1 {
+		t.Fatalf("emitted %d quarantine reap_skipped events across 3 passes, want exactly 1: %q", len(reasons), reasons)
+	}
+	if !strings.Contains(reasons[0], "quarantine") {
+		t.Errorf("reason = %q, want it to name the quarantine protection", reasons[0])
 	}
 }

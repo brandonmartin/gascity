@@ -207,7 +207,7 @@ func reapClosedBeadWorktrees(
 			case !ok:
 				reason = "worktree age indeterminate (failing closed)"
 			case minAge > 0 && age < minAge:
-				reason = fmt.Sprintf("worktree too young to reap (quarantine): age=%s min_age=%s", age.Round(time.Second), minAge)
+				reason = fmt.Sprintf("worktree too young to reap (quarantine): min_age=%s", minAge)
 			}
 			if reason != "" {
 				branch, _ := git.New(worktreePath).CurrentBranch()

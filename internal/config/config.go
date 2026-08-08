@@ -2586,8 +2586,11 @@ type DaemonConfig struct {
 	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
 	// automatically removes per-bead git worktrees once their associated
 	// work bead reaches closed status. Only worktrees with a clean working
-	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
-	// are logged as warnings and left in place for operator review. Session
+	// tree, no stashes, and no commits that removal would orphan — commits
+	// reachable from no branch, tag, or remote-tracking ref — are removed;
+	// push state is deliberately not the test, since `git worktree remove`
+	// deletes the checkout and not refs/heads. Unsafe worktrees are logged
+	// as warnings and left in place for operator review. Session
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`

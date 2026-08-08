@@ -25,6 +25,7 @@ City is the top-level configuration for a Gas City instance.
 | `named_session` | []NamedSession |  |  | NamedSessions lists canonical alias-backed sessions built from reusable agent templates. |
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
+| `storage` | StorageConfig |  |  | Storage assigns the six semantic storage classes to immutable named bindings. Nil preserves the existing all-Work storage topology. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
@@ -366,6 +367,7 @@ DoltConfig holds optional dolt server overrides.
 | `max_connections` | integer |  | `256` | MaxConnections overrides the managed Dolt listener max_connections. 0 means use the managed default. |
 | `read_timeout_millis` | integer |  | `15000` | ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis. 0 means use the managed default. |
 | `write_timeout_millis` | integer |  | `300000` | WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis. 0 means use the managed default. |
+| `wait_timeout_seconds` | integer |  | `30` | WaitTimeoutSeconds overrides the managed server's wait_timeout system variable, which is how long Dolt keeps an idle connection before reaping it. Cities that raise ReadTimeoutMillis above the reconcile tick gap generally need this raised with it, or the controller's long-lived dispatch-pool connections are still reaped between ticks. Before this field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process environment, which no city.toml could express and no shell-invoked restart inherited — so a restart from an operator shell silently rewrote the value. 0 (omitted) means use the managed default. |
 | `dolt_lock_release_timeout` | string |  | `1m` | DoltLockReleaseTimeout is how long managed-dolt lifecycle operations wait for dolt's on-disk exclusive store locks (the root-level `&lt;data_dir&gt;/.dolt/noms/LOCK` and per-database `&lt;data_dir&gt;/&lt;db&gt;/.dolt/noms/LOCK` forms) to be released by a prior server process before failing closed. The start path refuses to launch a second `dolt sql-server` against a data_dir whose lock is still held — a prior instance that is shutting down holds the lock until its chunk journal is flushed, and binding before release corrupts the journal (see gastownhall/gascity#3174). The stop path uses the same window to wait for lock release after process exit before reporting success. Duration string (e.g., "1m", "90s"). Defaults to "1m", which covers the flush window of multi-GB journals on commodity SSDs. Set to "0s" to probe once with no wait (still fail-closed when held). Negative values are rejected at config load. The managed lifecycle also projects this value into the gc-beads-bd.sh shell fallback as GC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor the configured window. |
 
 ## DoltMaintenance
@@ -823,6 +825,38 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## StorageBindingConfig
+
+StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; SQLite accepts `path` (default `.gc/store`), while other providers accept an opaque `config_ref` resolved by that provider.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | **yes** |  | Provider is the exact ID of a provider compiled into this gc binary. |
+| `path` | string |  | `.gc/store` | Path is the SQLite binding root. Empty defaults to ".gc/store". |
+| `config_ref` | string |  |  | ConfigRef is an opaque, secret-free reference resolved by a non-built-in provider. |
+
+## StorageClasses
+
+StorageClasses is the closed set of semantic storage assignments; when `[storage]` is authored, all six fields are required after fragment layering, while omission assigns every class to `work`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `work` | string | **yes** |  | Work selects the binding for the shareable work ledger. |
+| `graph` | string | **yes** |  | Graph selects the binding for formula graph state. |
+| `sessions` | string | **yes** |  | Sessions selects the binding for session lifecycle and durable waits. |
+| `messaging` | string | **yes** |  | Messaging selects the binding for mail and external-message state. |
+| `orders` | string | **yes** |  | Orders selects the binding for order-run state. |
+| `nudges` | string | **yes** |  | Nudges selects the binding for the durable nudge queue. |
+
+## StorageConfig
+
+StorageConfig assigns each semantic storage class to a named binding and defines every nonreserved binding used by those assignments; omitting `[storage]` keeps every class on the reserved `work` binding.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `classes` | StorageClasses | **yes** |  | Classes contains the complete class-to-binding assignment. |
+| `bindings` | map[string]StorageBindingConfig |  |  | Bindings defines named provider-backed bindings. The reserved work binding is synthesized and must not appear here. |
 
 ## Tier
 

@@ -239,6 +239,33 @@ read_timeout_millis = -1
 	}
 }
 
+// TestLoadRejectsNegativeDoltWaitTimeoutSeconds pins wait_timeout_seconds to the
+// same non-negative rule as its sibling listener overrides. A negative value in
+// city.toml would load clean and then be discarded by the > 0 resolution guard,
+// so the operator would see the managed default with no diagnostic. The negative
+// escape hatch that suppresses the system variable entirely stays env-only, via
+// GC_DOLT_WAIT_TIMEOUT.
+func TestLoadRejectsNegativeDoltWaitTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(path, []byte(`
+[workspace]
+name = "bright-lights"
+
+[dolt]
+wait_timeout_seconds = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(fsys.OSFS{}, path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want negative wait_timeout_seconds rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "[dolt] wait_timeout_seconds must not be negative") {
+		t.Fatalf("Load() error = %q, want wait_timeout_seconds rejection", got)
+	}
+}
+
 func TestParseWithAgentsAndStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -1831,13 +1858,13 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Errorf("EffectiveWorkQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQuery() missing run_target migration fallback: %q", got)
 	}
 	for _, want := range []string{`.metadata`, `.[:1]`} {
@@ -1853,7 +1880,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105})
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json --sort oldest --limit=20`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
@@ -2273,7 +2300,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *te
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json --sort oldest --limit=20")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
     ;;
   *)
@@ -2403,7 +2430,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 	// resume its own assigned ephemeral epic wisp (the patrol-loop pattern).
 	wantPresent := []string{
 		// routed/pool tier still excludes epics (gc-udx guard)
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		// assigned tiers carry NO epic exclusion
 		`bd list --status in_progress --assignee="$id" --json`,
 		`bd ready --assignee="$id" --json`,
@@ -2429,7 +2456,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	wantPresent := []string{
-		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
+		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		`bd list --status in_progress --assignee="$cand" --json`,
 		`bd ready --assignee="$cand" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
@@ -8197,6 +8224,31 @@ func TestPackDirsForRig(t *testing.T) {
 	want = []string{"/city/packs/a", "/shared/packs/common"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("PackDirsForRig(missing) = %v, want %v", got, want)
+	}
+}
+
+// TestPackDirsForRigEmptyRigNameFallsBackToAllPackDirs guards the scope="city"
+// agent fix: an empty rigName must resolve every rig's pack dirs via
+// AllPackDirs, not just the city-level ones, so city-scope agents (e.g.
+// deep-investigator, supervisor, pack-author) can see rig-imported fragments.
+func TestPackDirsForRigEmptyRigNameFallsBackToAllPackDirs(t *testing.T) {
+	c := &City{
+		PackDirs: []string{"/city/packs/a"},
+		RigPackDirs: map[string][]string{
+			"zulu":  {"/rig/zulu/packs/z"},
+			"alpha": {"/rig/alpha/packs/x"},
+		},
+	}
+
+	got := c.PackDirsForRig("")
+	want := c.AllPackDirs()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PackDirsForRig(\"\") = %v, want AllPackDirs() = %v", got, want)
+	}
+
+	justCityDirs := []string{"/city/packs/a"}
+	if reflect.DeepEqual(got, justCityDirs) {
+		t.Fatalf("PackDirsForRig(\"\") = %v, regressed to city-only dirs (dropped RigPackDirs)", got)
 	}
 }
 

@@ -174,7 +174,7 @@ func TestResolveBdScopeTarget(t *testing.T) {
 
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, beadID string) bool {
 		return beadID == "projectwrenunity-0xk" || beadID == "projectwrenunity-abc"
 	}
 	cityDir := filepath.Join(t.TempDir(), "city")
@@ -387,7 +387,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 	setCwd(t, t.TempDir())
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, _ execStoreTarget, _ string) bool { return false }
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, _ string) bool { return false }
 
 	cityDir := filepath.Join(t.TempDir(), "city")
 	cfg := &config.City{
@@ -443,7 +443,7 @@ func TestResolveBdScopeTargetUsesGCRIGEnv(t *testing.T) {
 		// Restore bdBeadExists to return true for a wren bead
 		origProbe2 := bdBeadExists
 		defer func() { bdBeadExists = origProbe2 }()
-		bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+		bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, beadID string) bool {
 			return beadID == "projectwrenunity-0xk" && target.RigName == "wren"
 		}
 		got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "projectwrenunity-0xk"}, false, io.Discard)
@@ -649,7 +649,7 @@ func TestGcBdUsesProjectionNotAmbientEnv(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, beadID string) bool {
 		return beadID == "repo-abc"
 	}
 	cityFlag = ""
@@ -896,7 +896,7 @@ func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
 	}()
 	cityFlag = ""
 	rigFlag = ""
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "repo")
@@ -1239,13 +1239,16 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)
 	}
-	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	const projectID = "gc-rig-worktree-consistency-test"
 	setupQueries := append(seedDatabaseProjectIDQueries(projectID),
 		"CALL DOLT_ADD('.')",
 		"CALL DOLT_COMMIT('-m', 'test: seed rig worktree identity', '--author', 'gascity-test <test@gascity.local>')")
-	_, port, _, cleanupDolt := startPasswordedDoltServer(t, filepath.Join(t.TempDir(), "fe"), setupQueries...)
+	feRepoDir := filepath.Join(t.TempDir(), "fe")
+	_, port, _, cleanupDolt := startPasswordedDoltServer(t, feRepoDir, setupQueries...)
 	defer cleanupDolt()
+	// Cover the fe server's own repo root (the actual live-process dir, not
+	// just cityPath) and the relocated dolt identity HOME (ga-7dgcg6).
+	requireNoLeakedDoltAfterForPaths(t, cityPath, feRepoDir, os.Getenv("HOME"))
 
 	for _, scope := range []struct {
 		name     string
@@ -1434,7 +1437,7 @@ func listToMap(env []string) map[string]string {
 func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 
 	cityDir := filepath.Join(t.TempDir(), "city")
 	rigDir := filepath.Join(cityDir, "frontend")
@@ -1465,7 +1468,7 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
-	bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+	bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, beadID string) bool {
 		return target.ScopeKind == "city" && beadID == "mc-city1"
 	}
 
@@ -1505,7 +1508,7 @@ func TestGcBdRespectsRawCityFlag(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 	cityFlag = ""
 	rigFlag = ""
 
@@ -1584,7 +1587,7 @@ func TestGcBdUsesEnclosingRigWhenNoFlag(t *testing.T) {
 		rigFlag = origRigFlag
 		bdBeadExists = origProbe
 	}()
-	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
 	cityFlag = ""
 	rigFlag = ""
 
@@ -2364,7 +2367,7 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "gc"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-2", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, created.ID, "worker-2", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent wrong assignee = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "skipped" {
@@ -2380,7 +2383,7 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if got := doBdReleaseIfCurrent(cityDir, target, created.ID, "worker-1", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, created.ID, "worker-1", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent matching assignee = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "released" {
@@ -2460,7 +2463,7 @@ prefix = "fe"
 
 	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
 		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) != "released" {
@@ -2473,5 +2476,229 @@ prefix = "fe"
 	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'"
 	if strings.TrimSpace(string(query)) != wantQuery {
 		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
+	}
+}
+
+// TestGcBdPassthroughResolvesBdBinary pins the binary the `gc bd`
+// passthrough execs. A city whose scope carries a complete storage binding
+// runs the bd its workspace PATH pins — an ambient bd that cannot speak the
+// bound backend would reject every command. A city with neither a binding
+// nor a pin keeps the ambient lookup.
+func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
+	t.Run("complete binding runs the workspace-pinned bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		cityTOML := "[workspace]\nname = \"demo\"\n\n[workspace.env]\nPATH = " +
+			strconv.Quote(pinDir+string(os.PathListSeparator)+"$PATH") + "\n"
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		metadata := []byte(`{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg"}`)
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), metadata, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
+		}
+	})
+
+	t.Run("no binding falls back to ambient bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+			t.Fatalf("executed bd = %q, want ambient %q", got, "ambient-bd")
+		}
+	})
+
+	// A city-scoped command reads the city's own binding, so a half-written
+	// one is that command's fault and must stay fatal — the rig-scope
+	// tolerance below it must not soften the scope that owns the binding.
+	t.Run("partial city binding still fails the city scope", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		writeGcBdProbeCityTOML(t, cityDir, t.TempDir())
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(partialStorageBindingJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"list"}, &stdout, &stderr); got != 1 {
+			t.Fatalf("doBd() = %d, want 1; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if want := "partial beads storage binding"; !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to name the %q", stderr.String(), want)
+		}
+	})
+}
+
+// TestGcBdPassthroughResolvesBdBinaryForRigScope pins the binary the
+// passthrough execs for `gc bd --rig`, a form the command's own help
+// documents. The scope the command targets decides the binary, because that
+// is the scope whose store the command reads and writes: a rig carrying its
+// own complete binding runs the pinned build that speaks it, and a rig that
+// overrides the city backend keeps the ambient lookup even when the city is
+// bound — its store is not the bound one, and its runtime env carries no
+// BD_BIN.
+func TestGcBdPassthroughResolvesBdBinaryForRigScope(t *testing.T) {
+	t.Run("rig carrying its own complete binding runs the workspace-pinned bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		writeGcBdProbeCityTOML(t, cityDir, pinDir, "frontend")
+		writeGcBdProbeRig(t, cityDir, "frontend", completeStorageBindingJSON)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "frontend", "list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(--rig frontend) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
+		}
+	})
+
+	t.Run("doltlite rig survives a partial city binding", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		writeGcBdProbeCityTOML(t, cityDir, pinDir, "dl")
+		// Half-written city provisioning state: storage_database never
+		// landed. scopeHasCompleteStorageBinding rejects it, but the rig
+		// below never reads that binding.
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(partialStorageBindingJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeGcBdProbeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "dl", "list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(--rig dl) = %d, want 0; a city-level binding fault must not take a doltlite rig offline; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+			t.Fatalf("executed bd = %q, want ambient %q", got, "ambient-bd")
+		}
+	})
+
+	t.Run("doltlite rig in a bound city keeps the ambient bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+		pinDir := t.TempDir()
+		writeGcBdProbeScript(t, filepath.Join(pinDir, "bd"), "pinned-bd")
+		writeGcBdProbeCityTOML(t, cityDir, pinDir, "dl")
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(completeStorageBindingJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeGcBdProbeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"--rig", "dl", "list"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(--rig dl) = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "ambient-bd" {
+			t.Fatalf("executed bd = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN, so the passthrough must not exec the city's pin", got, "ambient-bd")
+		}
+	})
+}
+
+// completeStorageBindingJSON and partialStorageBindingJSON are the two
+// storage-binding shapes scopeHasCompleteStorageBinding distinguishes: all
+// three fields non-empty, and the half-written state it fails closed on.
+const (
+	completeStorageBindingJSON = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg"}`
+	partialStorageBindingJSON  = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432"}`
+)
+
+// writeGcBdProbeCityTOML writes a city.toml pinning pinDir ahead of the
+// ambient PATH and declaring the named rigs, plus the .gc/site.toml bindings
+// that give them their paths under rigs/<name>.
+func writeGcBdProbeCityTOML(t *testing.T, cityDir, pinDir string, rigNames ...string) {
+	t.Helper()
+	cityTOML := "[workspace.env]\nPATH = " +
+		strconv.Quote(pinDir+string(os.PathListSeparator)+"$PATH") + "\n"
+	siteTOML := "workspace_name = \"demo\"\n"
+	for _, name := range rigNames {
+		cityTOML += "\n[[rigs]]\nname = " + strconv.Quote(name) +
+			"\nprefix = " + strconv.Quote(name) + "\n"
+		siteTOML += "\n[[rig]]\nname = " + strconv.Quote(name) +
+			"\npath = " + strconv.Quote(filepath.Join(cityDir, "rigs", name)) + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(siteTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeGcBdProbeRig stages rigs/<name> carrying the given
+// .beads/metadata.json.
+func writeGcBdProbeRig(t *testing.T, cityDir, name, metadata string) {
+	t.Helper()
+	rigDir := filepath.Join(cityDir, "rigs", name)
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(rigDir), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gcBdAmbientProbeIdentity is what the bd on the ambient PATH prints, so a
+// passthrough test can tell it apart from a workspace-pinned build.
+const gcBdAmbientProbeIdentity = "ambient-bd"
+
+// newGcBdBinaryProbeCity returns a city whose only bd on the ambient PATH
+// announces gcBdAmbientProbeIdentity, so a passthrough test can tell which
+// binary actually ran. The caller writes city.toml.
+func newGcBdBinaryProbeCity(t *testing.T) string {
+	t.Helper()
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// See TestResolveBdScopeTarget: isolate cwd so any `.beads/redirect` in
+	// the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
+
+	ambientDir := t.TempDir()
+	writeGcBdProbeScript(t, filepath.Join(ambientDir, "bd"), gcBdAmbientProbeIdentity)
+	t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS", "bd")
+	return cityDir
+}
+
+// writeGcBdProbeScript writes a stand-in bd that announces which binary ran.
+func writeGcBdProbeScript(t *testing.T, path, identity string) {
+	t.Helper()
+	script := "#!/bin/sh\necho " + identity + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }

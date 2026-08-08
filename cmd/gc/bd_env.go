@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -45,11 +47,126 @@ func postgresCredentialResolvedKey(cityPath string, payload pgauth.PostgresCrede
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
 // dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return func(_, _ string, _ ...string) ([]byte, error) { return nil, err }
+	}
+	if completeBinding {
+		return bdContextCommandRunnerForCity(cityPath)
+	}
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		return env, err
 	})
+}
+
+// bdContextCommandRunnerForCity delegates complete external bindings to the
+// workspace-pinned bd without projecting or recovering a managed backend.
+func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	return func(dir, name string, args ...string) ([]byte, error) {
+		env := cityRuntimeEnvMapForCity(cityPath)
+		bdBin, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		env["BD_BIN"] = bdBin
+		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		env["GC_RIG"] = ""
+		env["GC_RIG_ROOT"] = ""
+		env["BEADS_DOLT_AUTO_START"] = "0"
+		env["BD_EXPORT_AUTO"] = "false"
+		credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+		if credentialsFile == "" {
+			credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
+		}
+		setExecProjectedBackendEnvEmpty(env)
+		if credentialsFile != "" {
+			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
+		}
+		return beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
+	}
+}
+
+// workspacePinnedBdBinary resolves bd only from an explicitly configured
+// workspace PATH. An unconfigured workspace retains the ambient executable
+// lookup performed by the caller.
+func workspacePinnedBdBinary(cityPath string) (string, error) {
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	_, configured := cfg.Workspace.Env["PATH"]
+	if !configured {
+		return "", nil
+	}
+	for _, dir := range filepath.SplitList(expandEnvMap(cfg.Workspace.Env)["PATH"]) {
+		dir = strings.TrimSpace(dir)
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		candidate, err := exec.LookPath(filepath.Join(dir, "bd"))
+		if err == nil && filepath.IsAbs(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
+}
+
+// errBdNotOnPath reports that neither the workspace pin nor the ambient
+// lookup produced a bd executable. Callers phrase their own remediation.
+var errBdNotOnPath = errors.New("bd not found in PATH")
+
+// resolveBdBinaryForScope resolves the bd executable a scope's commands run.
+// A scope bound to a complete storage binding runs the binary its workspace
+// PATH pins, because only that build speaks the bound backend; every other
+// scope keeps the ambient lookup. An ambient miss is errBdNotOnPath so
+// callers can phrase their own remediation; a pin that is configured but
+// unresolvable for a scope that needs it is returned verbatim rather than
+// masked as a missing binary.
+func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
+	bound, err := scopeBindsPinnedBdBinary(cityPath, scopeRoot)
+	if err != nil {
+		return "", err
+	}
+	if bound {
+		pinned, err := workspacePinnedBdBinary(cityPath)
+		if err != nil {
+			return "", err
+		}
+		if pinned = strings.TrimSpace(pinned); filepath.IsAbs(pinned) {
+			return pinned, nil
+		}
+	}
+	bdPath, err := exec.LookPath("bd")
+	if err != nil {
+		return "", errBdNotOnPath
+	}
+	return bdPath, nil
+}
+
+// scopeBindsPinnedBdBinary reports whether a scope's bd commands must run the
+// workspace-pinned build: the scope carries a complete storage binding of its
+// own, or it inherits the city's the way applyCanonicalScopeBackendEnv does.
+// A scope that overrides the city backend never reads the city binding, so a
+// fault in it is not that scope's fault and degrades to the ambient lookup
+// instead of taking the scope's bd offline. Only the scope's own binding
+// surfaces an error.
+func scopeBindsPinnedBdBinary(cityPath, scopeRoot string) (bool, error) {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
+	if err != nil || completeBinding {
+		return completeBinding, err
+	}
+	if samePath(cityPath, scopeRoot) || scopeOverridesCityBackend(cityPath, scopeRoot) {
+		return false, nil
+	}
+	inherited, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	return err == nil && inherited, nil
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
@@ -342,6 +459,27 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 	applyResolvedDoltAuthEnv(env, authScopeRoot, strings.TrimSpace(target.User))
 }
 
+func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !completeBinding {
+		return completeBinding, err
+	}
+	credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+	if credentialsFile == "" {
+		credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if credentialsFile != "" {
+		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
+	}
+	bdBin, err := workspacePinnedBdBinary(cityPath)
+	if err != nil {
+		return true, err
+	}
+	env["BD_BIN"] = bdBin
+	return true, nil
+}
+
 // applyCanonicalScopeBackendEnv dispatches to the appropriate backend
 // helper based on the scope's MetadataState.Backend.
 //
@@ -357,6 +495,11 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	}
 	if resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false, nil
+	}
+	if completeBinding, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, scopeRoot); err != nil {
+		return true, err
+	} else if completeBinding {
+		return true, nil
 	}
 	meta, _, metaErr := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
 	if metaErr != nil {
@@ -409,6 +552,11 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 }
 
 func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, error) {
+	if completeBinding, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, cityPath); err != nil {
+		return true, err
+	} else if completeBinding {
+		return true, nil
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
 	if err != nil {
 		return false, err
@@ -1041,7 +1189,11 @@ func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, 
 const (
 	bdSilentFallbackMarkerImport  = "auto-importing"
 	bdSilentFallbackMarkerEmptyDB = "into empty database"
+
+	bdCommandRetryBaseDelay = 500 * time.Millisecond
 )
+
+var bdCommandRetrySleep = time.Sleep
 
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
@@ -1137,6 +1289,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 				return out, err
 			}
 		}
+		bdCommandRetrySleep(bdCommandRetryBaseDelay)
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
@@ -1301,7 +1454,7 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
 	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
-	rigPath = filepath.Clean(rigPath)
+	rigPath = normalizePathForCompare(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
 	// discovery is not sufficient for rig-scoped operations.

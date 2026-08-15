@@ -42,16 +42,24 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 	if store == nil {
 		return 0, nil
 	}
-	// Scan open beads for detached handoff orphans. In steady state there are
-	// none, so the candidate slice is empty and the expensive session-index
-	// lookup is skipped entirely.
-	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true})
+	// Scan open beads for detached handoff orphans. Live is what makes
+	// Status:"open" mean open: mapBdStatus folds bd's blocked/deferred/review/
+	// testing into Gas City's three statuses, so such a bead decodes with Status
+	// "open", and a cached List (which filters the collapsed status via
+	// ListQuery.Matches) hands it back as if it were ready. Only the backing store
+	// filters on the raw status, so without Live a bead parked in bd review/
+	// testing with a pushed branch and a consumed gc.routed_to — an ordinary
+	// post-work state — is re-stamped every tick and respawns a worker that drains
+	// no-op (the sibling restoreCarriedWorkRoutes gates the same gc-4zb hazard with
+	// Live). In steady state there are no candidates, so the expensive session-
+	// index lookup is skipped entirely.
+	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
 	if err != nil {
 		return 0, fmt.Errorf("listing open beads: %w", err)
 	}
 
 	type candidate struct {
-		id, sessionName string
+		id, sessionID, sessionName string
 	}
 	var candidates []candidate
 	for _, b := range items {
@@ -60,6 +68,7 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 		}
 		candidates = append(candidates, candidate{
 			id:          b.ID,
+			sessionID:   strings.TrimSpace(b.Metadata[beadmeta.SessionIDMetadataKey]),
 			sessionName: strings.TrimSpace(b.Metadata[beadmeta.SessionNameMetadataKey]),
 		})
 	}
@@ -67,36 +76,63 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 		return 0, nil
 	}
 
-	// Build a session_name → pool-route index once for all candidates, from this
-	// store and (for cross-store recovery) routeStore. A detached orphan in a rig
-	// store has its session bead in the city store, so without routeStore its
-	// route is never found and it is never recovered. store wins on conflict; the
-	// city store backfills session names absent here.
+	// Build the session route index once for all candidates, from this store and
+	// (for cross-store recovery) routeStore. A detached orphan in a rig store has
+	// its session bead in the city store, so without routeStore its route is never
+	// found and it is never recovered. store wins on conflict; the city store
+	// backfills gaps.
 	routeIndex, indexErr := buildDetachedOrphanRouteIndex(store)
 	if indexErr != nil {
 		return 0, fmt.Errorf("building session route index: %w", indexErr)
 	}
-	if routeStore != nil {
+	// Only union a distinct cross-store index. The city scope in
+	// sweepDetachedHandoffOrphansAcrossStores passes the city store as both store
+	// and routeStore; its routes are already in routeIndex, so rebuilding the same
+	// full ListAllSessionBeads scan and unioning it into itself is pure waste.
+	// Interface identity is the right test here — production stores are pointer-
+	// backed CachingStores.
+	if routeStore != nil && routeStore != store {
 		crossIndex, crossErr := buildDetachedOrphanRouteIndex(routeStore)
 		if crossErr != nil {
 			return 0, fmt.Errorf("building cross-store session route index: %w", crossErr)
 		}
-		for sn, route := range crossIndex {
-			if _, exists := routeIndex[sn]; !exists {
-				routeIndex[sn] = route
-			}
-		}
+		routeIndex.backfill(crossIndex)
 	}
 
+	// Resolve the authoritative, cache-bypassing read handle once. Production
+	// stores are CachingStore-wrapped, so a plain store.Get can return a bead that
+	// predates a cross-process claim/close; handles.Live reads the backing store
+	// directly. For a plain store this degrades to store.Get.
+	handles := beads.HandlesFor(store)
 	var (
 		restored int
 		errs     []error
 	)
 	for _, c := range candidates {
-		route := routeIndex[c.sessionName]
+		route := routeIndex.route(c.sessionID, c.sessionName)
 		if route == "" {
-			log.Printf("sweepDetachedHandoffOrphans: no recoverable route for bead %s (gc.session_name=%q not found in any session bead or session carries no template)", c.id, c.sessionName)
+			log.Printf("sweepDetachedHandoffOrphans: no recoverable route for bead %s (gc.session_id=%q / gc.session_name=%q not found in any session bead, the session carries no template, or the session name is ambiguous)", c.id, c.sessionID, c.sessionName)
 			continue
+		}
+		// Re-read the live bead immediately before writing, through the cache-
+		// bypassing handle. The open-bead List is a snapshot; a worker — often in
+		// another process — may have claimed, closed, or re-routed this bead in the
+		// window since. A claim atomically flips it open->in_progress and consumes
+		// gc.routed_to (ga-sa0), so a blind SetMetadata keyed on the stale snapshot
+		// would resurrect gc.routed_to on the now-claimed bead and hand the
+		// dispatcher a phantom pool-demand bead that flaps open<->in_progress
+		// (ga-bgu). Skip unless the live bead is still a detached-orphan candidate
+		// resolving to the same recovered route. (A block collapses to "open" on
+		// this Get too, so the Live candidate List above — not this re-read — is
+		// what excludes blocked/review/testing work; gc-4zb.)
+		live, getErr := handles.Live.Get(c.id)
+		if getErr != nil {
+			errs = append(errs, fmt.Errorf("bead %s: re-reading before route restore: %w", c.id, getErr))
+			continue
+		}
+		if !isDetachedHandoffOrphanCandidate(live) ||
+			routeIndex.route(strings.TrimSpace(live.Metadata[beadmeta.SessionIDMetadataKey]), strings.TrimSpace(live.Metadata[beadmeta.SessionNameMetadataKey])) != route {
+			continue // claimed, closed, or re-routed since the snapshot — don't clobber
 		}
 		if setErr := store.SetMetadata(c.id, beadmeta.RoutedToMetadataKey, route); setErr != nil {
 			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", c.id, route, setErr))
@@ -109,9 +145,15 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (i
 }
 
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
-// fully-detached handoff orphan: open, unassigned, no pool route, branch set
-// (indicating work was done and pushed), and a session reference from which the
-// pool route can be recovered.
+// fully-detached handoff orphan: open, unassigned, no pool route (neither
+// gc.routed_to nor a legacy gc.run_target), no gc.kind, branch set (indicating
+// work was done and pushed), and a session back-reference — gc.session_id or
+// gc.session_name — from which the pool route can be recovered. This sweep's
+// novel domain is exactly work that carries *no* self-declared route: a bead
+// that still has gc.run_target is recovered earlier in the same tick by
+// restoreCarriedWorkRoutes from its own declared route, and any non-empty
+// gc.kind is a workflow-root/control/topology bead that carriedPoolRoute
+// deliberately keeps out of pool demand.
 func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if b.Status != "open" {
 		return false
@@ -122,40 +164,124 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
 		return false // already has a pool route
 	}
-	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow {
-		return false // workflow roots use gc.run_target; restoreCarriedWorkRoutes handles them
+	if strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey]) != "" {
+		return false // carries its own legacy route — restoreCarriedWorkRoutes recovers it from gc.run_target
 	}
-	if strings.TrimSpace(b.Metadata["branch"]) == "" {
-		return false // no branch → not a completed-work handoff bead
+	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != "" {
+		return false // any non-empty kind is workflow-root/control/topology work, not fully-detached pool work
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
+		return false // no work branch → not a completed-work handoff bead
+	}
+	// Accept either session back-reference. The claim path stamps gc.session_id
+	// whenever GC_SESSION_ID is set and adds gc.session_name only when
+	// GC_SESSION_NAME is also present (hookClaimIdentityPatch), so a valid
+	// session-ID-only orphan exists. route() resolves either, preferring the
+	// unique gc.session_id, so requiring gc.session_name here would strand a
+	// session-ID-only orphan the exact-ID resolver could recover.
+	if strings.TrimSpace(b.Metadata[beadmeta.SessionIDMetadataKey]) != "" {
+		return true
 	}
 	return strings.TrimSpace(b.Metadata[beadmeta.SessionNameMetadataKey]) != ""
 }
 
-// buildDetachedOrphanRouteIndex returns a map from session_name to pool route
-// for every session bead (open or closed) that carries a template. Closed
-// session beads are included because the worker session is typically gone by
-// the time this sweep runs.
-func buildDetachedOrphanRouteIndex(store beads.Store) (map[string]string, error) {
+// detachedOrphanRouteIndex resolves a detached orphan's pool route from its
+// session back-reference. It prefers an exact session-bead ID match — gc.session_id
+// is the unique bead ID of the claiming session, stamped next to gc.session_name at
+// claim time — and only falls back to gc.session_name when that name resolves
+// unambiguously: every session bead carrying it that has a route agrees on one
+// route. This mirrors internal/session/resolve.go's refusal to act on an ambiguous
+// session_name match, so a duplicated session name never restores work to the wrong
+// pool.
+type detachedOrphanRouteIndex struct {
+	byID   map[string]string // session-bead ID → pool route
+	byName map[string]string // session_name → pool route, only when unambiguous
+}
+
+// route resolves the pool route for a detached orphan, preferring the exact
+// session-bead ID over the session_name fallback. It returns "" when neither
+// resolves — including when the session_name was dropped as ambiguous.
+func (idx detachedOrphanRouteIndex) route(sessionID, sessionName string) string {
+	if sessionID != "" {
+		if r := idx.byID[sessionID]; r != "" {
+			return r
+		}
+	}
+	if sessionName != "" {
+		if r := idx.byName[sessionName]; r != "" {
+			return r
+		}
+	}
+	return ""
+}
+
+// backfill copies entries from other for keys idx does not already own, so the
+// primary store wins on conflict and the cross store only fills gaps. Both the ID
+// and the (already ambiguity-pruned) name maps are unioned this way.
+func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
+	for id, route := range other.byID {
+		if _, exists := idx.byID[id]; !exists {
+			idx.byID[id] = route
+		}
+	}
+	for sn, route := range other.byName {
+		if _, exists := idx.byName[sn]; !exists {
+			idx.byName[sn] = route
+		}
+	}
+}
+
+// buildDetachedOrphanRouteIndex indexes every session bead (open or closed) that
+// carries a template, keyed both by the session bead's ID (matched against a work
+// bead's gc.session_id) and by session_name. Closed session beads are included
+// because the worker session is typically gone by the time this sweep runs. A
+// session_name shared by session beads with conflicting routes is dropped from the
+// name index so an ambiguous name never resolves to an arbitrary route; the unique
+// per-ID entry still resolves such an orphan exactly.
+func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex, error) {
+	idx := detachedOrphanRouteIndex{byID: map[string]string{}, byName: map[string]string{}}
 	all, listErr := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
 	// Hard errors return nil rows; surface them to the caller.
-	// Partial results still yield rows we can use — don't propagate.
-	if listErr != nil && !beads.IsPartialResult(listErr) {
-		return nil, fmt.Errorf("listing session beads: %w", listErr)
+	partial := beads.IsPartialResult(listErr)
+	if listErr != nil && !partial {
+		return detachedOrphanRouteIndex{}, fmt.Errorf("listing session beads: %w", listErr)
 	}
-	index := make(map[string]string, len(all))
+	// A partial list still yields usable rows, but it may be MISSING rows — so it
+	// cannot prove a session_name is unambiguous: a conflicting same-name session
+	// bead could sit in the unlisted partition and make byName silently resolve to
+	// an arbitrary pool route. Session-bead IDs are unique, so a partial list can
+	// only omit a byID entry (the orphan is simply not recovered this tick and
+	// retries next tick), never make an existing one ambiguous. So byID stays safe
+	// on a partial list while byName does not: populate byID always and skip byName
+	// entirely when the list is partial, degrading to exact-gc.session_id recovery.
+	ambiguousNames := map[string]bool{}
 	for _, sb := range all {
+		route := retiredSessionFallbackRoute(sb)
+		if route == "" {
+			continue // no template/agent_name → carries no recoverable route
+		}
+		if id := strings.TrimSpace(sb.ID); id != "" {
+			idx.byID[id] = route // session-bead IDs are unique; exact gc.session_id match
+		}
+		if partial {
+			continue // partial list can't prove name uniqueness — exact-ID recovery only
+		}
 		sn := strings.TrimSpace(sb.Metadata["session_name"])
 		if sn == "" {
 			continue
 		}
-		if _, exists := index[sn]; exists {
-			continue // keep first match; duplicate session names are rare edge cases
+		if existing, seen := idx.byName[sn]; seen {
+			if existing != route {
+				ambiguousNames[sn] = true // duplicate name resolving to conflicting routes
+			}
+			continue // keep first route; a matching duplicate is not a conflict
 		}
-		if route := retiredSessionFallbackRoute(sb); route != "" {
-			index[sn] = route
-		}
+		idx.byName[sn] = route
 	}
-	return index, nil
+	for sn := range ambiguousNames {
+		delete(idx.byName, sn) // refuse to guess a route for an ambiguous name
+	}
+	return idx, nil
 }
 
 // sweepDetachedHandoffOrphansAcrossStores sweeps for fully-detached handoff

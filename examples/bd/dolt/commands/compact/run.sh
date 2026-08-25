@@ -77,7 +77,24 @@
 #   GC_DOLT_COMPACT_THRESHOLD_COMMITS
 #     (default: 2000) — skip databases with fewer commits than this.
 #   GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
-#     (default: 1800) — wall-clock bound for each SQL CALL.
+#     (default: 1800) — wall-clock bound for each SQL CALL. This does
+#     NOT extend the managed sql-server listener read_timeout_millis
+#     (default 15000), which is an inter-row produce gap. CALL
+#     DOLT_GC('--full') emits no rows until GC finishes, so a 15s
+#     listener cancels the query mid-GC (ga-ozq). Raise
+#     [dolt] read_timeout_millis / GC_DOLT_READ_TIMEOUT_MILLIS above
+#     expected GC duration and restart managed dolt, or put this
+#     variable (or GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS) in the
+#     managed-server start environment so start floors the listener.
+#   GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS
+#     (optional) — dedicated full-GC listener floor, in seconds.
+#     When set, wins over GC_DOLT_COMPACT_CALL_TIMEOUT_SECS as the
+#     --gc-only preflight bound and as the start-path listener floor.
+#   GC_DOLT_READ_TIMEOUT_MILLIS
+#     (default: 15000) — the managed listener read_timeout_millis
+#     compact should assume when dolt-config.yaml is unreadable.
+#     gc dolt compact --gc-only fail-closes if this (or the live
+#     yaml value) is below the full-GC bound above.
 #   GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS
 #     (default: 120) — wall-clock bound for remote compare-and-push
 #                     after local compaction. Push failures are recorded for
@@ -373,6 +390,30 @@ case "$call_timeout" in
     ;;
 esac
 
+case "${GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS:-}" in
+  '')
+    compact_gc_read_timeout_secs="$call_timeout"
+    ;;
+  *[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+      "$GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS" >&2
+    exit 2
+    ;;
+  *)
+    compact_gc_read_timeout_secs="$GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS"
+    ;;
+esac
+
+case "${GC_DOLT_READ_TIMEOUT_MILLIS:-}" in
+  '')
+    ;;
+  *[!0-9]*|0)
+    printf 'compact: invalid GC_DOLT_READ_TIMEOUT_MILLIS=%s (must be a positive integer)\n' \
+      "$GC_DOLT_READ_TIMEOUT_MILLIS" >&2
+    exit 2
+    ;;
+esac
+
 case "$push_timeout" in
   ''|*[!0-9]*|0)
     printf 'compact: invalid GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
@@ -633,6 +674,51 @@ discover_database_names() {
       emit_database_name "$db"
     done
   fi
+}
+
+# resolve_listener_read_timeout_millis — the live managed-server
+# inter-row produce gap. Prefer dolt-config.yaml (what sql-server was
+# actually started with) over GC_DOLT_READ_TIMEOUT_MILLIS, which pack
+# command projection may invent from compact env without a restart.
+resolve_listener_read_timeout_millis() {
+  config_file="${GC_DOLT_CONFIG_FILE:-$PACK_STATE_DIR/dolt-config.yaml}"
+  if [ -f "$config_file" ]; then
+    yaml_timeout=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*//p' "$config_file" | head -1 | tr -d '[:space:]')
+    case "$yaml_timeout" in
+      [0-9]*)
+        if [ "$yaml_timeout" -gt 0 ] 2>/dev/null; then
+          printf '%s\n' "$yaml_timeout"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  printf '%s\n' "${GC_DOLT_READ_TIMEOUT_MILLIS:-15000}"
+}
+
+full_gc_listener_timeout_hint() {
+  listener_ms="$1"
+  printf 'compact: CALL DOLT_GC('\''--full'\'') emits no result rows until GC finishes; listener read_timeout_millis=%s is an inter-row produce gap (not a query wall-clock) and will cancel the connection mid-GC. raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration (set [dolt] read_timeout_millis in city.toml or GC_DOLT_READ_TIMEOUT_MILLIS, then restart managed dolt). GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=%s only bounds the client dolt sql wall-clock and does not extend the listener unless it or GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS is in the managed-server start environment.\n' \
+    "$listener_ms" "$call_timeout" >&2
+}
+
+require_listener_timeout_for_full_gc() {
+  db="$1"
+  listener_ms=$(resolve_listener_read_timeout_millis)
+  required_ms=$((compact_gc_read_timeout_secs * 1000))
+  if [ "$listener_ms" -lt "$required_ms" ]; then
+    printf 'compact: db=%s listener read_timeout_millis=%s is below the full-GC bound of %ss (%sms)\n' \
+      "$db" "$listener_ms" "$compact_gc_read_timeout_secs" "$required_ms" >&2
+    full_gc_listener_timeout_hint "$listener_ms"
+    return 1
+  fi
+  return 0
+}
+
+stderr_looks_like_listener_timeout() {
+  err_file="$1"
+  [ -s "$err_file" ] || return 1
+  grep -qiE 'i/o timeout|context canceled|connection went away|read tcp' "$err_file"
 }
 
 # dolt_query — wrapper that runs a single SQL statement against the
@@ -1993,6 +2079,15 @@ run_full_gc() {
     printf 'compact: db=%s %s DOLT_GC failed rc=%s duration=%ss\n' \
       "$db" "$failure_prefix" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
+    listener_ms=$(resolve_listener_read_timeout_millis)
+    if stderr_looks_like_listener_timeout "$gc_err_tmp"; then
+      full_gc_listener_timeout_hint "$listener_ms"
+    else
+      listener_secs=$(( (listener_ms + 999) / 1000 ))
+      if [ "$elapsed" -ge "$listener_secs" ] && [ "$elapsed" -lt "$call_timeout" ]; then
+        full_gc_listener_timeout_hint "$listener_ms"
+      fi
+    fi
     rm -f "$gc_err_tmp"
     return 1
   fi
@@ -3132,6 +3227,10 @@ gc_only_database() {
     # Same operator-visible state as a scheduled refusal, so it reports the
     # same way: stdout alone leaves the quarantine off the bus entirely.
     report_existing_quarantine "$db"
+    return 1
+  fi
+
+  if ! require_listener_timeout_for_full_gc "$db"; then
     return 1
   fi
 

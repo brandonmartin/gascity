@@ -1472,7 +1472,7 @@
         },
         "read_timeout_millis": {
           "type": "integer",
-          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
+          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default. This is an inter-row produce gap, not\ntotal query wall-clock. CALL DOLT_GC('--full') emits no rows until GC\nfinishes, so the default 15s listener cancels mid-GC; raise this (or\nGC_DOLT_READ_TIMEOUT_MILLIS) above expected GC duration and restart\nmanaged dolt. GC_DOLT_COMPACT_CALL_TIMEOUT_SECS only bounds the compact\nclient unless it or GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS is present in\nthe managed-server start environment, where it floors the listener.",
           "default": 15000
         },
         "write_timeout_millis": {

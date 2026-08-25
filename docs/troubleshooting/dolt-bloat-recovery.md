@@ -154,6 +154,13 @@ log: the `client connection went away` line that precedes the failure carries
 `i/o timeout`, not `EOF`, and lands exactly `read_timeout_millis` after the
 connection opened.
 
+`gc dolt compact --gc-only` also refuses before it issues `DOLT_GC('--full')`
+when the live listener `read_timeout_millis` is below the full-GC bound
+(`GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS`, or
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` when that knob is unset). The refusal
+names the ceiling and does not start a GC the listener would cancel. Raise
+the listener, run `gc dolt restart`, then retry.
+
 ## Compacting a city whose Dolt remote is uncredentialed
 
 Before flattening (and again before pushing) the compactor runs

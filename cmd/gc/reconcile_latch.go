@@ -95,8 +95,8 @@ func v2SessionRuntimeName(cfg *config.City, lookupEnv func(string) (string, bool
 
 // v2SessionRuntimeRefusal refuses a session provider name outside the
 // allowlist that reg resolves. A name reg does not resolve reaches the tmux
-// fallback and is admitted as tmux. exec:…/gc-session-t3 is the legacy
-// t3bridge spelling.
+// fallback and is admitted as tmux. An exec: name is the exec runtime even
+// when the script basename is the retired gc-session-t3 alias.
 func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry, name string) (latchRefusal, bool) {
 	if v2SessionRuntimesAdmitted[name] || !reg.Resolves(name) {
 		return latchRefusal{}, false
@@ -110,8 +110,6 @@ func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry, name stri
 		parityPR = "PAR-HERDR"
 	case name == "t3bridge":
 		parityPR = "PAR-T3"
-	case strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:")):
-		feature, parityPR = "the t3bridge session runtime", "PAR-T3"
 	case strings.HasPrefix(name, "exec:"):
 		feature, parityPR = "the exec session runtime", "PAR-EXEC"
 	case strings.HasPrefix(name, "ssh:"):

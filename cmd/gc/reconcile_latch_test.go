@@ -41,7 +41,7 @@ var v2RefusalCases = []struct {
 	{"hybrid", func(c *config.City) { c.Session.Provider = "hybrid" }, `[session] provider = "hybrid"`, "PAR-K8S"},
 	{"herdr", func(c *config.City) { c.Session.Provider = " herdr " }, `[session] provider = "herdr"`, "PAR-HERDR"},
 	{"t3bridge", func(c *config.City) { c.Session.Provider = "t3bridge" }, `[session] provider = "t3bridge"`, "PAR-T3"},
-	{"exec t3bridge script", func(c *config.City) { c.Session.Provider = "exec:/opt/bin/gc-session-t3" }, `[session] provider = "exec:/opt/bin/gc-session-t3"`, "PAR-T3"},
+	{"retired gc-session-t3 exec alias", func(c *config.City) { c.Session.Provider = "exec:/opt/bin/gc-session-t3" }, `[session] provider = "exec:/opt/bin/gc-session-t3"`, "PAR-EXEC"},
 	{"exec", func(c *config.City) { c.Session.Provider = "exec:/opt/bin/runner" }, `[session] provider = "exec:/opt/bin/runner"`, "PAR-EXEC"},
 	{"ssh", func(c *config.City) { c.Session.Provider = "ssh:ops@box:22" }, `[session] provider = "ssh:ops@box:22"`, "PAR-SSH"},
 	{"pack runtime", func(c *config.City) {

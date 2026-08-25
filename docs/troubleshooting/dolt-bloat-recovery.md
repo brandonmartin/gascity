@@ -101,6 +101,53 @@ reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
 the city — though quiescing writers still makes the GC faster and more
 thorough.
 
+## Full GC cancelled at ~15s (listener inter-row timeout)
+
+`CALL DOLT_GC('--full')` emits **no result rows until the whole GC finishes**.
+The managed sql-server listener `read_timeout_millis` (default **15000**) is an
+*inter-row produce gap*, not a query wall-clock. At ~15s the listener cancels
+the connection mid-GC:
+
+```
+client connection went away while a query was executing
+read tcp 127.0.0.1:…->127.0.0.1:…: i/o timeout
+Error in SaveHashes call: … context canceled
+```
+
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default 1800) does **not** extend that
+gap — it only bounds the compact script's `dolt sql` client. Setting it to
+1200 and retrying still dies at ~15s.
+
+`gc dolt compact --gc-only` fail-closes **before** issuing `DOLT_GC` when the
+live listener timeout is below the full-GC bound, and prints:
+
+```
+raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration
+```
+
+Raise the listener, restart managed Dolt, then retry:
+
+```toml
+# city.toml — must exceed expected DOLT_GC('--full') duration
+[dolt]
+read_timeout_millis = 1800000  # 30 minutes; match compact's CALL_TIMEOUT
+```
+
+```bash
+# Equivalent start-environment floor (restart managed dolt after setting).
+# Dedicated knob wins over CALL_TIMEOUT when both are set.
+GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=1800
+# or
+GC_DOLT_READ_TIMEOUT_MILLIS=1800000
+
+gc dolt restart   # pick up the new listener timeout
+gc dolt compact --gc-only --only-db <database>
+```
+
+If you cannot raise the live listener (or GC still exceeds it), stop the city
+and use the offline `dolt gc --archive-level=1` procedure in **Recovery
+Procedure** above. That path does not go through the sql-server listener.
+
 ## Compacting a city whose Dolt remote is uncredentialed
 
 Before flattening (and again before pushing) the compactor runs

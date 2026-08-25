@@ -201,6 +201,12 @@ listener:
   # (200-460 idle Sleep conns observed), burning Dolt CPU managing the swarm.
   # The managed default reaps idle sockets promptly; city.toml [dolt]
   # overrides can raise it for cities with slower live operations.
+  # CALL DOLT_GC('--full') emits no rows until GC finishes, so this gap
+  # cancels mid-GC at the default 15s; raise it above expected GC
+  # duration (or set GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS /
+  # GC_DOLT_COMPACT_CALL_TIMEOUT_SECS in the start environment) and
+  # restart managed dolt. Compact's client CALL_TIMEOUT does not extend
+  # this listener deadline on its own.
   max_connections: %d
   back_log: 50
   max_connections_timeout_millis: 5000

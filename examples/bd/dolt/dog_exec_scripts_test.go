@@ -1187,6 +1187,12 @@ case "$query" in
       printf 'gc exploded\n' >&2
       exit 45
     fi
+    if [ "$mode" = "gc_listener_timeout" ]; then
+      printf 'client connection went away while a query was executing\n' >&2
+      printf 'read tcp 127.0.0.1:19266->127.0.0.1:40354: i/o timeout\n' >&2
+      printf 'Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled\n' >&2
+      exit 45
+    fi
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0
     ;;
@@ -4605,6 +4611,85 @@ func TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure(t *testing.T) {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("gc-only failure must not write %s marker, stat err=%v", dir, err)
 		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagFailsClosedWhenListenerShorterThanCallTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=1800")
+	if err == nil {
+		t.Fatalf("gc-only must fail closed when listener read timeout is below CALL_TIMEOUT:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) failed gc-only reclaim") {
+		t.Fatalf("gc-only output missing per-run failure tally:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only must not issue DOLT_GC when the listener will cancel mid-GC:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagReadsLiveListenerTimeoutFromConfigYaml(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	configPath := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	yaml := "listener:\n  read_timeout_millis: 15000\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write dolt-config.yaml: %v", err)
+	}
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=1800000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=1800")
+	if err == nil {
+		t.Fatalf("gc-only must prefer the live listener timeout from dolt-config.yaml:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only must not issue DOLT_GC against a 15s live listener:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagDedicatedReadTimeoutEnvOverridesCallTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "below_threshold", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=5",
+		"GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS=1800")
+	if err == nil {
+		t.Fatalf("gc-only must fail closed when dedicated GC read timeout exceeds the listener:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
+	}
+	if logData, err := os.ReadFile(fixture.doltLog); err == nil {
+		if strings.Contains(string(logData), "DOLT_GC") {
+			t.Fatalf("gc-only must not issue DOLT_GC when dedicated GC read timeout exceeds the listener:\n%s", logData)
+		}
+	}
+}
+
+func TestCompactScriptGCOnlyFlagNamesListenerTimeoutWhenGCStderrIsIOTimeout(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "gc_listener_timeout", []string{"--gc-only"},
+		"GC_DOLT_READ_TIMEOUT_MILLIS=15000",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=5")
+	if err == nil {
+		t.Fatalf("gc-only must fail when the listener cancels DOLT_GC:\n%s", out)
+	}
+	if !strings.Contains(out, "i/o timeout") {
+		t.Fatalf("gc-only output missing Dolt listener stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "raise GC_DOLT_READ_TIMEOUT_MILLIS above expected GC duration") {
+		t.Fatalf("gc-only output missing listener-timeout diagnostic:\n%s", out)
 	}
 }
 

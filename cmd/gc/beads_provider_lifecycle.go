@@ -187,6 +187,9 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+	// Warn before init/hooks, which can migrate the city store forward to a
+	// schema the standalone PATH bd does not know (ga-a9m). Never fatal.
+	warnPATHBdSchemaSkew(stderr)
 	if err := validateCanonicalCompatDoltDrift(cityPath, cfg); err != nil {
 		return err
 	}

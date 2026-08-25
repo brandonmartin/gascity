@@ -1627,6 +1627,9 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	if haveMode {
 		mode = modeOverride
 	}
+	// Native open can auto-migrate the store. Warn first if PATH bd would
+	// then be unable to read it (ga-a9m). Never fatal.
+	warnPATHBdSchemaSkew(os.Stderr)
 	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:         scopeRoot,
 		CityPath:          runtimeCityPath,

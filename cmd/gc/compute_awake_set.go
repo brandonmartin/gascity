@@ -66,6 +66,7 @@ type AwakeSessionBead struct {
 	ExplicitWake              bool      // explicit durable wake request is pending
 	DependencyOnly            bool      // only wakeable via dependency gate
 	NamedIdentity             string    // non-empty for named session beads
+	Alias                     string    // pool/session alias workers claim under (metadata alias), e.g. rig/gasburger.anvil
 	ConfiguredNamedSession    bool      // configured_named_session metadata is true
 	Pinned                    bool      // pin_awake durable wake reason
 	Drained                   bool      // state=="drained" or sleep_reason=="drained"
@@ -751,6 +752,16 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, as
 		return false
 	}
 	if assignee == bead.ID || assignee == bead.SessionName {
+		return true
+	}
+	// Pool workers claim work under their alias (GC_ALIAS, e.g.
+	// "gascity/gasburger.anvil"), which is neither the session bead ID nor
+	// the runtime session name ("gascity--gasburger__anvil"). Without this
+	// rung a claimed pool session is never "assigned-work" desired: once the
+	// routed demand that spawned it is consumed by its own claim, the
+	// reconciler sees an undesired session with (apparently) no work and
+	// drains it as orphaned ~60s after spawn (ga-9wh, ga-ei0).
+	if bead.Alias != "" && assignee == bead.Alias {
 		return true
 	}
 	if bead.NamedIdentity != "" {

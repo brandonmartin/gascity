@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -667,4 +668,96 @@ func findChoice(choices []OptionChoice, value string) *OptionChoice {
 		}
 	}
 	return nil
+}
+
+// Unhonored pin reasons. Launch used to skip these silently (ra-jbbv0 / ga-fyh).
+const (
+	UnhonoredPinUnknownOption = "unknown_option"
+	UnhonoredPinUnknownValue  = "unknown_value"
+)
+
+// UnhonoredOptionPin is an EffectiveDefaults entry that cannot be turned into
+// FlagArgs. Callers must surface these — omitting the flag without a warning
+// silently unpins the agent onto the provider default.
+type UnhonoredOptionPin struct {
+	Key    string
+	Value  string
+	Reason string
+	Valid  []string
+}
+
+// UnhonoredOptionPins reports EffectiveDefaults that ResolveDefaultArgs will
+// not emit as flags: unknown option keys, and known keys whose value is not
+// a declared choice. Empty values are unset, not unhonored.
+func (rp *ResolvedProvider) UnhonoredOptionPins() []UnhonoredOptionPin {
+	if rp == nil {
+		return nil
+	}
+	var pins []UnhonoredOptionPin
+	seen := make(map[string]bool, len(rp.OptionsSchema))
+	for _, opt := range rp.OptionsSchema {
+		seen[opt.Key] = true
+		value := rp.EffectiveDefaults[opt.Key]
+		if value == "" {
+			continue
+		}
+		if findChoice(opt.Choices, value) != nil {
+			continue
+		}
+		pins = append(pins, UnhonoredOptionPin{
+			Key:    opt.Key,
+			Value:  value,
+			Reason: UnhonoredPinUnknownValue,
+			Valid:  nonEmptyChoiceValues(opt),
+		})
+	}
+	var extra []string
+	for key, value := range rp.EffectiveDefaults {
+		if value == "" || seen[key] {
+			continue
+		}
+		extra = append(extra, key)
+	}
+	sort.Strings(extra)
+	for _, key := range extra {
+		pins = append(pins, UnhonoredOptionPin{
+			Key:    key,
+			Value:  rp.EffectiveDefaults[key],
+			Reason: UnhonoredPinUnknownOption,
+		})
+	}
+	return pins
+}
+
+// FormatUnhonoredOptionPin names the agent, rejected value, and valid set so
+// a stale enum cannot unpin a session without a loud startup warning.
+func FormatUnhonoredOptionPin(agentName, providerName string, pin UnhonoredOptionPin) string {
+	agent := strings.TrimSpace(agentName)
+	if agent == "" {
+		agent = "(unknown)"
+	}
+	provider := strings.TrimSpace(providerName)
+	if provider == "" {
+		provider = "(unknown)"
+	}
+	switch pin.Reason {
+	case UnhonoredPinUnknownOption:
+		return fmt.Sprintf("WARNING: agent %q: option_defaults %s=%q is not in the %q provider schema; flag omitted", agent, pin.Key, pin.Value, provider)
+	default:
+		valid := strings.Join(pin.Valid, ", ")
+		if valid == "" {
+			valid = "(none)"
+		}
+		return fmt.Sprintf("WARNING: agent %q: option_defaults %s=%q is not a valid choice for provider %q (valid: %s); flag omitted", agent, pin.Key, pin.Value, provider, valid)
+	}
+}
+
+func nonEmptyChoiceValues(opt ProviderOption) []string {
+	var out []string
+	for _, c := range opt.Choices {
+		if c.Value != "" {
+			out = append(out, c.Value)
+		}
+	}
+	return out
 }

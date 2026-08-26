@@ -247,6 +247,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned `in_progress` on a dead name. Persistent (non-`one_shot`) pools
   are unaffected — a genuine crash still gets a fresh identity.
 
+- **Unregistered `model` / `effort` pins no longer fail open on launch.** The
+  builtin grok catalog now includes `grok-4.6` and `grok-4.7`, so those pins
+  emit `--model` instead of silently dropping it. A pin that still is not a
+  declared choice (or is not in the provider schema at all) now prints a
+  loud startup warning naming the agent, the rejected value, and the valid
+  set. Named-session resolution already errored on the same values; launch
+  was the silent path (ga-fyh / ra-jbbv0 class).
+
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
   worktree is documented to be "locked to the current commit," but the

@@ -404,6 +404,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "grok-build", Label: "Grok Build", FlagArgs: []string{"--model", "grok-build"}, FlagAliases: [][]string{{"-m", "grok-build"}}},
 					{Value: "grok-composer-2.5", Label: "Grok Composer 2.5", FlagArgs: []string{"--model", "grok-composer-2.5"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5"}}},
 					{Value: "grok-composer-2.5-fast", Label: "Grok Composer 2.5 Fast", FlagArgs: []string{"--model", "grok-composer-2.5-fast"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5-fast"}}},
+					// Frontier coding ids. Gasburger pins grok-4.6 on refinery
+					// and gorkcats; before these entries the launch path found
+					// no FlagArgs and silently omitted --model (ga-fyh).
+					{Value: "grok-4.6", Label: "Grok 4.6", FlagArgs: []string{"--model", "grok-4.6"}, FlagAliases: [][]string{{"-m", "grok-4.6"}}},
+					{Value: "grok-4.7", Label: "Grok 4.7", FlagArgs: []string{"--model", "grok-4.7"}, FlagAliases: [][]string{{"-m", "grok-4.7"}}},
 				},
 			},
 		},

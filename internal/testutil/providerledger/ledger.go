@@ -65,7 +65,8 @@ const (
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
 	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
-	runtimeContractWaiverOwner = "ga-80po0c.3"
+	// Previously ga-80po0c.3, which is not in this rig's ledger.
+	runtimeContractWaiverOwner = "ga-p20"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -325,23 +326,27 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 }
 
 // runtimeWaiverExpiry dates every remaining runtime.Provider waiver owned by
-// runtimeContractWaiverOwner. The prior 2026-08-12 date lapsed and turned the
-// whole ledger check red, so this is a renewal, not a first grant.
+// runtimeContractWaiverOwner.
 //
-// Each gap was re-checked against cmd/gc/runtime_registry.go at renewal: all
-// eight constructors are still live registrations, and none has gained a
-// runnable full contract, so none was retired as stale. The subprocess
-// default-directory composition is the one that could be contracted instead of
-// renewed, and it was.
+// This is the THIRD grant, not the second. Grant 1 expired 2026-08-12 and
+// was renewed to 2026-08-26. Grant 2 has now lapsed too. No contracts
+// landed between those two renewals — the waivers were extended both
+// times, not re-decided.
 //
-// Two weeks, deliberately, and not the 90-day maxWaiverHorizon the validator
-// permits. ga-80po0c.3's only open child has not moved since 2026-07-18, and
-// the same nine waivers already lapsed once and were extended — not
-// re-decided — to this date to unblock an unrelated PR. A long horizon would
-// hide a stalled track behind a green run; a short one puts the question back
-// in front of the owner while the context is still fresh. Renewing again
-// without contracts landing is debt, and the next renewal should say so.
-var runtimeWaiverExpiry = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
+// Each gap was re-checked against cmd/gc/runtime_registry.go at renewal:
+// all eight constructors are still live registrations, and none has gained
+// a runnable full contract, so none was retired as stale.
+//
+// Two weeks, deliberately, and not the 90-day maxWaiverHorizon the
+// validator permits. A long horizon would hide a stalled track behind a
+// green run; a short one puts the question back in front of the owner.
+//
+// The previous owner, ga-80po0c.3, does not exist in this rig's ledger,
+// and its only open child had not moved since 2026-07-18. The 2026-08-26
+// tripwire therefore fired with no owner to catch it. Ownership moves to
+// ga-p20, which exists in this ledger and tracks the actual contract work.
+// This renewal is debt: contracts still have not landed.
+var runtimeWaiverExpiry = time.Date(2026, time.September, 9, 0, 0, 0, 0, time.UTC)
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{

@@ -3265,6 +3265,15 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // pool reconciler can re-pick them. Without this, work orphaned by a
 // reap stays orphaned until someone clears the assignee by hand.
 func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+	return closeBeadWithTranscriptSearchPaths(store, id, reason, now, nil, stderr)
+}
+
+// closeBeadWithTranscriptSearchPaths is closeBead with the transcript search
+// paths made explicit. Callers holding a city config pass
+// worker.MergeSearchPaths(cfg.Daemon.ObservePaths) so a transcript living under
+// a configured observe path is still pinnable; closeBead passes nil, which
+// resolves against the provider default paths.
+func closeBeadWithTranscriptSearchPaths(store beads.Store, id, reason string, now time.Time, transcriptSearchPaths []string, stderr io.Writer) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -3295,8 +3304,22 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// (ga-igcny0.1.1). On a non-atomic Tx the metadata (ordered first) may land
 	// while the Close fails; the helper then reports failure and the reconciler
 	// re-runs the close next tick, so no bead is durably left half-closed.
+	// Pin the transcript into the terminal batch. Resolution has to happen
+	// here, before the bead closes: a closed session is ambiguous against every
+	// session that ever recycled through its workdir, so a pooled worker that
+	// died before capturing a provider session key is unreadable from the
+	// moment it retires (ga-ei0). Pinning is diagnostic aid, never a gate — a
+	// lookup failure is reported and the close proceeds.
+	closePatch := session.ClosePatch(now, reason)
+	pinnedTranscript, pinErr := sessionFrontDoor(store).ResolveTranscriptPin(id, transcriptSearchPaths)
+	if pinErr != nil {
+		fmt.Fprintf(stderr, "session beads: resolving transcript to pin on %s: %v\n", id, pinErr) //nolint:errcheck
+	}
+	if pinnedTranscript != "" {
+		closePatch[session.PinnedTranscriptMetadataKey] = pinnedTranscript
+	}
 	txErr := store.Tx("gc: close session "+id, func(tx beads.Tx) error {
-		if err := tx.SetMetadataBatch(id, session.ClosePatch(now, reason)); err != nil {
+		if err := tx.SetMetadataBatch(id, closePatch); err != nil {
 			return err
 		}
 		return tx.Close(id)

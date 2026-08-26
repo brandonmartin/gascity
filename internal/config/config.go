@@ -1922,7 +1922,12 @@ const (
 	// budget (`timeout 10`) on the assumption it is purely idle-reaping. Cities
 	// with slower live operations raise it via city.toml [dolt]
 	// read_timeout_millis. See #3022 (5m->30s) and the scale_check storm RCA
-	// (30s->15s).
+	// (30s->15s). CALL DOLT_GC('--full') emits no rows until GC finishes, so
+	// this 15s gap cancels mid-GC; raise the listener above expected GC
+	// duration (or set GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS /
+	// GC_DOLT_COMPACT_CALL_TIMEOUT_SECS in the managed-server start
+	// environment, which floors the listener) and restart. Compact's own
+	// GC_DOLT_COMPACT_CALL_TIMEOUT_SECS default does not extend this gap.
 	DefaultDoltReadTimeoutMillis = 15000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
@@ -1950,7 +1955,13 @@ type DoltConfig struct {
 	// 0 means use the managed default.
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
-	// 0 means use the managed default.
+	// 0 means use the managed default. This is an inter-row produce gap, not
+	// total query wall-clock. CALL DOLT_GC('--full') emits no rows until GC
+	// finishes, so the default 15s listener cancels mid-GC; raise this (or
+	// GC_DOLT_READ_TIMEOUT_MILLIS) above expected GC duration and restart
+	// managed dolt. GC_DOLT_COMPACT_CALL_TIMEOUT_SECS only bounds the compact
+	// client unless it or GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS is present in
+	// the managed-server start environment, where it floors the listener.
 	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=15000"`
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.

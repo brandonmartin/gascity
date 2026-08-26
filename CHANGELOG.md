@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The `cursor` provider now exposes cursor-agent's model catalog.** Its
+  options schema carried a single `mcp_approval` key and no `model` key at all,
+  so every `model = "..."` pin on a cursor agent was rejected as an unknown
+  option and the agent silently ran cursor's `auto` default — while the binary
+  had accepted `--model` all along, across 200+ ids. The schema now offers the
+  full catalog, generated from `cursor-agent --list-models` by
+  `scripts/gen-cursor-models.sh` rather than hand-transcribed, and a test flags
+  the snapshot as stale wherever cursor-agent is installed.
+
+  Cursor deliberately gains no `effort` option: `cursor-agent` has no effort
+  flag, because the tier is a suffix of the model id
+  (`claude-opus-5-thinking-xhigh`), with an orthogonal `-fast` variant. Pin the
+  composed id.
+
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
   pass `--allow-unscoped-name`.** Registry pack names are scoped as
   `<github-owner>/<pack>`, and the registry has always reserved bare names for

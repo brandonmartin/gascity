@@ -554,22 +554,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
 				},
 			},
-			// cursor-agent takes --model but publishes no -m short flag, and its
-			// catalog is account-scoped (`cursor-agent --list-models`) and
-			// includes parameterized bracket forms such as
-			// claude-opus-4-8[context=1m,effort=high]. There is no closed set to
-			// enumerate, which is exactly why the option is open: the curated
-			// entries are suggestions and any id the account has reaches the
-			// CLI. Before this option existed a cursor model pin was not in the
-			// schema at all and was dropped without a flag (ga-fyh addendum).
-			modelOption(
-				modelChoiceNoAlias("auto", "Auto (default)"),
-				modelChoiceNoAlias("composer-2.5", "Composer 2.5"),
-				modelChoiceNoAlias("gpt-5.3-codex", "Codex 5.3"),
-				modelChoiceNoAlias("cursor-grok-4.6-high", "Cursor Grok 4.6"),
-				modelChoiceNoAlias("claude-opus-5-thinking-high", "Claude Opus 5 1M Thinking"),
-				modelChoiceNoAlias("claude-sonnet-5-thinking-high", "Claude Sonnet 5 1M Thinking"),
-			),
+			// `cursor-agent --model <id>` reaches the whole account catalog;
+			// before this option existed the schema had no model key at all, so
+			// every model pin on a cursor agent was rejected as an unknown
+			// option and the agent silently ran cursor's "auto" default
+			// (ga-cot). The choices are generated from the binary rather than
+			// hand-transcribed — see cursorModelOption.
+			cursorModelOption(),
 		},
 	},
 	"copilot": {

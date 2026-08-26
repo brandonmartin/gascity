@@ -658,14 +658,16 @@ func isAbandonedRootCandidate(b beads.Bead) bool {
 // guard, so "abandoned" here means "still unclaimed long after anything that
 // would claim it should have".
 //
-// A stepless root has no completion signal of its own, so the sweep leans on
-// the ONE status predicate the launch path already owns:
-// sling.PromoteWorkflowLaunchBead moves a root OUT of the unclaimed set
-// (sling.ShouldPromoteWorkflowLaunchStatus) and into in_progress the moment a
-// worker takes it. Reading claim state back through that same predicate is what
-// keeps the two halves from drifting: a root still carrying an unclaimed status
-// is, by construction, one no worker ever took, and no separately-written
-// status literal can disagree with the promoter about which statuses those are.
+// A stepless root has no completion signal of its own, so the sweep classifies
+// claim state with the ONE status predicate the launch path already owns:
+// sling.ShouldPromoteWorkflowLaunchStatus. That predicate is the single
+// definition of WHICH STATUSES MEAN UNCLAIMED, and reusing it here is what
+// keeps the reaper from drifting into its own status literals. It is not a
+// shared write path: sling.PromoteWorkflowLaunchBead runs only on the graph.v2
+// launch branch (doStartGraphWorkflow, internal/sling/sling_core.go), while the
+// v1 type=molecule root-only pours this sweep mostly targets are moved to
+// in_progress by the worker's own `gc hook --claim`. Both writers land on the
+// same side of the same classifier, which is all this guard needs.
 //
 // Both halves of that matter:
 //
@@ -683,7 +685,15 @@ func isAbandonedRootCandidate(b beads.Bead) bool {
 // queue — and it is bounded three ways: the sweep is opt-in (see
 // closeAbandonedEnv), it only ever considers formula/wisp roots
 // (isAbandonedRootCandidate), and a deployment can park a perpetual root-only
-// root with the gc.gc_exempt marker (isGCExempt).
+// root with the gc.gc_exempt marker (isGCExempt). Note the attached case lands
+// squarely in that arm: an attached root-only wisp
+// (privatizeAttachedRootOnlyWisp, internal/sling/sling.go) is deliberately
+// never routed and never claimed — the source bead is the claimable unit — so
+// it stays unclaimed by construction and this arm closes it one TTL after pour
+// regardless of how live the source bead's work still is
+// (subtreeTerminalExcludingRoot walks molecule.ListSubtree, which never reaches
+// that source bead). A deployment that pours such wisps and needs them to
+// outlive the TTL marks them gc.gc_exempt.
 func steplessRootIsAbandoned(b beads.Bead) bool {
 	return sling.ShouldPromoteWorkflowLaunchStatus(b.Status)
 }

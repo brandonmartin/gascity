@@ -1825,6 +1825,101 @@ func TestWispGC_LeavesSteplessExemptRootPastTTL(t *testing.T) {
 	}
 }
 
+// TestWispGC_LeavesSteplessRootWithLiveAttachmentSourcePastTTL pins the
+// attached-wisp exception. privatizeAttachedRootOnlyWisp
+// (internal/sling/sling.go) leaves an attached root-only wisp as a type=molecule
+// root with gc.kind stripped, deliberately never routed and never claimed — the
+// SOURCE bead is the claimable unit — so it is unclaimed by construction and the
+// claim predicate alone would close it one TTL after pour. The source bead's
+// forward molecule_id pointer is what keeps it alive; closing the root out from
+// under a live source would un-block findBlockingMolecule and let a second
+// attachment land on the same source bead.
+func TestWispGC_LeavesSteplessRootWithLiveAttachmentSourcePastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-live",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("attached stepless wisp status = %q, want open (live source bead still attached)", root.Status)
+	}
+}
+
+// TestWispGC_ClosesSteplessRootWhenAttachmentSourceTerminal is the far side of
+// the attachment guard: once the source bead goes terminal there is no live
+// attachment state left to protect, so the root reaps normally. Without this
+// case the guard above could silently blunt the fix into "never close a
+// stepless root" again.
+func TestWispGC_ClosesSteplessRootWhenAttachmentSourceTerminal(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-done",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("attached stepless wisp status = %q, want closed (source bead terminal)", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
 func TestWispGC_RespectsTTLCutoff(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{

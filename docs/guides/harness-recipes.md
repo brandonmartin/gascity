@@ -33,7 +33,7 @@ Two things hold for every recipe:
 | Grok | `grok` | — · `XAI_API_KEY` | yes |
 | Kimi Code | `kimi` | `KIMI_BASE_URL` · `KIMI_API_KEY` | yes |
 | Kiro | `kiro` | — · `KIRO_API_KEY` | — |
-| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | — |
+| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | yes |
 | GitHub Copilot | `copilot` | `COPILOT_PROVIDER_BASE_URL` · `COPILOT_PROVIDER_API_KEY` / `COPILOT_GITHUB_TOKEN` | — |
 | Sourcegraph AMP | `amp` | `AMP_URL` · `AMP_API_KEY` | — |
 | OpenCode | `opencode` | gateway (per-upstream) | yes |
@@ -150,14 +150,28 @@ api_key = "$XAI_API_KEY"
 
 ### Cursor Agent — `provider = "cursor"`
 
-Reads `CURSOR_API_KEY` (`cursor-agent`; no built-in `model` option — Cursor picks
-the model).
+Reads `CURSOR_API_KEY` (`cursor-agent`), and takes a `model` option mapped to
+`cursor-agent --model`. Cursor serves 200+ ids across the GPT, Claude, Grok,
+Gemini and Composer families; `cursor-agent --list-models` prints the set your
+account can reach.
+
+Cursor has no `effort` option because `cursor-agent` has no effort flag — **the
+effort tier is part of the model id**, as a `-low` / `-medium` / `-high` /
+`-xhigh` / `-max` suffix, with an orthogonal `-fast` variant. Pin the composed
+id:
 
 ```toml
-provider = "cursor"
+provider        = "cursor"
+option_defaults = { model = "claude-opus-5-thinking-xhigh" }
+# also: claude-opus-5-high · claude-sonnet-5-thinking-high · cursor-grok-4.6-high
+#       gpt-5.3-codex-xhigh · gemini-3.7-flash-high · composer-2.5 · auto
 [upstreams.cursor]
 api_key = "$CURSOR_API_KEY"
 ```
+
+Cursor also accepts a parameterized form — `claude-opus-4-8[context=1m,effort=high]`
+— which the built-in choices do not enumerate; add it through `options_schema`
+if you need it.
 
 ### Kiro — `provider = "kiro"`
 

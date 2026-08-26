@@ -386,7 +386,9 @@ func (rp *ResolvedProvider) TitleModelFlagArgs() []string {
 // ResolveDefaultArgs produces CLI flag args from EffectiveDefaults.
 // For each schema option with an effective default, the corresponding
 // FlagArgs are emitted. Options with no effective default (or whose
-// default is "") are skipped.
+// default is "") are skipped. Values that are not a declared choice are
+// also skipped — call UnhonoredOptionPins and warn; do not treat a missing
+// flag as success (ga-fyh).
 // Args are emitted in schema declaration order for deterministic output.
 func (rp *ResolvedProvider) ResolveDefaultArgs() []string {
 	var args []string

@@ -136,7 +136,7 @@ Reads `XAI_API_KEY` (key only — no standard base-URL var).
 
 ```toml
 provider        = "grok"
-option_defaults = { model = "grok-build" }  # grok-build · grok-composer-2.5 · grok-composer-2.5-fast
+option_defaults = { model = "grok-4.6" }  # grok-4.7 · grok-4.6 · grok-build · grok-composer-2.5 · grok-composer-2.5-fast
 
 # direct: just set XAI_API_KEY in the controller environment
 [upstreams.xai]

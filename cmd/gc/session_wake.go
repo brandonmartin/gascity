@@ -223,12 +223,12 @@ func beginSessionDrainInfo(
 const executionStalledDrainReason = "execution-stalled"
 
 func drainReasonCancelable(reason string) bool {
-	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
+	return reason != "config-drift" && reason != "orphaned" && reason != string(sessions.SleepReasonSuspended) &&
 		reason != executionStalledDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
-	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
+	return reason != "orphaned" && reason != string(sessions.SleepReasonSuspended) && reason != executionStalledDrainReason
 }
 
 const (

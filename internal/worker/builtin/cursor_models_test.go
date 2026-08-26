@@ -2,7 +2,7 @@ package builtin
 
 import (
 	"bufio"
-	"os/exec"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -108,47 +108,133 @@ func TestBuiltinCursorExpressesEffortInModelID(t *testing.T) {
 	}
 }
 
-// TestBuiltinCursorCatalogMatchesBinary is the drift guard: the catalog is a
-// generated snapshot of `cursor-agent --list-models`, so any id the binary
-// offers and the catalog lacks means the snapshot is stale. Skipped where
-// cursor-agent is not installed (CI); regenerate with
-// scripts/gen-cursor-models.sh.
-//
-// Extra catalog ids are reported but not fatal: `--list-models` is
-// account-scoped, so a narrower account legitimately sees fewer.
-func TestBuiltinCursorCatalogMatchesBinary(t *testing.T) {
-	bin, err := exec.LookPath("cursor-agent")
-	if err != nil {
-		t.Skip("cursor-agent not installed; catalog drift not checkable here")
+// TestParseCursorModelList pins the `cursor-agent --list-models` line format
+// the generator (scripts/gen-cursor-models.sh) and catalog snapshot share.
+// Header, tip, and malformed lines are skipped; body lines are "<id> - <label>".
+func TestParseCursorModelList(t *testing.T) {
+	const listing = "" +
+		"Available models:\n" +
+		"\n" +
+		"auto - Auto (default)\n" +
+		"claude-opus-5-high - Claude Opus 5 High\n" +
+		"id with space - not an id\n" +
+		"no-separator-here\n" +
+		" - missing id\n" +
+		"missing-label - \n" +
+		"cursor-grok-4.6-high - Cursor Grok 4.6 High\n" +
+		"Tip: pin with --model <id>\n"
+
+	got := parseCursorModelList(listing)
+	want := []cursorModel{
+		{ID: "auto", Label: "Auto (default)"},
+		{ID: "claude-opus-5-high", Label: "Claude Opus 5 High"},
+		{ID: "cursor-grok-4.6-high", Label: "Cursor Grok 4.6 High"},
 	}
-	out, err := exec.Command(bin, "--list-models").Output()
-	if err != nil {
-		t.Skipf("cursor-agent --list-models failed (not logged in?): %v", err)
+	if len(got) != len(want) {
+		t.Fatalf("parseCursorModelList got %d models, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("model[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestBuiltinCursorCatalogMatchesListing is the drift guard without a live
+// subprocess: the catalog is a generated snapshot of `cursor-agent --list-models`.
+// Any id the listing offers and the catalog lacks means the snapshot is stale;
+// regenerate with scripts/gen-cursor-models.sh. Extra catalog ids are reported
+// but not fatal — `--list-models` is account-scoped, so a narrower account
+// legitimately sees fewer.
+func TestBuiltinCursorCatalogMatchesListing(t *testing.T) {
+	catalog := []cursorModel{
+		{ID: "auto", Label: "Auto (default)"},
+		{ID: "claude-opus-5-high", Label: "Claude Opus 5 High"},
+		{ID: "account-only", Label: "Only this snapshot"},
 	}
 
-	live := parseCursorModelList(string(out))
-	if len(live) == 0 {
-		t.Skip("cursor-agent --list-models returned no ids")
-	}
+	t.Run("listing ids must be in the catalog", func(t *testing.T) {
+		live := parseCursorModelList("" +
+			"Available models:\n" +
+			"auto - Auto (default)\n" +
+			"claude-opus-5-high - Claude Opus 5 High\n" +
+			"brand-new-id - Brand New\n")
+		diff := diffCursorCatalog(catalog, live)
+		if len(diff.missing) != 1 || diff.missing[0].ID != "brand-new-id" {
+			t.Fatalf("missing = %v, want [brand-new-id]", diff.missing)
+		}
+		if len(diff.labelDrift) != 0 {
+			t.Fatalf("labelDrift = %v, want none", diff.labelDrift)
+		}
+	})
 
-	have := make(map[string]string, len(cursorModels))
-	for _, model := range cursorModels {
+	t.Run("label drift is reported", func(t *testing.T) {
+		live := parseCursorModelList("auto - Auto renamed\n")
+		diff := diffCursorCatalog(catalog, live)
+		if len(diff.labelDrift) != 1 || diff.labelDrift[0].ID != "auto" || diff.labelDrift[0].Label != "Auto renamed" {
+			t.Fatalf("labelDrift = %v, want auto/Auto renamed", diff.labelDrift)
+		}
+	})
+
+	t.Run("extra catalog ids are non-fatal", func(t *testing.T) {
+		live := parseCursorModelList("auto - Auto (default)\nclaude-opus-5-high - Claude Opus 5 High\n")
+		diff := diffCursorCatalog(catalog, live)
+		if len(diff.missing) != 0 || len(diff.labelDrift) != 0 {
+			t.Fatalf("unexpected fatal drift: missing=%v labelDrift=%v", diff.missing, diff.labelDrift)
+		}
+		if len(diff.extraCatalog) != 1 || diff.extraCatalog[0] != "account-only" {
+			t.Fatalf("extraCatalog = %v, want [account-only]", diff.extraCatalog)
+		}
+	})
+
+	t.Run("generated catalog matches a listing of itself", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("Available models:\n\n")
+		for _, model := range cursorModels {
+			b.WriteString(model.ID)
+			b.WriteString(" - ")
+			b.WriteString(model.Label)
+			b.WriteByte('\n')
+		}
+		diff := diffCursorCatalog(cursorModels, parseCursorModelList(b.String()))
+		if len(diff.missing) != 0 || len(diff.labelDrift) != 0 || len(diff.extraCatalog) != 0 {
+			t.Fatalf("self-listing drifted: missing=%v labelDrift=%v extra=%v",
+				diff.missing, diff.labelDrift, diff.extraCatalog)
+		}
+	})
+}
+
+type cursorCatalogDiff struct {
+	missing      []cursorModel
+	labelDrift   []cursorModel
+	extraCatalog []string
+}
+
+// diffCursorCatalog is the function seam the drift tests drive: compare a
+// catalog snapshot against a parsed --list-models listing. Live cursor-agent
+// invocation belongs to scripts/gen-cursor-models.sh, not the unit tests.
+func diffCursorCatalog(catalog, live []cursorModel) cursorCatalogDiff {
+	have := make(map[string]string, len(catalog))
+	for _, model := range catalog {
 		have[model.ID] = model.Label
 	}
+	var diff cursorCatalogDiff
 	for _, model := range live {
 		label, ok := have[model.ID]
 		if !ok {
-			t.Errorf("cursor-agent offers %q (%s), catalog does not — run scripts/gen-cursor-models.sh", model.ID, model.Label)
+			diff.missing = append(diff.missing, model)
 			continue
 		}
 		if label != model.Label {
-			t.Errorf("%s label = %q, cursor-agent says %q — run scripts/gen-cursor-models.sh", model.ID, label, model.Label)
+			diff.labelDrift = append(diff.labelDrift, model)
 		}
 		delete(have, model.ID)
 	}
 	for id := range have {
-		t.Logf("catalog lists %q, this account's cursor-agent does not (account scoping or a removed id)", id)
+		diff.extraCatalog = append(diff.extraCatalog, id)
 	}
+	sort.Strings(diff.extraCatalog)
+	return diff
 }
 
 // parseCursorModelList parses `cursor-agent --list-models` output, whose body

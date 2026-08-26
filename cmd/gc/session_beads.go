@@ -3658,6 +3658,23 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 // With a nil or empty preserve set this behaves exactly like closeBead, which
 // is the contract every other caller relies on.
 func closeBeadPreservingAssignees(store beads.Store, id, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
+	return closeSessionBead(store, id, reason, preserve, nil, now, stderr)
+}
+
+// closeBeadWithTranscriptSearchPaths is closeBead with the transcript search
+// paths made explicit. Callers holding a city config pass
+// worker.MergeSearchPaths(cfg.Daemon.ObservePaths) so a transcript living under
+// a configured observe path is still pinnable; closeBead passes nil, which
+// resolves against the provider default paths.
+func closeBeadWithTranscriptSearchPaths(store beads.Store, id, reason string, now time.Time, transcriptSearchPaths []string, stderr io.Writer) bool {
+	return closeSessionBead(store, id, reason, nil, transcriptSearchPaths, now, stderr)
+}
+
+// closeSessionBead is the shared body behind closeBead,
+// closeBeadPreservingAssignees, and closeBeadWithTranscriptSearchPaths: it
+// pins the session transcript, closes the bead with its terminal metadata, and
+// releases the work assigned to it except for the identities in preserve.
+func closeSessionBead(store beads.Store, id, reason string, preserve, transcriptSearchPaths []string, now time.Time, stderr io.Writer) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -3697,7 +3714,23 @@ func closeBeadPreservingAssignees(store beads.Store, id, reason string, preserve
 	// with the metadata ordered first. There the metadata may land while the
 	// Close fails; the helper then reports failure and the reconciler re-runs
 	// the close next tick, so no bead is durably left half-closed.
-	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(id, session.ClosePatch(now, reason), "gc: close session "+id, now)
+	//
+	// Pin the transcript into the terminal patch. Resolution has to happen
+	// here, before the bead closes: a closed session is ambiguous against every
+	// session that ever recycled through its workdir, so a pooled worker that
+	// died before capturing a provider session key is unreadable from the
+	// moment it retires (ga-ei0). Pinning is diagnostic aid, never a gate — a
+	// lookup failure is reported and the close proceeds.
+	sessFront := sessionFrontDoor(store)
+	closePatch := session.ClosePatch(now, reason)
+	pinnedTranscript, pinErr := sessFront.ResolveTranscriptPin(id, transcriptSearchPaths)
+	if pinErr != nil {
+		fmt.Fprintf(stderr, "session beads: resolving transcript to pin on %s: %v\n", id, pinErr) //nolint:errcheck
+	}
+	if pinnedTranscript != "" {
+		closePatch[session.PinnedTranscriptMetadataKey] = pinnedTranscript
+	}
+	closed, err := sessFront.CloseWithTerminalPatch(id, closePatch, "gc: close session "+id, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
 		return false

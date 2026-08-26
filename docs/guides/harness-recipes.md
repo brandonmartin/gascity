@@ -159,10 +159,18 @@ option_defaults = { model = "auto" }  # auto · composer-2.5 · gpt-5.3-codex ·
 # than dropped. Cursor's catalog is account-scoped — run `cursor-agent
 # --list-models` to see yours — and accepts parameterized ids such as
 # `claude-opus-4-8[context=1m,effort=high]`.
+# Cursor has no `effort` option because `cursor-agent` has no effort flag —
+# the effort tier is part of the model id, as a `-low` / `-medium` / `-high` /
+# `-xhigh` / `-max` suffix, with an orthogonal `-fast` variant. Pin the
+# composed id, e.g. `claude-opus-5-thinking-xhigh`.
 
 [upstreams.cursor]
 api_key = "$CURSOR_API_KEY"
 ```
+
+Cursor also accepts a parameterized form — `claude-opus-4-8[context=1m,effort=high]`
+— which the built-in choices do not enumerate; add it through `options_schema`
+if you need it.
 
 ### Kiro — `provider = "kiro"`
 

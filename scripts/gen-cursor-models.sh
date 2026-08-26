@@ -5,8 +5,8 @@
 # cursor-agent exposes 200+ model ids and folds the effort axis into the id, so
 # the list is far too large and too fast-moving to hand-maintain: it is a
 # snapshot, refreshed by running this script against an installed, logged-in
-# cursor-agent. TestBuiltinCursorCatalogMatchesBinary flags the snapshot as
-# stale wherever the binary is present.
+# cursor-agent. Unit tests pin the listing format and catalog-diff rules against
+# fixtures; they do not shell out to cursor-agent.
 #
 # Entries are sorted by id: cursor-agent prints its catalog in an unstable
 # order, and an unsorted snapshot would churn the whole file on every refresh.

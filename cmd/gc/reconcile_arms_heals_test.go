@@ -357,6 +357,7 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 		session.SleepReasonWaitHold, session.SleepReasonRateLimit, session.SleepReasonFailedCreate,
 		session.SleepReasonProviderTerminalError, session.SleepReasonRuntimeMissing, session.SleepReasonQuarantine,
 		session.SleepReasonContextChurn, session.SleepReasonMaxSessionAge, session.SleepReasonAssignedWorkExhausted,
+		session.SleepReasonSuspended,
 	}
 	for _, state := range []string{"creating", "active", "awake"} {
 		for _, reason := range reasons {
@@ -383,7 +384,7 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 		session.SleepReasonIdle: true, session.SleepReasonIdleTimeout: true, session.SleepReasonNoWakeReason: true,
 		session.SleepReasonConfigDrift: true, session.SleepReasonDrained: true, session.SleepReasonCityStop: true,
 		session.SleepReasonUserHold: true, session.SleepReasonWaitHold: true, session.SleepReasonRateLimit: true,
-		session.SleepReasonRuntimeMissing: true,
+		session.SleepReasonRuntimeMissing: true, session.SleepReasonSuspended: true,
 	}
 	for _, reason := range reasons {
 		if got := session.SleepReasonKeepsContinuation(string(reason)); got != keeps[reason] {

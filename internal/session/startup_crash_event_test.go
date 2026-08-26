@@ -133,7 +133,7 @@ func TestEnsureRunningEmitsSessionCrashedWhenStartupDeathIsTerminal(t *testing.T
 	store := beads.NewMemStore()
 	sp := &paneStartupDeathProvider{Fake: runtime.NewFake()}
 	rec := events.NewFake()
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter), WithEventRecorder(rec))
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()), WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter), WithEventRecorder(rec))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template: "worker",
@@ -148,7 +148,7 @@ func TestEnsureRunningEmitsSessionCrashedWhenStartupDeathIsTerminal(t *testing.T
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "session_key", ""); err != nil {
@@ -156,7 +156,7 @@ func TestEnsureRunningEmitsSessionCrashedWhenStartupDeathIsTerminal(t *testing.T
 	}
 
 	sp.armed = true
-	err = mgr.Send(context.Background(), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
 	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 		t.Fatalf("Send error = %v, want ErrSessionDiedDuringStartup", err)
 	}
@@ -175,7 +175,7 @@ func TestStartRuntimeOnlyEmitsSessionCrashedWhenStartupDeathIsTerminal(t *testin
 	store := beads.NewMemStore()
 	sp := &paneStartupDeathProvider{Fake: runtime.NewFake()}
 	rec := events.NewFake()
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter), WithEventRecorder(rec))
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()), WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter), WithEventRecorder(rec))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template: "worker",
@@ -190,7 +190,7 @@ func TestStartRuntimeOnlyEmitsSessionCrashedWhenStartupDeathIsTerminal(t *testin
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "session_key", ""); err != nil {
@@ -198,7 +198,7 @@ func TestStartRuntimeOnlyEmitsSessionCrashedWhenStartupDeathIsTerminal(t *testin
 	}
 
 	sp.armed = true
-	err = mgr.StartRuntimeOnly(context.Background(), info.ID, "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
+	err = mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
 	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 		t.Fatalf("StartRuntimeOnly error = %v, want ErrSessionDiedDuringStartup", err)
 	}
@@ -212,7 +212,7 @@ func TestEnsureRunningDoesNotEmitSessionCrashedWhenStaleKeyRetrySucceeds(t *test
 
 	resumeCmd := "claude --dangerously --resume " + sessionKey
 	sp.armed = true
-	if err := mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send should recover: %v", err)
 	}
 	for _, e := range rec.Events {

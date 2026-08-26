@@ -211,8 +211,14 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(content, `LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"`) {
 		t.Fatal("pre-push hook must not replace the canonical machine-aware default with a fixed three-job cap")
 	}
-	if !strings.Contains(content, `exec "$repo_root/.githooks/lib/push-suite.sh"`) {
+	if !strings.Contains(content, `.githooks/lib/push-suite.sh`) {
 		t.Fatal("pre-push hook must delegate the push-time suite to .githooks/lib/push-suite.sh")
+	}
+	if strings.Contains(content, `exec "$repo_root/.githooks/lib/push-suite.sh"`) {
+		t.Fatal("pre-push hook must not exec the suite: SIGPIPE (141) from the suite has to be intercepted and fail-closed (ga-34a)")
+	}
+	if !strings.Contains(content, "141") {
+		t.Fatal("pre-push hook must fail-close a 141 from the suite (ga-34a)")
 	}
 	suite, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "push-suite.sh"))
 	if err != nil {
@@ -223,6 +229,9 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	}
 	if !strings.Contains(string(suite), "exec make test-fast-parallel") {
 		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
+	}
+	if strings.Contains(content, "exec make test-fast-parallel") {
+		t.Fatal("pre-push hook must not exec make: SIGPIPE (141) from the suite has to be intercepted and fail-closed (ga-34a)")
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))

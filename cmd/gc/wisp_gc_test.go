@@ -1677,6 +1677,44 @@ func TestWispGC_ClosesAbandonedSteplessUnclaimedRootPastTTL(t *testing.T) {
 	}
 }
 
+// TestWispGC_ClosesAssignedButUnclaimedSteplessRootPastTTL pins the behavior
+// steplessRootIsAbandoned's doc comment declares intentional: routed demand
+// that has sat unclaimed past the TTL is reaped. The candidate query applies
+// no assignee filter, so an assigned root reaches the predicate exactly as an
+// unassigned one does — asserted here so a future edit cannot flip it silently.
+func TestWispGC_ClosesAssignedButUnclaimedSteplessRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-routed",
+			Status:    "open",
+			Type:      "molecule",
+			Assignee:  "repo/refinery",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-routed")
+	if err != nil {
+		t.Fatalf("Get(wisp-routed): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("assigned unclaimed wisp status = %q, want closed (stale routed demand past TTL)", root.Status)
+	}
+}
+
 // TestWispGC_LeavesSteplessClaimedRootPastTTL is the safety half of the
 // stepless allowance. A claimed (in_progress) stepless root is held by a live
 // worker, and a root bead's UpdatedAt does NOT advance while its agent works —

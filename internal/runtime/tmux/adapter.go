@@ -1230,6 +1230,10 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return err
 	}
 
+	// Step 0.5: Pre-trust the workdir for providers that would otherwise show a
+	// folder-trust dialog whose "exit" option is the default. See ga-1e7.
+	pretrustProviderWorkspace(cfg)
+
 	// Step 1: Ensure fresh session (zombie detection).
 	if err := ensureFreshSession(ops, name, cfg); err != nil {
 		return err
@@ -1307,6 +1311,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	// Pre-trust the (possibly new) workdir before the agent respawns, matching
+	// doStartSession's Step 0.5 rationale. See ga-1e7.
+	pretrustProviderWorkspace(cfg)
 
 	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
 	if err != nil {
@@ -1488,6 +1496,65 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 		}
 	}
 	return nil
+}
+
+// pretrustProviderWorkspace pre-answers per-provider first-run trust prompts
+// for cfg.WorkDir so the provider never renders the modal. Currently handles
+// Claude Code, whose folder-trust dialog defaults to "No, exit" and (on a
+// long-dormant seat or a fresh HOME) has been observed to kill the pane
+// exit 1, silently churning the session creating→asleep. See ga-1e7.
+//
+// Best-effort by design: gc has no better recovery than surfacing the modal
+// itself, so a write failure is logged (via stderr, matching other startup
+// warnings) rather than aborting the start.
+func pretrustProviderWorkspace(cfg runtime.Config) {
+	work := strings.TrimSpace(cfg.WorkDir)
+	if work == "" {
+		return
+	}
+	if !isClaudeFamilyProvider(cfg) {
+		return
+	}
+	home := strings.TrimSpace(cfg.Env["HOME"])
+	if home == "" {
+		home = strings.TrimSpace(os.Getenv("HOME"))
+	}
+	if home == "" {
+		return
+	}
+	configDir := strings.TrimSpace(cfg.Env["CLAUDE_CONFIG_DIR"])
+	if configDir == "" {
+		configDir = strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	}
+	if err := runtime.EnsureClaudeProjectTrusted(home, configDir, work); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: pre-trusting claude workdir %q for session: %v\n", work, err)
+	}
+}
+
+// isClaudeFamilyProvider reports whether cfg launches a Claude Code family
+// binary. The trust modal is a Claude-specific screen — codex, gemini, grok
+// and friends have their own dialog machinery already handled by
+// AcceptStartupDialogs.
+func isClaudeFamilyProvider(cfg runtime.Config) bool {
+	if strings.EqualFold(strings.TrimSpace(cfg.ProviderName), "claude") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.ProviderOverlayName), "claude") {
+		return true
+	}
+	// Fallback for callers that construct a Config without ProviderName set —
+	// match a bare "claude" invocation but not other tools whose name happens
+	// to contain the substring (e.g. a hypothetical "claudette" wrapper).
+	cmd := strings.TrimSpace(cfg.Command)
+	if cmd == "" {
+		return false
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return false
+	}
+	base := filepath.Base(fields[0])
+	return base == "claude"
 }
 
 // ensureFreshSession creates a session, handling stale tmux state.

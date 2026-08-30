@@ -2940,3 +2940,55 @@ func TestRunSetupCommandFailureOmitsCredentials(t *testing.T) {
 		}
 	}
 }
+
+// TestDoStartSession_PretrustsClaudeWorkspace verifies that the claude
+// provider's workdir is pre-recorded in ~/.claude.json as trusted before the
+// pane starts, so Claude's folder-trust modal never renders. See ga-1e7.
+func TestDoStartSession_PretrustsClaudeWorkspace(t *testing.T) {
+	home := t.TempDir()
+	work := t.TempDir()
+	ops := &fakeStartOps{}
+
+	err := doStartSession(context.Background(), ops, "test-sess", runtime.Config{
+		WorkDir:      work,
+		Command:      "claude",
+		ProviderName: "claude",
+		Env:          map[string]string{"HOME": home},
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		t.Fatalf("read ~/.claude.json: %v", err)
+	}
+	if !strings.Contains(string(data), `"hasTrustDialogAccepted": true`) {
+		t.Fatalf("hasTrustDialogAccepted missing from state file:\n%s", data)
+	}
+	if !strings.Contains(string(data), work) {
+		t.Fatalf("workdir %q not recorded in state file:\n%s", work, data)
+	}
+}
+
+// TestDoStartSession_SkipsPretrustForNonClaudeProvider guards against a
+// regression where every provider gets ~/.claude.json seeded, which would
+// pollute the user's config for codex/gemini/grok/... starts.
+func TestDoStartSession_SkipsPretrustForNonClaudeProvider(t *testing.T) {
+	home := t.TempDir()
+	ops := &fakeStartOps{}
+
+	err := doStartSession(context.Background(), ops, "test-sess", runtime.Config{
+		WorkDir:      t.TempDir(),
+		Command:      "codex",
+		ProviderName: "codex",
+		Env:          map[string]string{"HOME": home},
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
+		t.Fatalf("~/.claude.json should not exist for non-claude provider, got err=%v", err)
+	}
+}

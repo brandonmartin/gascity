@@ -77,6 +77,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("ensuring instance token: %w", err)
 	}
 	cfg.Env = injectSessionRuntimeHintsEnv(cfg.Env, cfg)
+	cfg.Env = inheritSessionHomeEnv(cfg.Env)
 
 	// Store workDir for CopyTo.
 	if cfg.WorkDir != "" {
@@ -181,6 +182,30 @@ func injectSessionRuntimeHintsEnv(env map[string]string, cfg runtime.Config) map
 	return cloned
 }
 
+// inheritSessionHomeEnv copies HOME and CLAUDE_CONFIG_DIR from the process
+// environment into the session env when the caller did not set them. tmux
+// panes already inherit those variables via os.Environ(); making them
+// explicit in cfg.Env lets pretrustProviderWorkspace seed the same location
+// Claude will read, without doStartSession itself reaching into process HOME
+// (which leaks ~/.claude.json across successive unit tests — ga-1e7).
+func inheritSessionHomeEnv(env map[string]string) map[string]string {
+	cloned := make(map[string]string, len(env)+2)
+	for k, v := range env {
+		cloned[k] = v
+	}
+	if strings.TrimSpace(cloned["HOME"]) == "" {
+		if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+			cloned["HOME"] = home
+		}
+	}
+	if strings.TrimSpace(cloned["CLAUDE_CONFIG_DIR"]) == "" {
+		if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+			cloned["CLAUDE_CONFIG_DIR"] = dir
+		}
+	}
+	return cloned
+}
+
 // joinNonEmpty joins trimmed non-empty entries with sep; returns "" if none.
 func joinNonEmpty(parts []string, sep string) string {
 	out := make([]string, 0, len(parts))
@@ -234,10 +259,14 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // (respawn-pane -k) and the post-launch orchestration re-run. This is the
 // agent-half of the runtime/transport un-weld (B1) — it lets the reconciler apply
 // a launch-only config change without the full reprovision a Stop+Start forces.
-// Unlike Start it does NOT regenerate the instance token, re-inject env hints, or
-// re-stage files (those are provision-half and unchanged on a launch-only change),
-// and on failure it leaves the warm box in place rather than tearing it down.
+// Unlike Start it does NOT regenerate the instance token, re-inject runtime
+// hints, or re-stage files (those are provision-half and unchanged on a
+// launch-only change), and on failure it leaves the warm box in place rather
+// than tearing it down. It does copy process HOME/CLAUDE_CONFIG_DIR into
+// cfg.Env when unset so pretrust can seed Claude trust without doRelaunchSession
+// reading the process environment (shared with unit tests — ga-1e7).
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	cfg.Env = inheritSessionHomeEnv(cfg.Env)
 	// The runtime dir is what makes the startup-nudge and start-crash
 	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
 	// unconfirmed startup nudge on this path was suppressed by
@@ -1378,6 +1407,10 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return err
 	}
 
+	// Step 0.5: Pre-trust the workdir for providers that would otherwise show a
+	// folder-trust dialog whose "exit" option is the default. See ga-1e7.
+	pretrustProviderWorkspace(cfg)
+
 	// Step 1: Ensure fresh session (zombie detection).
 	if err := ensureFreshSession(ops, name, cfg); err != nil {
 		return err
@@ -1455,6 +1488,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	// Pre-trust the (possibly new) workdir before the agent respawns, matching
+	// doStartSession's Step 0.5 rationale. See ga-1e7.
+	pretrustProviderWorkspace(cfg)
 
 	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
 	if err != nil {
@@ -1784,6 +1821,66 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 		}
 	}
 	return nil
+}
+
+// pretrustProviderWorkspace pre-answers per-provider first-run trust prompts
+// for cfg.WorkDir so the provider never renders the modal. Currently handles
+// Claude Code, whose folder-trust dialog defaults to "No, exit" and (on a
+// long-dormant seat or a fresh HOME) has been observed to kill the pane
+// exit 1, silently churning the session creating→asleep. See ga-1e7.
+//
+// Best-effort by design: gc has no better recovery than surfacing the modal
+// itself, so a write failure is logged (via stderr, matching other startup
+// warnings) rather than aborting the start.
+//
+// HOME and CLAUDE_CONFIG_DIR are taken only from cfg.Env — never from the
+// process environment. doStartSession is called directly by unit tests that
+// share a process HOME; falling back to os.Getenv leaked ~/.claude.json
+// across cases and blew the 1ms deadline-treated-as-success tests (ga-1e7).
+// Production Start/Relaunch copy process HOME into cfg.Env via
+// inheritSessionHomeEnv before reaching this helper.
+func pretrustProviderWorkspace(cfg runtime.Config) {
+	work := strings.TrimSpace(cfg.WorkDir)
+	if work == "" {
+		return
+	}
+	if !isClaudeFamilyProvider(cfg) {
+		return
+	}
+	home := strings.TrimSpace(cfg.Env["HOME"])
+	if home == "" {
+		return
+	}
+	configDir := strings.TrimSpace(cfg.Env["CLAUDE_CONFIG_DIR"])
+	if err := runtime.EnsureClaudeProjectTrusted(home, configDir, work); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: pre-trusting claude workdir %q for session: %v\n", work, err)
+	}
+}
+
+// isClaudeFamilyProvider reports whether cfg launches a Claude Code family
+// binary. The trust modal is a Claude-specific screen — codex, gemini, grok
+// and friends have their own dialog machinery already handled by
+// AcceptStartupDialogs.
+func isClaudeFamilyProvider(cfg runtime.Config) bool {
+	if strings.EqualFold(strings.TrimSpace(cfg.ProviderName), "claude") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.ProviderOverlayName), "claude") {
+		return true
+	}
+	// Fallback for callers that construct a Config without ProviderName set —
+	// match a bare "claude" invocation but not other tools whose name happens
+	// to contain the substring (e.g. a hypothetical "claudette" wrapper).
+	cmd := strings.TrimSpace(cfg.Command)
+	if cmd == "" {
+		return false
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return false
+	}
+	base := filepath.Base(fields[0])
+	return base == "claude"
 }
 
 // ensureFreshSession creates a session, handling stale tmux state.

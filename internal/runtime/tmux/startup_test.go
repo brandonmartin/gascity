@@ -376,6 +376,46 @@ func TestInjectSessionRuntimeHintsEnvPreservesExplicitProvider(t *testing.T) {
 	}
 }
 
+func TestInheritSessionHomeEnvCopiesProcessHomeWhenUnset(t *testing.T) {
+	home := t.TempDir()
+	configDir := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	env := inheritSessionHomeEnv(map[string]string{"GC_AGENT": "mayor"})
+	if got := env["HOME"]; got != home {
+		t.Fatalf("HOME = %q, want process HOME %q", got, home)
+	}
+	fromNil := inheritSessionHomeEnv(nil)
+	if got := fromNil["HOME"]; got != home {
+		t.Fatalf("nil env HOME = %q, want process HOME %q", got, home)
+	}
+	if got := env["CLAUDE_CONFIG_DIR"]; got != configDir {
+		t.Fatalf("CLAUDE_CONFIG_DIR = %q, want process value %q", got, configDir)
+	}
+	if got := env["GC_AGENT"]; got != "mayor" {
+		t.Fatalf("GC_AGENT = %q, want mayor (other keys must be preserved)", got)
+	}
+}
+
+func TestInheritSessionHomeEnvPreservesExplicitHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+
+	explicitHome := "/explicit/home"
+	explicitConfig := "/explicit/claude-config"
+	env := inheritSessionHomeEnv(map[string]string{
+		"HOME":              explicitHome,
+		"CLAUDE_CONFIG_DIR": explicitConfig,
+	})
+	if got := env["HOME"]; got != explicitHome {
+		t.Fatalf("HOME = %q, want explicit %q", got, explicitHome)
+	}
+	if got := env["CLAUDE_CONFIG_DIR"]; got != explicitConfig {
+		t.Fatalf("CLAUDE_CONFIG_DIR = %q, want explicit %q", got, explicitConfig)
+	}
+}
+
 func TestDoStartSession_FullSequence(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,
@@ -2990,5 +3030,33 @@ func TestDoStartSession_SkipsPretrustForNonClaudeProvider(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
 		t.Fatalf("~/.claude.json should not exist for non-claude provider, got err=%v", err)
+	}
+}
+
+// TestDoStartSession_DoesNotSeedSharedProcessHome is the ga-1e7 isolation
+// regression: doStartSession must not fall back to the process HOME (or
+// CLAUDE_CONFIG_DIR) when cfg.Env omits them. The deadline-treated-as-success
+// cases share this binary with other doStartSession tests; a process-HOME
+// fallback writes ~/.claude.json that leaks across cases and can fire the
+// 1ms start deadline during the seed I/O.
+func TestDoStartSession_DoesNotSeedSharedProcessHome(t *testing.T) {
+	processHome := t.TempDir()
+	processConfigDir := t.TempDir()
+	t.Setenv("HOME", processHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", processConfigDir)
+
+	ops := &fakeStartOps{hasSessionResult: true}
+	err := doStartSession(context.Background(), ops, "gc-city-mayor", runtime.Config{
+		WorkDir: "/proj",
+		Command: "claude",
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, dir := range []string{processHome, processConfigDir} {
+		if _, err := os.Stat(filepath.Join(dir, ".claude.json")); !os.IsNotExist(err) {
+			t.Fatalf("doStartSession seeded %s/.claude.json from process env (err=%v); cfg.Env had no HOME", dir, err)
+		}
 	}
 }

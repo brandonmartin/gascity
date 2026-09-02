@@ -282,6 +282,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			// agents were unwakeable (ra-jbbv0).
 			modelOption(
 				modelAlias("fable-5", "Fable 5", "claude-fable-5"),
+				modelAlias("fable-5-1", "Fable 5.1", "claude-fable-5-1"),
 				modelAlias("opus", "Opus", "claude-opus-4-8"),
 				modelAlias("opus-5", "Opus 5", "claude-opus-5"),
 				modelAlias("opus-4-7", "Opus 4.7", "claude-opus-4-7"),
@@ -299,6 +300,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				modelChoice("claude-opus-5[1m]", "Opus 5 1M (canonical id)"),
 				modelChoice("claude-sonnet-5", "Sonnet 5 (canonical id)"),
 				modelChoice("claude-fable-5", "Fable 5 (canonical id)"),
+				modelChoice("claude-fable-5-1", "Fable 5.1 (canonical id)"),
 			),
 		},
 	},

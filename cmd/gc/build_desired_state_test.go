@@ -1026,6 +1026,83 @@ func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *t
 	}
 }
 
+// TestDefaultScaleCheckCountsAndDemand_FormulaStepBeadRacesRunningSession
+// reproduces ga-d93: the controller counts a fresh formula step bead as pool
+// capacity demand while the session already executing the parent formula is
+// about to claim it on its next `gc hook --claim --json` cycle. The result is
+// a wasted spawn — a fresh pool session that wakes to an empty hook and drains
+// with reason=no_work, then repeats on the next step transition.
+//
+// Concrete evidence from production (docbook rig, 2026-09-02..09-03):
+//
+//	{"type":"session.demand_claim_divergence",
+//	 "actor":"docbook/gasburger.helios",
+//	 "payload":{"template":"docbook/gasburger.solcats",
+//	            "drain_reason":"no_work",
+//	            "trigger_bead_id":"do-7zn",
+//	            "trigger_status_at_drain":"in_progress"}}
+//
+// do-7zn carries gc.step_id=mol-review-leg.write-report and is claimed by the
+// live solcat that just finished the previous step. The controller's ready
+// snapshot caught it in the window between formula-writes-next-step and
+// running-session-claims-it, spawned a fresh helios/zenith/corona/oracle
+// solcat, and that spawn read empty on the very next tick.
+//
+// Correct behavior: a bead with gc.step_id set is intra-formula continuation.
+// If any pool session for the same template is already awake, it will claim
+// the step on its next hook cycle — the controller must NOT count it as fresh
+// capacity demand. (When no session is running the template, orphan detection
+// on the parent workflow, not fresh pool demand, is the correct wake path.)
+//
+// This test is skipped until the fix lands (ga-d93). Un-skip when the counting
+// path either takes runningSessions into account for step beads, or a broader
+// mechanism prevents formula-step-racing spawns.
+func TestDefaultScaleCheckCountsAndDemand_FormulaStepBeadRacesRunningSession(t *testing.T) {
+	t.Skip("ga-d93: fix pending; see bead notes and demand_serve_predicate.go")
+
+	const template = "docbook/gasburger.solcats"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "docbook", Path: "/tmp/docbook"}},
+		Agents: []config.Agent{
+			{Name: "solcats", Dir: "docbook", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+	}
+	store := beads.NewMemStore()
+	step, err := store.Create(beads.Bead{
+		Title:  "Perform the analysis and store the full report on the bead",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:   template,
+			beadmeta.StepIDMetadataKey:     "mol-review-leg.write-report",
+			beadmeta.RootBeadIDMetadataKey: "do-ixpj",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create formula step bead: %v", err)
+	}
+
+	// A pool session for the template is already awake — it is the one
+	// executing the parent formula and will claim `step` on its next hook cycle.
+	// The controller must not count the step as demand for ANOTHER fresh session.
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:docbook",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("counts[%q] = %d (bead %s), want 0 — an in-flight formula step bead must not spawn extra pool capacity when a running session on the same template will claim it on its next hook cycle",
+			template, got, step.ID)
+	}
+	if got := demand[template].Count; got != 0 {
+		t.Fatalf("demand[%q].Count = %d, want 0 for a formula-step bead racing a running session", template, got)
+	}
+}
+
 func TestDefaultScaleCheckCountsUsesLiveReadyWhenCachedRowWasAssigned(t *testing.T) {
 	const template = "gascity/workflows.codex-min"
 	backing := beads.NewMemStore()

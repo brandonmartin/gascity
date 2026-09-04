@@ -335,6 +335,28 @@ is_known_agent() {
         local short_base="${short%-[0-9]*}"
         if [ "$short_base" != "$short" ] && agent_exists "$short_base"; then return 0; fi
     fi
+    # Tmux-safe session_name form (ga-9yx). Hook claims stamp
+    # agent.SanitizeQualifiedNameForSession (slash→--, dot→__), so a live
+    # crew pool slot is assigned as daytripper--gasburger__crew-1-pool rather
+    # than daytripper/gasburger.crew-1-pool. Without the inverse, the -N
+    # strip yields daytripper--gasburger__crew, which matches no Agent: line,
+    # and orphan-sweep resets in_progress orchestrator roots every 5m —
+    # re-advertising them as pool demand and summoning duplicate coordinators.
+    # Mirrors agent.UnsanitizeQualifiedNameFromSession: -- → /, __ → .
+    local unsanitized="${name//--//}"
+    unsanitized="${unsanitized//__/.}"
+    if [ "$unsanitized" != "$name" ]; then
+        if agent_exists "$unsanitized"; then return 0; fi
+        local u_base="${unsanitized%-[0-9]*}"
+        if [ "$u_base" != "$unsanitized" ] && agent_exists "$u_base"; then return 0; fi
+        local u_short="${unsanitized##*.}"
+        if [ "$u_short" != "$unsanitized" ]; then
+            if agent_exists "$u_short"; then return 0; fi
+            local u_short_base="${u_short%-[0-9]*}"
+            if [ "$u_short_base" != "$u_short" ] && agent_exists "$u_short_base"; then return 0; fi
+        fi
+        if live_session_match "$unsanitized"; then return 0; fi
+    fi
     # Live ephemeral session names like gastown__polekitten-gc-q9j0om won't
     # match any template form — accept them as known when a non-closed session
     # is currently running with a matching ID, SessionName, Alias, or

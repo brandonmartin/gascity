@@ -1844,6 +1844,30 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			orphanAssignee:     "project-alpha/gastown.retired-3",
 		},
 		{
+			// Runtime session_name for generic pool slots is "{template}-{slot}-pool"
+			// (e.g. worker-1-pool). The trailing -pool defeated the -N strip, so
+			// live crew/pool coordinators were reset every orphan-sweep (ga-9yx).
+			name:               "rig-pool-slot-pool-suffix",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.refinery",
+			protectedID:        "gc-wisp-protected-pool-suffix-9yx",
+			protectedAssignee:  "project-alpha/gastown.refinery-1-pool",
+			orphanID:           "gc-wisp-orphan-pool-suffix-9yx",
+			orphanAssignee:     "project-alpha/gastown.retired-1-pool",
+		},
+		{
+			// Hook claims stamp the tmux-safe session_name (slash→--, dot→__).
+			// daytripper--gasburger__crew-1-pool must resolve to the configured
+			// daytripper/gasburger.crew template the same way worker-3 does.
+			name:               "rig-sanitized-crew-pool-slot",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gasburger.crew",
+			protectedID:        "gc-wisp-protected-crew-pool-9yx",
+			protectedAssignee:  "project-alpha--gasburger__crew-1-pool",
+			orphanID:           "gc-wisp-orphan-crew-pool-9yx",
+			orphanAssignee:     "project-alpha--gasburger__retired-1-pool",
+		},
+		{
 			name:               "rig-live-session-only",
 			scope:              "project-alpha",
 			configuredIdentity: "project-alpha/gastown.refinery",

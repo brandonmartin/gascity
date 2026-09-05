@@ -1829,6 +1829,64 @@ func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage,
 	return deps, nil
 }
 
+// DepMetadata returns the opaque payload stored on one dependency edge.
+//
+// The Dep wire model carries only the pair and the type, so until this existed
+// nothing in Gas City could ask a Dolt-backed store whether an edge had a
+// payload at all — which is how the infra-class migration came to copy edges
+// and silently drop theirs. The contract is SQLiteStore.DepMetadata's, to the
+// letter, because the two are read through one interface: a missing edge and an
+// empty payload both answer carried=false, since SQLite declines to persist an
+// empty payload and reporting a difference here would name a loss the
+// destination cannot suffer.
+//
+// A pair can hold more than one row (one per dep type) and the first CARRYING
+// row wins here. That is not what the SQLite reader does: its query is an
+// unordered single-row read on (issue_id, depends_on_id), so it reports
+// whichever dep-type row the engine hands back, carrying or not. The two agree
+// on every pair holding one row — which is every pair anything in this tree
+// writes today — and diverge only on a multi-row pair where some rows carry and
+// some do not. Left divergent on purpose and tracked as ga-fvh4q: making them
+// agree means deciding which row's payload IS the pair's, and that belongs to
+// the graph model rather than to either leaf.
+//
+// The read is target-keyed because of what the root surface exposes.
+// GetDependencyRecords is the direct source-keyed read, but it lives on the
+// Transaction interface and is not re-exported; DependentQuerier is, so the
+// read is target-keyed and filtered back down to the source here. Cost is
+// therefore O(dependents of dependsOnID) per call, and the infra-class copy
+// asks up to three times per edge (refusal, copy, verification) — fine at
+// infra-class sizes, and not something to reach for on a work-store sweep.
+func (s *NativeDoltStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	var (
+		metadata string
+		carried  bool
+	)
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		querier, ok := beadslib.AsDependentQuerier(storage)
+		if !ok {
+			return fmt.Errorf("reading dependency metadata %s -> %s: backing storage exposes no dependency-record read", issueID, dependsOnID)
+		}
+		records, err := querier.GetDependentRecordsForIssues(ctx, []string{dependsOnID})
+		if err != nil {
+			return nativeStoreError(issueID, err)
+		}
+		metadata, carried = "", false
+		for _, dep := range records[dependsOnID] {
+			if dep == nil || dep.IssueID != issueID || !DepMetadataCarries(dep.Metadata) {
+				continue
+			}
+			metadata, carried = dep.Metadata, true
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return metadata, carried, nil
+}
+
 type nativeIssueGetter interface {
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 }

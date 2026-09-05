@@ -1417,7 +1417,8 @@ focused hybrid tests retain local-versus-remote routing instead of duplicating
 the full suite for each route.
 
 `runtime.NewFake`, `auto.New`, `hybrid.New`, `exec.NewSeamBacked`,
-`subprocess.NewSeamBackedWithDir`, and `acp.NewSeamBackedWithDir` are
+`subprocess.NewSeamBacked`, `subprocess.NewSeamBackedWithDir`,
+`acp.NewSeamBacked`, and `acp.NewSeamBackedWithDir` are
 source-bound to the shared runtime contract below. The auto proof runs the
 exact production composition once with two fresh in-memory fakes and owns no
 subprocess or listener; focused auto tests retain base-versus-ACP routing and
@@ -1429,10 +1430,10 @@ wrapper. `TestSeamBackedCapabilitiesParity` separately guards exec's
 handshake-derived stream and TTY flags because the shared contract does not
 assert optional capability fidelity. Focused raw provider and seam tests remain
 for these packages, including legacy overlap that later consolidation may
-remove case by case. The default subprocess constructor remains a separate
-H5-owned gap because its reachable empty-city-path branch uses shared temporary
-state. The default ACP constructor is also an H5-owned gap because it always
-uses shared `os.TempDir()/gc-acp-<euid>` state. E1 (`ga-80po0c.6`) owns the Large
+remove case by case. The default subprocess and ACP constructors share
+process-wide temporary directories (ACP uses `os.TempDir()/gc-acp-<euid>`);
+their proofs use PID-scoped session names so concurrent runs do not collide.
+E1 (`ga-80po0c.6`) owns the Large
 provider/E2E manifest and required lane/cadence execution; it does not own
 constructor-to-contract source binding.
 
@@ -1441,7 +1442,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-10-08: NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPDefaultDirConformance |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |

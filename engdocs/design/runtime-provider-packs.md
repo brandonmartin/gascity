@@ -61,8 +61,9 @@ say to isolate behind small ownership boundaries.
   unknown operation, treated as success for forward compatibility**
   (the git credential-helper pattern). It already handles startup-watch
   event streaming (`json.go`) and TTY-inherited attach. t3bridge was
-  originally wired this way (the `gc-session-t3` legacy `exec:` alias in
-  `cmd/gc/providers.go` still recognizes it).
+  originally wired this way through a `gc-session-t3` legacy `exec:`
+  alias; the alias has since been retired and t3bridge is a first-class
+  builtin.
 - **Pack-shipped long-lived processes already exist.** `[[service]]`
   with `kind = "proxy_process"`
   ([`internal/config/service.go`](../../internal/config/service.go))

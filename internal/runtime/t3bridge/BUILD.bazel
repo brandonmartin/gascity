@@ -24,6 +24,7 @@ go_library(
 go_test(
     name = "t3bridge_test",
     srcs = [
+        "conformance_test.go",
         "envelope_test.go",
         "provider_test.go",
         "reuse_test.go",
@@ -36,6 +37,7 @@ go_test(
     deps = [
         "//internal/events",
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
         "@com_github_gorilla_websocket//:websocket",
     ],

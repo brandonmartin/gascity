@@ -3329,8 +3329,11 @@ func realizePoolDesiredSessionsAt(
 			if errors.Is(err, errPoolTriggerWorktreeEvidence) {
 				// Unusable ownership evidence is not a partial bind: a reused
 				// session left in desired would restart against its previous
-				// binding's work dir.
-				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (skipping)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+				// binding's work dir. logPoolTriggerWorktreeEvidenceSkip emits
+				// a distinctive, deduplicated line so this class of pool
+				// starvation is visible instead of blending into per-tick
+				// chatter.
+				logPoolTriggerWorktreeEvidenceSkip(stderr, qualifiedName, sbInfo.ID, item.request.WorkBeadID, err)
 				continue
 			}
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
@@ -3590,6 +3593,49 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName 
 // continue without trigger env: continuing would restart a reused session
 // against whatever work dir its previous binding left behind.
 var errPoolTriggerWorktreeEvidence = errors.New("pool trigger worktree evidence")
+
+// poolTriggerSkipNoticeSeen deduplicates the pool-starvation skip notice keyed
+// by (workBeadID, error signature). buildDesiredState hits the skip site every
+// tick as long as the underlying evidence stays bad (e.g. a requeued work bead
+// carrying stale worktree ownership residue from a rejected cat), so an
+// unguarded log line would spam the controller log until the bead is
+// remediated. Keying on the error message ensures a genuinely new failure mode
+// on the same bead still re-surfaces.
+var poolTriggerSkipNoticeSeen sync.Map // "<workBeadID>|<errMsg>" -> struct{}
+
+// resetPoolTriggerSkipNoticeSeenForTest clears the dedup cache so tests can
+// assert the log line fires on the first hit without cross-test contamination.
+func resetPoolTriggerSkipNoticeSeenForTest() {
+	poolTriggerSkipNoticeSeen.Range(func(k, _ any) bool {
+		poolTriggerSkipNoticeSeen.Delete(k)
+		return true
+	})
+}
+
+// logPoolTriggerWorktreeEvidenceSkip emits a distinctive, deduplicated line at
+// the pool-trigger skip site so pool starvation caused by unusable worktree
+// evidence is visible in the controller log instead of blending into per-tick
+// chatter. The prefix "POOL-STARVATION-SKIP:" is grep-friendly and the message
+// includes the work bead ID plus an actionable hint for the operator. The one
+// prior source of signal for this class of starvation was a single stderr line
+// per tick (gascity#ga-cix incident, 2026-09-05: three ready L/XL beads sat
+// unclaimed for 7+ hours because refinery reject left partial worktree
+// evidence and every pool tick silently re-skipped), so dedup + hint here is a
+// visibility improvement, not a policy change: the skip semantics upstream are
+// unchanged. Root-cause remediation (clearing residue on refinery reject)
+// belongs in the pack formula that owns the reject workflow.
+func logPoolTriggerWorktreeEvidenceSkip(stderr io.Writer, qualifiedName, sessionID, workBeadID string, err error) {
+	if stderr == nil || err == nil {
+		return
+	}
+	key := workBeadID + "|" + err.Error()
+	if _, dup := poolTriggerSkipNoticeSeen.LoadOrStore(key, struct{}{}); dup {
+		return
+	}
+	fmt.Fprintf(stderr, //nolint:errcheck
+		"POOL-STARVATION-SKIP: pool %q session %s trigger bead %s worktree evidence unusable: %v (skipping spawn this cycle; inspect with 'bd show %s' — leftover work_dir/gc.work_branch from a rejected/requeued cat is the common cause)\n",
+		qualifiedName, sessionID, workBeadID, err, workBeadID)
+}
 
 func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
 	if strings.TrimSpace(request.WorktreeError) != "" {

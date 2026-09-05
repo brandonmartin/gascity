@@ -263,12 +263,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(&doctor.BeadsRoleCheck{})
 	}
 
-	// Controller check + supervisor HTTP check + session checks (gated by controller state).
+	// Controller check + supervisor HTTP check + session checks. Session
+	// checks are read-only reporting and register regardless of controller
+	// state (GH#5742); only their Fix() remediation defers to a running
+	// controller, guarded inside ZombieSessionsCheck.Fix and
+	// OrphanSessionsCheck.Fix via doctor.IsControllerRunning.
 	controllerRunning := opts.ControllerRunning
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 
-	if cfgErr == nil && cfg != nil && !controllerRunning {
+	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
 		sp, err := newSessionProvider()
@@ -327,6 +331,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newBacklogDepthCheck(cityPath, storeFactory))
 			register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 			register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+			register(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
 		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
@@ -431,6 +436,12 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 		return 1
 	}
 
+	// Deliberately no d.Wait() here: gc doctor's whole point in bounding a check
+	// is that a wedged one cannot stall the command, and waiting on an abandoned
+	// goroutine would restore exactly that hang. Nothing this function owns
+	// outlives the process, and ctx holds no handle a late writer can corrupt --
+	// an abandoned check writes only to its own private buffer. A future caller
+	// that reuses a Doctor in-process must call Wait before releasing ctx.
 	d := &doctor.Doctor{CheckTimeout: checkTimeout}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)

@@ -435,7 +435,7 @@ gc beads list --status open --format=json
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include closed beads (default: open only) |
+| `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
@@ -1960,7 +1960,7 @@ gc hook [agent] [flags]
 | `--claim` | bool |  | atomically claim one routed work item for the current session |
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
-| `--json` | bool |  | with --claim, emit a JSON protocol result |
+| `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
 
 | Subcommand | Description |
 |------------|-------------|
@@ -3751,6 +3751,11 @@ the handshake declares, and probes optional operations. Optional
 operations that are absent (exit 2) are reported but never fail the
 run; everything else that misbehaves does. Exits non-zero if any check
 fails, so a runtime pack's CI can gate on it directly.
+
+One exception: when the argument resolves to a pack-declared runtime whose
+[runtimes.&lt;name&gt;] entry declares prompt_delivery = "nudge-fallback", the
+nudge probe is reported as "required: nudge" and an absent or broken nudge
+op fails the run — the declaration is smoke-tested, not trusted.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current

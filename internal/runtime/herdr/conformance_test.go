@@ -1,3 +1,5 @@
+//go:build integration
+
 package herdr
 
 import (
@@ -10,18 +12,31 @@ import (
 )
 
 // TestHerdrConformance runs the full runtime.Provider conformance suite against
-// the herdr provider backed by a real herdr binary. Each session gets its own
-// isolated herdr session-server so the contract's session-scoped assertions
-// (ListRunning, orphan detection, …) don't observe sibling sessions. Opt-in
-// live tier: see requireLiveHerdr.
+// the production herdr constructor. Each factory call uses its own isolated
+// herdr session-server so session-scoped assertions (ListRunning, orphan
+// detection, …) do not observe sibling sessions.
+//
+// The test is integration-tagged so the unit lane does not compile it (the
+// ledger forbids pre-run Skip in the proof function itself). When this file
+// is compiled, herdrConformanceSession still gates on requireLiveHerdr so a
+// missing binary or the unit-lane env does not fail the suite. Run it via
+// `make test-herdr-live` or `go test -tags=integration` with
+// GC_HERDR_LIVE_TESTS=1 / GC_FAST_UNIT=0.
 func TestHerdrConformance(t *testing.T) {
-	requireLiveHerdr(t)
-
 	var counter int64
+
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		n := atomic.AddInt64(&counter, 1)
-		p := New(fmt.Sprintf("gctest-conf-%d", n), t.TempDir(), t.TempDir(), 0, 0)
-		t.Cleanup(func() { _ = p.TeardownServer() })
-		return p, runtime.Config{WorkDir: t.TempDir()}, fmt.Sprintf("conf-%d", n)
+		return New(herdrConformanceSession(t, &counter), t.TempDir(), t.TempDir(), 0, 0), runtime.Config{WorkDir: t.TempDir()}, fmt.Sprintf("conf-%d", atomic.AddInt64(&counter, 1))
 	})
+}
+
+// herdrConformanceSession is the ledger-allowed setup helper for the herdr
+// proof factory: unique per-city herdr session name, live-tier gate, and
+// TeardownServer distinct from Provider.Stop.
+func herdrConformanceSession(t *testing.T, counter *int64) string {
+	t.Helper()
+	requireLiveHerdr(t)
+	name := fmt.Sprintf("gctest-conf-%d", atomic.AddInt64(counter, 1))
+	t.Cleanup(func() { _ = New(name, "", "", 0, 0).TeardownServer() })
+	return name
 }

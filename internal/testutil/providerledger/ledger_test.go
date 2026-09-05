@@ -670,6 +670,35 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	}
 }
 
+func TestCatalogBindsHerdrConstructor(t *testing.T) {
+	var proof *ProofRef
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.herdr" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			if claim.Constructor != repoSymbol("internal/runtime/herdr", "New") {
+				continue
+			}
+			if claim.Disposition != DispositionProved {
+				t.Errorf("herdr disposition = %q, want %q", claim.Disposition, DispositionProved)
+			}
+			proof = claim.Proof
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("herdr.New proof is missing")
+	}
+	if proof.File != "internal/runtime/herdr/conformance_test.go" || proof.Test != "TestHerdrConformance" {
+		t.Errorf("herdr.New proof = %s#%s, want herdr conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/herdr.herdrConformanceSession, sync/atomic.AddInt64"; got != want {
+		t.Errorf("herdr.New allowed calls = %q, want %q", got, want)
+	}
+}
+
 func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	var proof *ProofRef
 

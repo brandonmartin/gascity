@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -26,7 +27,7 @@ func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runti
 }
 
 func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.Factory, error) {
-	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
+	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil, nil)
 }
 
 func workerFactoryWithStaleKeyDetectionWaiter(
@@ -35,6 +36,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 	sp runtime.Provider,
 	cfg *config.City,
 	waiter session.StaleKeyDetectionWaiter,
+	rec events.Recorder,
 ) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
@@ -81,6 +83,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		Provider:                sp,
 		CityPath:                cityPath,
 		SearchPaths:             searchPaths,
+		Recorder:                rec,
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
@@ -420,7 +423,7 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
-	return workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, id, nil)
+	return workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, id, nil, nil)
 }
 
 func workerHandleForSessionWithStaleKeyDetectionWaiter(
@@ -430,8 +433,9 @@ func workerHandleForSessionWithStaleKeyDetectionWaiter(
 	cfg *config.City,
 	id string,
 	waiter session.StaleKeyDetectionWaiter,
+	rec events.Recorder,
 ) (worker.Handle, error) {
-	factory, err := workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, waiter)
+	factory, err := workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, waiter, rec)
 	if err != nil {
 		return nil, err
 	}

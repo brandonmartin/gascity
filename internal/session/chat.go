@@ -588,6 +588,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
+				m.recordStartupCrash(id, sessName, b.Metadata["template"], retryErr, true)
 				return retryErr
 			}
 			if !retried {
@@ -595,6 +596,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 				// strip, so a relaunch would repeat this failure verbatim.
 				// Propagate the original start error rather than reporting a
 				// start that never happened.
+				m.recordStartupCrash(id, sessName, b.Metadata["template"], err, true)
 				if unroute != nil {
 					unroute()
 				}
@@ -715,11 +717,13 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup):
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
+				m.recordStartupCrash(id, sessName, b.Metadata["template"], retryErr, true)
 				return retryErr
 			}
 			if !retried {
 				// The recovery declined: nothing to strip, so a relaunch would
 				// repeat this failure verbatim. Propagate the original error.
+				m.recordStartupCrash(id, sessName, b.Metadata["template"], err, true)
 				if unroute != nil {
 					unroute()
 				}

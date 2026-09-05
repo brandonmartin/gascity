@@ -93,6 +93,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		nil,
 		immediateSessionStaleKeyDetectionWaiter,
 		nil,
+		nil,
 	); err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)
 	}

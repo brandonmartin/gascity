@@ -1210,6 +1210,13 @@ func wakeDemandOverridesSleepSuppression(
 	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
 		return true
 	}
+	// Operator-requested start: gc session wake (explicit-wake) and
+	// gc session reset (reset-pending). Stale detach metadata from a
+	// prior city-stop must not cancel a wake the operator already
+	// approved (ga-21b). Sleep intent still wins above.
+	if decision.Reason == "explicit-wake" || decision.Reason == "reset-pending" {
+		return true
+	}
 	return decision.Reason == "min-active" && containsWakeReason(eval.Reasons, WakeConfig)
 }
 
@@ -2803,6 +2810,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// release to wait on. Fall through so the wake decision
 				// can pick up the freshly cleared metadata and emit a
 				// start_candidate on this same tick. See #2345.
+				//
+				// City-stop is a shutdown hold, not "no demand". Reset of an
+				// already-asleep city-stop seat must start this tick (ga-21b)
+				// without folding reset_committed_at, which would also
+				// force-wake idle-asleep on_demand sessions (#2345).
+				if sessionpkg.SleepReason(strings.TrimSpace(infoByID[id].SleepReason)) == sessionpkg.SleepReasonCityStop {
+					now := clk.Now().UTC()
+					wakeBatch := sessionpkg.ClearWakeBlockersPatch(sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState)), infoByID[id].SleepReason)
+					for k, v := range sessionpkg.RequestExplicitWakePatch(string(sessionpkg.WakeCauseExplicit), now) {
+						wakeBatch[k] = v
+					}
+					tick.applyStore(id, sessFront, wakeBatch)
+				}
 			}
 		}
 

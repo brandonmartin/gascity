@@ -482,12 +482,19 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// because it has no idle reference. The "work done, no demand" drain
 		// still fires via the "on-demand:running" reason, which is NOT exempt.
 		// See #3413.
+		//
+		// Operator-requested wakes ("explicit-wake") are likewise exempt:
+		// city-stop (and any other stale detach) leaves IdleSince hours in
+		// the past, and without this exemption the on_demand default idle
+		// window immediately flips a wake-gate-approved gc session wake back
+		// to idle-sleep (ga-21b).
 		agent, hasAgent := lookupAgent(bead.Template)
 		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
+			desired[name] != "explicit-wake" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
 			desired[name] != "work-query" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {

@@ -234,7 +234,8 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 }
 
 // ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
-// selected by the normal wake path.
+// selected by the normal wake path. City-stop is included: it is a shutdown
+// hold, not an idle policy, and an explicit wake must release it (ga-21b).
 func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
 		"held_until":            "",
@@ -251,7 +252,8 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 	}
 	switch SleepReason(sleepReason) {
 	case SleepReasonUserHold, SleepReasonWaitHold, SleepReasonQuarantine,
-		SleepReasonContextChurn, SleepReasonRateLimit, SleepReasonDrained:
+		SleepReasonContextChurn, SleepReasonRateLimit, SleepReasonDrained,
+		SleepReasonCityStop:
 		patch["sleep_reason"] = ""
 	}
 	return patch

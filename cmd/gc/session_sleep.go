@@ -274,6 +274,13 @@ func configWakeSuppressedInfoWithError(
 	if info.SleepReason == string(sessionpkg.SleepReasonIdleTimeout) {
 		return false, nil
 	}
+	if info.SleepReason == string(sessionpkg.SleepReasonCityStop) {
+		// City-stop is a shutdown hold, not an idle window. Stale
+		// detached_at from gc stop must not suppress a later wake
+		// (ga-21b). Min-active revival already special-cases this;
+		// explicit wake and reset need the same exemption.
+		return false, nil
+	}
 	if info.SleepReason == string(sessionpkg.SleepReasonIdle) &&
 		info.SleepPolicyFingerprint != "" &&
 		info.SleepPolicyFingerprint == policy.Fingerprint {

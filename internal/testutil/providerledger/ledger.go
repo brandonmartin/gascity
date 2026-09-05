@@ -261,10 +261,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"tmux", "exact:tmux", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				time.Date(2026, time.September, 17, 0, 0, 0, 0, time.UTC),
-				"the existing full conformance run skips when the tmux executable is absent",
+				"internal/runtime/tmux/seam_backed_conformance_test.go",
+				"TestTmuxSeamConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/tmux", "tmuxConformanceConfig"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		{

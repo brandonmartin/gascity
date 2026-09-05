@@ -36,6 +36,16 @@ type Options struct {
 	// SkipStartError classifies Start errors that should skip the current
 	// subtest instead of failing the provider conformance suite.
 	SkipStartError func(error) (reason string, ok bool)
+
+	// IdempotentStart marks providers whose Start is idempotent by design:
+	// a duplicate-name Start reuses, rebinds, or recreates the existing
+	// session and returns nil, so [Start_DuplicateReturnsError] cannot hold.
+	// When true, that subtest is skipped honestly with a documented reason;
+	// every other lifecycle contract is still enforced. Use this only when
+	// the reuse behavior is a documented production feature (e.g. the
+	// t3bridge Reuse/Rebind/Recreate decision), not to paper over a missing
+	// duplicate-detect check.
+	IdempotentStart bool
 }
 
 // RunProviderTests runs the full conformance suite against a Provider.
@@ -87,6 +97,9 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	})
 
 	t.Run("Start_DuplicateReturnsError", func(t *testing.T) {
+		if opts.IdempotentStart {
+			t.Skip("provider Start is idempotent by design: duplicate-name Start reuses/rebinds/recreates the existing session and returns nil")
+		}
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "first Start")
 

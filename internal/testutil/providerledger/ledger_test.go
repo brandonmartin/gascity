@@ -664,6 +664,35 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	}
 }
 
+func TestCatalogBindsSSHCompositionToSeamBackedContract(t *testing.T) {
+	var proof *ProofRef
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.ssh" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			if claim.Constructor != repoSymbol("internal/runtime/ssh", "NewSeamBacked") {
+				continue
+			}
+			if claim.Disposition != DispositionProved {
+				t.Errorf("ssh seam-backed disposition = %q, want %q", claim.Disposition, DispositionProved)
+			}
+			proof = claim.Proof
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("ssh.NewSeamBacked proof is missing")
+	}
+	if proof.File != "internal/runtime/ssh/conformance_test.go" || proof.Test != "TestSSHConformance" {
+		t.Errorf("ssh.NewSeamBacked proof = %s#%s, want ssh conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/ssh.sshConformanceEndpoint, sync/atomic.AddInt64"; got != want {
+		t.Errorf("ssh.NewSeamBacked allowed calls = %q, want %q", got, want)
+	}
+}
+
 func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	var proof *ProofRef
 

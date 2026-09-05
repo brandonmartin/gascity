@@ -150,6 +150,9 @@ func TestBuildDoctorChecks_StartupHealthEpisodesRegisteredRegardlessOfController
 		if idx := doctorCheckIndex(names, "startup-health-episodes"); idx < 0 {
 			t.Errorf("ControllerRunning=%v: startup-health-episodes expected but missing; names=%v", running, names)
 		}
+		if idx := doctorCheckIndex(names, "wake-attempt-churn"); idx < 0 {
+			t.Errorf("ControllerRunning=%v: wake-attempt-churn expected but missing; names=%v", running, names)
+		}
 	}
 }
 

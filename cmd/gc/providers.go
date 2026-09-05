@@ -1139,10 +1139,15 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
 	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	k8sOps, err := sessionk8s.NewRealAdapter()
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}
+	k8sOpts, err := sessionk8s.SeamOptionsFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
+	}
+	remote := sessionk8s.NewSeamBackedWithOps(k8sOps, k8sOpts)
 	pattern := sc.RemoteMatch
 	if v := os.Getenv("GC_HYBRID_REMOTE_MATCH"); v != "" {
 		pattern = v

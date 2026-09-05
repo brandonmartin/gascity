@@ -213,10 +213,15 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"k8s", "exact:k8s", nil,
-			waivedRuntime(
-				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
-				"the actual K8s production composition has no full shared runtime contract",
+			provedRuntimeScoped(
+				repoSymbol("internal/runtime/k8s", "NewSeamBackedWithOps"),
+				"internal/runtime/k8s/seam_conformance_test.go",
+				"TestK8sSeamBackedWithOpsConformance",
+				"proved via injectable k8sOps seam against the fake ops double; unproved residue: the real k8sOps adapter (kubeconfig + client-go wiring in NewRealAdapter) that NewSeamBacked composes over NewSeamBackedWithOps in production",
+				repoSymbol("internal/runtime/k8s", "newSeamConformanceOps"),
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "os", Name: "Getpid"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(

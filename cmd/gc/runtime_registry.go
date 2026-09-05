@@ -10,6 +10,7 @@ import (
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionherdr "github.com/gastownhall/gascity/internal/runtime/herdr"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/runtime/registry"
 	sessionssh "github.com/gastownhall/gascity/internal/runtime/ssh"
@@ -28,7 +29,7 @@ var runtimeRegistry = buildRuntimeRegistry()
 // buildRuntimeRegistry registers the builtin runtime providers. Each
 // registration mirrors one arm of the pre-registry selection switch;
 // constructor helpers (providerStateDir, tmuxConfigFromSession,
-// newHybridProvider) stay in providers.go.
+// newHybridBackends) stay in providers.go.
 func buildRuntimeRegistry() *registry.Registry {
 	r := registry.New()
 	// Registration failures here are programmer errors (duplicate or
@@ -89,7 +90,11 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-		return newHybridProvider(sc, cityName, cityPath)
+		local, remote, isRemote, err := newHybridBackends(sc, cityName, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		return sessionhybrid.New(local, remote, isRemote), nil
 	}))
 	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")

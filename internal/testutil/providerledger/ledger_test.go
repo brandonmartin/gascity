@@ -670,6 +670,41 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	}
 }
 
+func TestCatalogBindsHybridRouterToConformantFakes(t *testing.T) {
+	var proof *ProofRef
+
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.hybrid" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			if claim.Constructor != repoSymbol("internal/runtime/hybrid", "New") {
+				continue
+			}
+			if claim.Disposition != DispositionProved {
+				t.Errorf("hybrid router disposition = %q, want %q", claim.Disposition, DispositionProved)
+			}
+			proof = claim.Proof
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("hybrid.New proof is missing")
+	}
+	if proof.File != "internal/runtime/hybrid/conformance_test.go" || proof.Test != "TestHybridConformance" {
+		t.Errorf("hybrid.New proof = %s#%s, want hybrid conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime.NewFake, sync/atomic.AddInt64"; got != want {
+		t.Errorf("hybrid.New allowed calls = %q, want %q", got, want)
+	}
+	// The conformance factory constructs hybrid.New with isRemote always false,
+	// so the shared contract only runs the local route; the scope keeps the
+	// rendered ledger from overstating the proof as whole-composition coverage.
+	if got, want := proof.Scope, "default-route conformance; remote route covered by focused hybrid routing tests"; got != want {
+		t.Errorf("hybrid.New proof scope = %q, want %q", got, want)
+	}
+}
+
 func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	var proof *ProofRef
 

@@ -23,7 +23,6 @@ import (
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
-	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1131,23 +1130,24 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 	return p, 0
 }
 
-// newHybridProvider constructs a composite provider that routes sessions to
-// tmux (local) or k8s (remote) based on session name. The GC_HYBRID_REMOTE_MATCH
-// env var controls which sessions go to k8s. If unset, all sessions route to
-// local tmux.
-func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+// newHybridBackends constructs the local tmux and remote k8s backends used by
+// the hybrid registry factory. The catalog constructor is hybrid.New (returned
+// by the factory); these inner constructors stay on their own ledger rows.
+// GC_HYBRID_REMOTE_MATCH, when set, overrides sc.RemoteMatch. If both are
+// empty, every session routes to local tmux.
+func newHybridBackends(sc config.SessionConfig, cityName, cityPath string) (local, remote runtime.Provider, isRemote func(string) bool, err error) {
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
-	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	local = sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
+	remote, err = sessionk8s.NewSeamBacked()
 	if err != nil {
-		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
+		return nil, nil, nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}
 	pattern := sc.RemoteMatch
 	if v := os.Getenv("GC_HYBRID_REMOTE_MATCH"); v != "" {
 		pattern = v
 	}
-	return sessionhybrid.New(local, remote, func(name string) bool {
+	return local, remote, func(name string) bool {
 		return pattern != "" && strings.Contains(name, pattern)
-	}), nil
+	}, nil
 }

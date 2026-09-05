@@ -229,10 +229,14 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"hybrid", "exact:hybrid", nil,
-			waivedRuntime(
-				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+			provedRuntimeScoped(
+				repoSymbol("internal/runtime/hybrid", "New"),
+				"internal/runtime/hybrid/conformance_test.go",
+				"TestHybridConformance",
+				"default-route conformance; remote route covered by focused hybrid routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(

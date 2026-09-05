@@ -481,10 +481,12 @@ test: test-fsys-darwin-compile
 ## agent-status reports and bounce the server, so they are opt-in rather than
 ## part of the fast unit sweep (see
 ## internal/runtime/herdr/herdrtest/livegate.go). Skips cleanly when herdr is
-## absent. Wrapped in $(TEST_ENV), which is `env -i`, so the opt-in must be set
+## absent. -tags=integration compiles TestHerdrConformance, which is
+## integration-tagged so the unit lane does not compile the ledger proof.
+## Wrapped in $(TEST_ENV), which is `env -i`, so the opt-in must be set
 ## inside it.
 test-herdr-live:
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_HERDR_LIVE_TESTS=1 scripts/go-test-observable test -- -count=1 -timeout 10m ./internal/runtime/herdr/
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_HERDR_LIVE_TESTS=1 scripts/go-test-observable test -- -tags=integration -count=1 -timeout 10m ./internal/runtime/herdr/
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_HERDR_LIVE_TESTS=1 scripts/go-test-observable test -- -count=1 -timeout 10m -run LiveHerdr ./cmd/gc/
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs

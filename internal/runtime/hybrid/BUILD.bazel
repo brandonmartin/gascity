@@ -11,6 +11,7 @@ go_library(
 go_test(
     name = "hybrid_test",
     srcs = [
+        "conformance_test.go",
         "hybrid_test.go",
         "session_events_test.go",
         "testenv_import_test.go",
@@ -18,6 +19,7 @@ go_test(
     embed = [":hybrid"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
     ],
 )

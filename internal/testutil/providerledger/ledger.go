@@ -61,6 +61,31 @@ const (
 
 var runtimeProviderRunner = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
 
+// runtimeProviderDurableThreadRunner is the sanctioned full-suite runner for a
+// durable, reuse-oriented provider (t3bridge): the same conformance suite with
+// the two documented skips that class requires (idempotent Start, durable
+// stopped sessions). It is a 2-argument runner taking the test and an inline
+// provider factory, exactly like [runtimeProviderRunner], so the proof shape
+// the gate enforces is identical; the two skips are visible and reviewable in
+// the runner's own source rather than hidden behind a per-proof options literal.
+var runtimeProviderDurableThreadRunner = repoSymbol("internal/runtime/runtimetest", "RunDurableThreadProviderTests")
+
+// sanctionedRuntimeProviderRunners is the set of runtimetest entrypoints a
+// proved runtime.Provider claim may bind. Adding a runner here is a deliberate
+// decision that the suite it runs is a legitimate full proof of the contract.
+var sanctionedRuntimeProviderRunners = map[SymbolRef]bool{
+	runtimeProviderRunner:              true,
+	runtimeProviderDurableThreadRunner: true,
+}
+
+func renderSanctionedRuntimeProviderRunners() string {
+	refs := make([]SymbolRef, 0, len(sanctionedRuntimeProviderRunners))
+	for ref := range sanctionedRuntimeProviderRunners {
+		refs = append(refs, ref)
+	}
+	return renderSymbolRefs(refs)
+}
+
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
 	RuntimeBuiltinCatalog = "runtime.builtin"
@@ -205,19 +230,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"t3bridge", "exact:t3bridge", nil,
-			waivedRuntime(
+			provedRuntimeDurableThread(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.September, 29, 0, 0, 0, 0, time.UTC),
-				"t3bridge.Provider.Start is idempotent by design — DecideThreadReuse "+
-					"reuses/rebinds/recreates the existing thread and returns nil — so the "+
-					"Start_DuplicateReturnsError contract case cannot hold; "+
-					"runtimetest.Options.IdempotentStart now exists to skip that subtest "+
-					"honestly, but landing a proof also requires a stateful T3 test double "+
-					"that reflects dispatchThreadCreate/session-stop into snapshot state so "+
-					"IsRunning/ListRunning contracts can execute against real bridge behavior. "+
-					"The exact: and prefix:exec: rows below both bind this constructor and "+
-					"share this date because one proof closes both; follow-up work is tracked "+
-					"under ga-p20",
+				"internal/runtime/t3bridge/conformance_test.go",
+				"TestT3BridgeConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/t3bridge", "t3ConformanceConfig"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
@@ -254,13 +273,13 @@ func Catalog() []Entry {
 				repoSymbol("internal/runtime/exec", "execConformanceScript"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
-			waivedRuntime(
+			provedRuntimeDurableThread(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.September, 29, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the same "+
-					"t3bridge.NewSeamBacked constructor as runtime.builtin.t3bridge; "+
-					"see that entry for the specific idempotent-Start / stateful-mock "+
-					"blocker and shared expiry (one proof closes both rows)",
+				"internal/runtime/t3bridge/conformance_test.go",
+				"TestT3BridgeConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/t3bridge", "t3ConformanceConfig"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
@@ -349,6 +368,16 @@ func provedRuntime(constructor SymbolRef, file, test string, allowedCalls ...Sym
 func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowedCalls ...SymbolRef) ContractClaim {
 	claim := provedRuntime(constructor, file, test, allowedCalls...)
 	claim.Proof.Scope = scope
+	return claim
+}
+
+// provedRuntimeDurableThread builds a proved claim bound to the durable-thread
+// conformance runner (see [runtimeProviderDurableThreadRunner]) for providers
+// whose Start is idempotent and whose Stop pauses rather than deletes — the
+// t3bridge shape.
+func provedRuntimeDurableThread(constructor SymbolRef, file, test string, allowedCalls ...SymbolRef) ContractClaim {
+	claim := provedRuntime(constructor, file, test, allowedCalls...)
+	claim.Proof.Runner = runtimeProviderDurableThreadRunner
 	return claim
 }
 
@@ -570,8 +599,8 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) (problems 
 			}
 			if err := validateSymbolRef(claim.Proof.Runner); err != nil {
 				problems = append(problems, fmt.Sprintf("%s proof runner: %v", prefix, err))
-			} else if claim.Contract == ContractRuntimeProvider && claim.Proof.Runner != runtimeProviderRunner {
-				problems = append(problems, fmt.Sprintf("%s proof runner is %s, want %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSymbolRef(runtimeProviderRunner)))
+			} else if claim.Contract == ContractRuntimeProvider && !sanctionedRuntimeProviderRunners[claim.Proof.Runner] {
+				problems = append(problems, fmt.Sprintf("%s proof runner is %s, want one of %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSanctionedRuntimeProviderRunners()))
 			}
 			seenAllowed := make(map[SymbolRef]bool)
 			for _, allowed := range claim.Proof.AllowedCalls {

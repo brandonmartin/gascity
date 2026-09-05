@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -219,27 +220,35 @@ func TestRunLifecycleTestsDoesNotStopUnownedConcurrentStart(t *testing.T) {
 // production behavior that cannot satisfy Start_DuplicateReturnsError.
 type idempotentStartProvider struct {
 	runtime.Provider
+	mu      sync.Mutex
 	started map[string]bool
 }
 
 func (p *idempotentStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.mu.Lock()
 	if p.started == nil {
 		p.started = make(map[string]bool)
 	}
 	if p.started[name] {
+		p.mu.Unlock()
 		return nil
 	}
+	p.mu.Unlock()
 	if err := p.Provider.Start(ctx, name, cfg); err != nil {
 		return err
 	}
+	p.mu.Lock()
 	p.started[name] = true
+	p.mu.Unlock()
 	return nil
 }
 
 func (p *idempotentStartProvider) Stop(name string) error {
+	p.mu.Lock()
 	if p.started != nil {
 		delete(p.started, name)
 	}
+	p.mu.Unlock()
 	return p.Provider.Stop(name)
 }
 
@@ -257,6 +266,86 @@ func TestOptionsIdempotentStartSkipsDuplicateSubtest(t *testing.T) {
 	// Without the option, an idempotent-Start provider fails that subtest
 	// (Start returns nil twice) — that is the whole reason the flag exists.
 	RunLifecycleTestsWithOptions(t, factory, Options{IdempotentStart: true})
+}
+
+// durableThreadProvider models a provider whose Stop pauses a session — the
+// session stops running (IsRunning/ProcessAlive report false) but its record
+// remains enumerable by ListRunning until it is archived — and whose Start is
+// idempotent, like t3bridge (a stopped T3 thread survives to be reused on the
+// next Start). It cannot satisfy Start_DuplicateReturnsError or
+// ListRunning_ExcludesStopped, which is the whole reason the durable-thread
+// runner exists.
+type durableThreadProvider struct {
+	runtime.Provider
+	mu      sync.Mutex
+	running map[string]bool
+	listed  map[string]bool
+}
+
+func (p *durableThreadProvider) ensure() {
+	if p.running == nil {
+		p.running = make(map[string]bool)
+		p.listed = make(map[string]bool)
+	}
+}
+
+func (p *durableThreadProvider) Start(_ context.Context, name string, _ runtime.Config) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ensure()
+	// Idempotent: a duplicate Start reuses the existing record and returns nil.
+	p.running[name] = true
+	p.listed[name] = true
+	return nil
+}
+
+func (p *durableThreadProvider) Stop(name string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ensure()
+	// Pause, don't delete: no longer running, but the record stays listable.
+	p.running[name] = false
+	return nil
+}
+
+func (p *durableThreadProvider) IsRunning(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running[name]
+}
+
+func (p *durableThreadProvider) ProcessAlive(name string, _ []string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running[name]
+}
+
+func (p *durableThreadProvider) ListRunning(prefix string) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var names []string
+	for name := range p.listed {
+		if prefix == "" || strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func TestRunDurableThreadProviderTestsPassesForDurableThreadProvider(t *testing.T) {
+	provider := &durableThreadProvider{Provider: runtime.NewFake()}
+	var counter int64
+
+	// The durable-thread runner passes against a provider whose Start is
+	// idempotent and whose Stop pauses rather than deletes: every non-skipped
+	// contract still runs against the real provider, while
+	// Start_DuplicateReturnsError and ListRunning_ExcludesStopped are skipped
+	// honestly. Without the runner's options both subtests would fail (Start
+	// returns nil twice; a stopped session stays listed) — that is why it exists.
+	RunDurableThreadProviderTests(t, func(_ *testing.T) (runtime.Provider, runtime.Config, string) {
+		id := atomic.AddInt64(&counter, 1)
+		return provider, runtime.Config{}, fmt.Sprintf("durable-thread-%d", id)
+	})
 }
 
 func TestRunProviderTestsWithOptionsSkipsClassifiedStartErrors(t *testing.T) {

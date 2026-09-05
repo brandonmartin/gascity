@@ -121,7 +121,7 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 					Runner: SymbolRef{ImportPath: "example.test/contract", Name: "Run"},
 				},
 			},
-			want: "proof runner is example.test/contract.Run, want internal/runtime/runtimetest.RunProviderTests",
+			want: "proof runner is example.test/contract.Run, want one of ",
 		},
 		{
 			name: "not applicable also has waiver",
@@ -634,7 +634,7 @@ func TestCatalogBindsACPWithDirAndDefaultConstructor(t *testing.T) {
 
 func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	var proof *ProofRef
-	var t3Waiver *Waiver
+	var t3Proof *ProofRef
 
 	for _, entry := range Catalog() {
 		if entry.ID != "runtime.builtin.exec" {
@@ -648,10 +648,10 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 				}
 				proof = claim.Proof
 			case repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"):
-				if claim.Disposition != DispositionWaived {
-					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				if claim.Disposition != DispositionProved {
+					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
-				t3Waiver = claim.Waiver
+				t3Proof = claim.Proof
 			}
 		}
 	}
@@ -665,8 +665,54 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
 		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
 	}
-	if t3Waiver == nil || t3Waiver.Owner != runtimeContractWaiverOwner {
-		t.Errorf("legacy T3 exec-prefix waiver = %+v, want %s ownership", t3Waiver, runtimeContractWaiverOwner)
+	// The legacy gc-session-t3 prefix route binds the same t3bridge.NewSeamBacked
+	// constructor as runtime.builtin.t3bridge; one durable-thread conformance
+	// proof closes both rows.
+	if t3Proof == nil {
+		t.Fatal("legacy T3 exec-prefix proof is missing")
+	}
+	if t3Proof.File != "internal/runtime/t3bridge/conformance_test.go" || t3Proof.Test != "TestT3BridgeConformance" {
+		t.Errorf("legacy T3 exec-prefix proof = %s#%s, want t3bridge conformance entrypoint", t3Proof.File, t3Proof.Test)
+	}
+	if t3Proof.Runner != runtimeProviderDurableThreadRunner {
+		t.Errorf("legacy T3 exec-prefix runner = %s, want durable-thread runner", renderSymbolRef(t3Proof.Runner))
+	}
+}
+
+func TestCatalogBindsT3BridgeToDurableThreadConformance(t *testing.T) {
+	// Both the exact:t3bridge and the legacy prefix:exec: routes select
+	// t3bridge.NewSeamBacked; one durable-thread conformance proof closes both,
+	// and neither may fall back to a waiver.
+	var exactProof *ProofRef
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.t3bridge" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			if claim.Constructor != repoSymbol("internal/runtime/t3bridge", "NewSeamBacked") {
+				continue
+			}
+			if claim.Disposition != DispositionProved {
+				t.Errorf("t3bridge disposition = %q, want %q", claim.Disposition, DispositionProved)
+			}
+			if claim.Waiver != nil {
+				t.Errorf("t3bridge still carries a waiver: %+v", claim.Waiver)
+			}
+			exactProof = claim.Proof
+		}
+	}
+
+	if exactProof == nil {
+		t.Fatal("t3bridge.NewSeamBacked proof is missing")
+	}
+	if exactProof.File != "internal/runtime/t3bridge/conformance_test.go" || exactProof.Test != "TestT3BridgeConformance" {
+		t.Errorf("t3bridge proof = %s#%s, want t3bridge conformance entrypoint", exactProof.File, exactProof.Test)
+	}
+	if exactProof.Runner != runtimeProviderDurableThreadRunner {
+		t.Errorf("t3bridge runner = %s, want %s", renderSymbolRef(exactProof.Runner), renderSymbolRef(runtimeProviderDurableThreadRunner))
+	}
+	if got, want := renderSymbolRefs(exactProof.AllowedCalls), "fmt.Sprintf, internal/runtime/t3bridge.t3ConformanceConfig, sync/atomic.AddInt64"; got != want {
+		t.Errorf("t3bridge allowed calls = %q, want %q", got, want)
 	}
 }
 

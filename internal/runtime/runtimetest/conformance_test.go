@@ -213,6 +213,52 @@ func TestRunLifecycleTestsDoesNotStopUnownedConcurrentStart(t *testing.T) {
 	}
 }
 
+// idempotentStartProvider models a provider whose Start reuses/rebinds the
+// existing session on duplicate names instead of returning an error, like
+// t3bridge (see ReuseDecisionReuse/Rebind/Recreate). This is a deliberate
+// production behavior that cannot satisfy Start_DuplicateReturnsError.
+type idempotentStartProvider struct {
+	runtime.Provider
+	started map[string]bool
+}
+
+func (p *idempotentStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.started == nil {
+		p.started = make(map[string]bool)
+	}
+	if p.started[name] {
+		return nil
+	}
+	if err := p.Provider.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	p.started[name] = true
+	return nil
+}
+
+func (p *idempotentStartProvider) Stop(name string) error {
+	if p.started != nil {
+		delete(p.started, name)
+	}
+	return p.Provider.Stop(name)
+}
+
+func TestOptionsIdempotentStartSkipsDuplicateSubtest(t *testing.T) {
+	provider := &idempotentStartProvider{Provider: runtime.NewFake()}
+	var counter int64
+	factory := func(_ *testing.T) (runtime.Provider, runtime.Config, string) {
+		id := atomic.AddInt64(&counter, 1)
+		return provider, runtime.Config{}, fmt.Sprintf("idempotent-start-%d", id)
+	}
+
+	// With IdempotentStart=true, the full lifecycle suite passes against an
+	// idempotent-Start provider: every non-duplicate contract still runs, and
+	// Start_DuplicateReturnsError is skipped honestly rather than failing.
+	// Without the option, an idempotent-Start provider fails that subtest
+	// (Start returns nil twice) — that is the whole reason the flag exists.
+	RunLifecycleTestsWithOptions(t, factory, Options{IdempotentStart: true})
+}
+
 func TestRunProviderTestsWithOptionsSkipsClassifiedStartErrors(t *testing.T) {
 	startErr := errors.New("environmental start failure")
 	provider := startFailProvider{Provider: runtime.NewFake(), err: startErr}

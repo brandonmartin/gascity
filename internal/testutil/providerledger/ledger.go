@@ -207,8 +207,17 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract",
+				time.Date(2026, time.September, 29, 0, 0, 0, 0, time.UTC),
+				"t3bridge.Provider.Start is idempotent by design — DecideThreadReuse "+
+					"reuses/rebinds/recreates the existing thread and returns nil — so the "+
+					"Start_DuplicateReturnsError contract case cannot hold; "+
+					"runtimetest.Options.IdempotentStart now exists to skip that subtest "+
+					"honestly, but landing a proof also requires a stateful T3 test double "+
+					"that reflects dispatchThreadCreate/session-stop into snapshot state so "+
+					"IsRunning/ListRunning contracts can execute against real bridge behavior. "+
+					"The exact: and prefix:exec: rows below both bind this constructor and "+
+					"share this date because one proof closes both; follow-up work is tracked "+
+					"under ga-p20",
 			),
 		),
 		builtin(
@@ -247,8 +256,11 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
+				time.Date(2026, time.September, 29, 0, 0, 0, 0, time.UTC),
+				"the legacy gc-session-t3 prefix branch selects the same "+
+					"t3bridge.NewSeamBacked constructor as runtime.builtin.t3bridge; "+
+					"see that entry for the specific idempotent-Start / stateful-mock "+
+					"blocker and shared expiry (one proof closes both rows)",
 			),
 		),
 		builtin(

@@ -523,14 +523,7 @@ func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupR
 }
 
 func (s *groupService) getGroupByID(groupID string) (ConversationGroupRecord, error) {
-	item, err := s.store.Get(groupID)
-	if err != nil {
-		return ConversationGroupRecord{}, fmt.Errorf("get group %s: %w", groupID, err)
-	}
-	if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
-		return ConversationGroupRecord{}, ErrGroupNotFound
-	}
-	return decodeGroupBead(item)
+	return loadGroupRecord(s.store, groupID)
 }
 
 func (s *groupService) listParticipants(groupID string) ([]ConversationGroupParticipant, error) {

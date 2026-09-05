@@ -1409,12 +1409,14 @@ Other reusable-support boundaries remain explicit follow-up work:
 `beadstest.RecordingStore`, the events and mail fakes, `fsys.Fake`, and
 `clock.Fake` are not claimed by this table.
 
-The hybrid row deliberately chooses `cmd/gc.newHybridProvider` as its
-construction boundary because that is the wrapper returned directly by the
-runtime registry. This ledger does not recursively claim the wrapper's internal
-tmux, K8s, or hybrid constructors.
+The hybrid row claims `internal/runtime/hybrid.New`, the router the runtime
+registry returns. Inner tmux and K8s constructors stay on their own rows; this
+ledger does not recursively claim them. The hybrid proof runs that production
+router once with two fresh in-memory fakes on the default (local) route;
+focused hybrid tests retain local-versus-remote routing instead of duplicating
+the full suite for each route.
 
-`runtime.NewFake`, `auto.New`, `exec.NewSeamBacked`,
+`runtime.NewFake`, `auto.New`, `hybrid.New`, `exec.NewSeamBacked`,
 `subprocess.NewSeamBackedWithDir`, and `acp.NewSeamBackedWithDir` are
 source-bound to the shared runtime contract below. The auto proof runs the
 exact production composition once with two fresh in-memory fakes and owns no
@@ -1445,7 +1447,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
 | `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | proved by internal/runtime/herdr/conformance_test.go#TestHerdrConformance |
-| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-10-22: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `internal/runtime/hybrid.New` | runtime.builtin/exact:hybrid | `runtime.Provider` | proved by internal/runtime/hybrid/conformance_test.go#TestHybridConformance (default-route conformance; remote route covered by focused hybrid routing tests) |
 | `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBackedWithOps` | runtime.builtin/exact:k8s | `runtime.Provider` | proved by internal/runtime/k8s/seam_conformance_test.go#TestK8sSeamBackedWithOpsConformance (proved via injectable k8sOps seam against the fake ops double; unproved residue: the real k8sOps adapter (kubeconfig + client-go wiring in NewRealAdapter) that NewSeamBacked composes over NewSeamBackedWithOps in production) |
 | `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | proved by internal/runtime/ssh/conformance_test.go#TestSSHConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |

@@ -36,6 +36,25 @@ func TestACPConformance(t *testing.T) {
 	})
 }
 
+// TestACPDefaultDirConformance runs the same full Provider conformance suite
+// against the constructor cmd/gc's "acp" registration calls when a city path
+// is absent: NewSeamBacked, which keeps socket and meta files in the shared
+// default temporary directory (os.TempDir()/gc-acp-<euid>) rather than an
+// injected one. That directory is process-shared by design, so session names
+// carry the PID — the suite only asserts membership of its own names, and
+// PID-scoped names keep concurrent runs on one machine from colliding there.
+func TestACPDefaultDirConformance(t *testing.T) {
+	var fixture acpConformanceFixture
+	var counter int64
+
+	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBacked(Config{}), runtime.Config{
+			Command: acpConformanceCommand(caseT, t, &fixture),
+			WorkDir: caseT.TempDir(),
+		}, fmt.Sprintf("gc-acp-default-%d-%d", os.Getpid(), atomic.AddInt64(&counter, 1))
+	})
+}
+
 func acpConformanceDir(caseT, ownerT *testing.T, fixture *acpConformanceFixture) string {
 	caseT.Helper()
 	if err := prepareACPConformanceFixture(ownerT, fixture); err != nil {

@@ -70,6 +70,7 @@ backlog-depth
 order-tracking-retention
 session-model
 startup-health-episodes
+wake-attempt-churn
 dolt-server
 fork-rate
 dolt-noms-size

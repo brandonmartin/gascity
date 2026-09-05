@@ -81,11 +81,6 @@ const (
 // hard-fails via the zero value.
 func promptDeliverySupportFor(runtimeName string, packRuntimes map[string]config.DiscoveredRuntime) promptDeliverySupport {
 	name := strings.TrimSpace(runtimeName)
-	// The legacy exec spelling constructs the same native t3bridge provider
-	// (runtime_registry.go RegisterPrefix("exec:")), so it is argv-safe too.
-	if strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:")) {
-		return promptDeliverySupportArgvSafe
-	}
 	switch name {
 	// "" is the default session provider: effectiveSessionProvider returns it
 	// when neither the agent nor [session] provider is set, and the registry's

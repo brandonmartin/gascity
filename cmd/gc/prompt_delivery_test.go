@@ -306,21 +306,6 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy t3bridge exec spelling stays argv-safe", func(t *testing.T) {
-		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
-		quoted := shellquote.Quote(prompt)
-		got, err := promptDelivery(prompt, false, arg, "wake", "exec:/usr/lib/gc/gc-session-t3", nil)
-		if err != nil {
-			t.Fatalf("promptDelivery() unexpected error for the legacy t3bridge exec spelling: %v", err)
-		}
-		if got.PromptSuffix != quoted {
-			t.Errorf("promptDelivery() legacy t3bridge exec spelling PromptSuffix len=%d, want len=%d", len(got.PromptSuffix), len(quoted))
-		}
-		if got.OversizedFallback {
-			t.Errorf("promptDelivery() OversizedFallback = true for the legacy t3bridge exec spelling, want false: it is the same argv-safe native runtime as %q", "t3bridge")
-		}
-	})
-
 	t.Run("pack-declared nudge-fallback runtime routes through nudge with no argv bytes", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
 		packRuntimes := map[string]config.DiscoveredRuntime{
@@ -406,7 +391,7 @@ func TestPromptDeliverySupportFor(t *testing.T) {
 	}{
 		{runtime: "tmux", want: promptDeliverySupportNudgeFallback},
 		{runtime: "t3bridge", want: promptDeliverySupportArgvSafe},
-		{runtime: "exec:/usr/lib/gc/gc-session-t3", want: promptDeliverySupportArgvSafe},
+		{runtime: "exec:/usr/lib/gc/gc-session-t3", want: promptDeliverySupportUnsupported},
 		{runtime: "subprocess", want: promptDeliverySupportUnsupported},
 		{runtime: "", want: promptDeliverySupportNudgeFallback},
 		{runtime: " tmux", want: promptDeliverySupportNudgeFallback},

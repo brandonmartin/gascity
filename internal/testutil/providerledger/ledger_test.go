@@ -628,7 +628,7 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 
 func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	var proof *ProofRef
-	var t3Waiver *Waiver
+	sawT3 := false
 
 	for _, entry := range Catalog() {
 		if entry.ID != "runtime.builtin.exec" {
@@ -642,10 +642,7 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 				}
 				proof = claim.Proof
 			case repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"):
-				if claim.Disposition != DispositionWaived {
-					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionWaived)
-				}
-				t3Waiver = claim.Waiver
+				sawT3 = true
 			}
 		}
 	}
@@ -659,8 +656,8 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
 		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
 	}
-	if t3Waiver == nil || t3Waiver.Owner != runtimeContractWaiverOwner {
-		t.Errorf("legacy T3 exec-prefix waiver = %+v, want %s ownership", t3Waiver, runtimeContractWaiverOwner)
+	if sawT3 {
+		t.Error("runtime.builtin.exec still binds internal/runtime/t3bridge.NewSeamBacked; the legacy gc-session-t3 exec alias has been retired")
 	}
 }
 

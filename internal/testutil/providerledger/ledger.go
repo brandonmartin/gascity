@@ -241,11 +241,6 @@ func Catalog() []Entry {
 				repoSymbol("internal/runtime/exec", "execConformanceScript"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
-			waivedRuntime(
-				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
-			),
 		),
 		builtin(
 			"ssh", "prefix:ssh:", nil,

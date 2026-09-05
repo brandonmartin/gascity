@@ -92,11 +92,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		return newHybridProvider(sc, cityName, cityPath)
 	}))
 	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		script := strings.TrimPrefix(name, "exec:")
-		if isLegacyT3BridgeExecScript(script) {
-			return sessiont3bridge.NewSeamBacked(), nil
-		}
-		return sessionexec.NewSeamBacked(script), nil
+		return sessionexec.NewSeamBacked(strings.TrimPrefix(name, "exec:")), nil
 	}))
 	// "ssh:<[user@]host[:port]>" selects the SSH backend against a fixed
 	// endpoint (the anonymous form; the named, structured form with explicit

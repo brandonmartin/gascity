@@ -148,10 +148,10 @@ func newSessionProviderForCityByName(cfg *config.City, name string, sc config.Se
 // seam (where per-spec Transport honoring would land when runtime↔transport are
 // genuinely decoupled).
 func transportForRuntimeName(name string) string {
-	switch {
-	case name == "acp":
+	switch name {
+	case "acp":
 		return config.SessionTransportACP
-	case name == "t3bridge" || (strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:"))):
+	case "t3bridge":
 		return "t3"
 	default:
 		return config.SessionTransportTmux
@@ -169,10 +169,6 @@ func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.Sess
 		return nil, err
 	}
 	return reg.New(spec.Runtime, sc, cityName, cityPath)
-}
-
-func isLegacyT3BridgeExecScript(script string) bool {
-	return filepath.Base(strings.TrimSpace(script)) == "gc-session-t3"
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider

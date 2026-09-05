@@ -93,13 +93,7 @@ func templateParamsUseT3Bridge(tp TemplateParams) bool {
 	if sessionProvider == "" {
 		sessionProvider = strings.TrimSpace(tp.SessionOverride)
 	}
-	if sessionProvider == "t3bridge" {
-		return true
-	}
-	if strings.HasPrefix(sessionProvider, "exec:") {
-		return isLegacyT3BridgeExecScript(strings.TrimPrefix(sessionProvider, "exec:"))
-	}
-	return false
+	return sessionProvider == "t3bridge"
 }
 
 func effectiveSessionProvider(sessionOverride, citySessionProvider string) string {

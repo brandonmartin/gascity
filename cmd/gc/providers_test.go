@@ -873,14 +873,6 @@ func TestNewSessionProviderForCityByName_UsesFirstClassT3Bridge(t *testing.T) {
 	assertProviderPkg(t, sp, "t3bridge")
 }
 
-func TestNewSessionProviderForCityByName_LegacyExecT3BridgeStillMapsNative(t *testing.T) {
-	sp, err := newSessionProviderForCityByName(nil, "exec:/tmp/gc-session-t3", config.SessionConfig{}, "city", t.TempDir())
-	if err != nil {
-		t.Fatalf("newSessionProviderForCityByName(exec gc-session-t3): %v", err)
-	}
-	assertProviderPkg(t, sp, "t3bridge")
-}
-
 func TestNewSessionProvider_PreregistersACPNamedSessionRuntimeName(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")

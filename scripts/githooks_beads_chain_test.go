@@ -174,6 +174,160 @@ sleep 30
 	}
 }
 
+// recordingBd is a fake `bd` that writes its argv to $CHAIN_RECORD, so a test
+// can prove beads actually ran rather than that the chain skipped it.
+const recordingBd = `#!/usr/bin/env sh
+printf 'args=%s\n' "$*" > "$CHAIN_RECORD"
+`
+
+// restrictedChainBin builds a bin directory holding symlinks to the named host
+// tools and nothing else, so the chain's `command -v` probes see exactly the
+// helpers a test means to expose. `sh` and `env` are needed by the
+// `#!/usr/bin/env sh` shebangs of the chain and its fakes.
+func restrictedChainBin(t *testing.T, tools ...string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	for _, name := range tools {
+		real, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("locate %s on test host: %v", name, err)
+		}
+		if err := os.Symlink(real, filepath.Join(binDir, name)); err != nil {
+			t.Fatalf("link %s: %v", name, err)
+		}
+	}
+	return binDir
+}
+
+// restrictedChainEnv is chainEnv without the ambient /usr/bin:/bin, so the only
+// timeout helpers on PATH are the ones the test put there.
+func restrictedChainEnv(t *testing.T, binDir string, extra ...string) []string {
+	t.Helper()
+	env := []string{
+		"PATH=" + binDir,
+		"HOME=" + t.TempDir(),
+		"TMPDIR=" + t.TempDir(),
+	}
+	return append(env, extra...)
+}
+
+// TestBeadsChainFallsBackOnInvalidTimeout covers the fail-closed edge an
+// unvalidated duration creates: GNU timeout rejects a non-numeric argument with
+// exit 125, which the chain would propagate as a beads rejection — so a single
+// typo'd BEADS_HOOK_TIMEOUT would block every commit in the clone. The chain
+// must warn, fall back to 300s, and still run beads.
+func TestBeadsChainFallsBackOnInvalidTimeout(t *testing.T) {
+	for name, value := range map[string]string{
+		"empty":       "",
+		"zero":        "0",
+		"non-numeric": "abc",
+	} {
+		t.Run(name, func(t *testing.T) {
+			binDir := t.TempDir()
+			record := filepath.Join(t.TempDir(), "argv")
+			writeExecutable(t, filepath.Join(binDir, "bd"), recordingBd)
+
+			code, out := runChain(t, chainEnv(t, binDir,
+				"CHAIN_RECORD="+record,
+				"BEADS_HOOK_TIMEOUT="+value,
+			), "pre-commit")
+			if code != 0 {
+				t.Fatalf("chain exit = %d, want 0 for BEADS_HOOK_TIMEOUT=%q\n%s", code, value, out)
+			}
+			if !strings.Contains(out, "invalid BEADS_HOOK_TIMEOUT") {
+				t.Fatalf("chain output = %q, want the invalid-timeout notice", out)
+			}
+			got, err := os.ReadFile(record)
+			if err != nil {
+				t.Fatalf("beads did not run for BEADS_HOOK_TIMEOUT=%q: %v", value, err)
+			}
+			if want := "args=hooks run pre-commit\n"; string(got) != want {
+				t.Fatalf("bd invocation = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestBeadsChainRejectsNonGNUTimeout pins the GNU-only helper probe. Windows'
+// timeout.exe shares the name with an incompatible command line, so a `timeout`
+// that is not GNU coreutils must be bypassed for the perl fallback rather than
+// handed a duration it would misread.
+func TestBeadsChainRejectsNonGNUTimeout(t *testing.T) {
+	binDir := restrictedChainBin(t, "sh", "env", "perl")
+	record := filepath.Join(t.TempDir(), "argv")
+	writeExecutable(t, filepath.Join(binDir, "timeout"), `#!/usr/bin/env sh
+if [ "$1" = "--version" ]; then
+  echo "timeout.exe"
+  exit 0
+fi
+exit 1
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), recordingBd)
+
+	code, out := runChain(t, restrictedChainEnv(t, binDir, "CHAIN_RECORD="+record), "pre-commit")
+	if code != 0 {
+		t.Fatalf("chain exit = %d, want 0 (non-GNU timeout must be bypassed, not used)\n%s", code, out)
+	}
+	got, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("beads did not run: %v\n%s", err, out)
+	}
+	if want := "args=hooks run pre-commit\n"; string(got) != want {
+		t.Fatalf("bd invocation = %q, want %q", got, want)
+	}
+}
+
+// TestBeadsChainAcceptsGtimeout covers the macOS path, where GNU coreutils
+// installs as `gtimeout`. Linux CI always finds `timeout` first, so nothing
+// else in this suite exercises the second probe candidate.
+func TestBeadsChainAcceptsGtimeout(t *testing.T) {
+	binDir := restrictedChainBin(t, "sh", "env")
+	record := filepath.Join(t.TempDir(), "argv")
+	writeExecutable(t, filepath.Join(binDir, "gtimeout"), `#!/usr/bin/env sh
+if [ "$1" = "--version" ]; then
+  echo "timeout (GNU coreutils) 9.4"
+  exit 0
+fi
+[ "$1" = "--" ] && shift
+shift
+exec "$@"
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), recordingBd)
+
+	code, out := runChain(t, restrictedChainEnv(t, binDir, "CHAIN_RECORD="+record), "pre-commit")
+	if code != 0 {
+		t.Fatalf("chain exit = %d, want 0\n%s", code, out)
+	}
+	got, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("gtimeout was not selected as the timeout backend: %v\n%s", err, out)
+	}
+	if want := "args=hooks run pre-commit\n"; string(got) != want {
+		t.Fatalf("bd invocation = %q, want %q", got, want)
+	}
+}
+
+// TestBeadsChainTreatsPerlTimeoutAsSuccess closes the 142 branch. The perl
+// fallback surfaces a wedged bd as SIGALRM rather than exit 124, and no test
+// reached it before: Linux hosts always find real `timeout` first.
+func TestBeadsChainTreatsPerlTimeoutAsSuccess(t *testing.T) {
+	binDir := restrictedChainBin(t, "sh", "env", "perl", "sleep")
+	// `exec` so the wedged bd *is* the sleep: perl's alarm survives exec and
+	// kills it directly. Without exec the sleep outlives its killed parent and
+	// holds this test's output pipe open for its full duration.
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env sh
+exec sleep 30
+`)
+
+	code, out := runChain(t, restrictedChainEnv(t, binDir, "BEADS_HOOK_TIMEOUT=1"), "pre-commit")
+	if code != 0 {
+		t.Fatalf("chain exit = %d, want 0 on perl-fallback timeout\n%s", code, out)
+	}
+	if !strings.Contains(out, "timed out") {
+		t.Fatalf("chain output = %q, want the timeout notice", out)
+	}
+}
+
 // TestBeadsChainIsNoopWithoutBd keeps .githooks usable for contributors who do
 // not have beads installed at all.
 func TestBeadsChainIsNoopWithoutBd(t *testing.T) {

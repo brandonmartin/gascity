@@ -188,11 +188,11 @@ func restrictedChainBin(t *testing.T, tools ...string) string {
 	t.Helper()
 	binDir := t.TempDir()
 	for _, name := range tools {
-		real, err := exec.LookPath(name)
+		hostPath, err := exec.LookPath(name)
 		if err != nil {
 			t.Fatalf("locate %s on test host: %v", name, err)
 		}
-		if err := os.Symlink(real, filepath.Join(binDir, name)); err != nil {
+		if err := os.Symlink(hostPath, filepath.Join(binDir, name)); err != nil {
 			t.Fatalf("link %s: %v", name, err)
 		}
 	}

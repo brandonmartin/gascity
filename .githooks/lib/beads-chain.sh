@@ -27,18 +27,18 @@ used_perl=0
 
 set +e
 if command -v timeout >/dev/null 2>&1; then
-  timeout "$timeout_s" bd hooks run "$hook_name" "$@"
+  timeout "$timeout_s" bd hooks run "$hook_name" ${1+"$@"}
   status=$?
 elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout "$timeout_s" bd hooks run "$hook_name" "$@"
+  gtimeout "$timeout_s" bd hooks run "$hook_name" ${1+"$@"}
   status=$?
 elif command -v perl >/dev/null 2>&1; then
   used_perl=1
-  perl -e 'alarm shift; exec @ARGV' "$timeout_s" bd hooks run "$hook_name" "$@"
+  perl -e 'alarm shift; exec @ARGV' "$timeout_s" bd hooks run "$hook_name" ${1+"$@"}
   status=$?
 else
   echo >&2 "beads: hook '$hook_name' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
-  bd hooks run "$hook_name" "$@"
+  bd hooks run "$hook_name" ${1+"$@"}
   status=$?
 fi
 set -e

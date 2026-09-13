@@ -92,7 +92,7 @@ assert_bead_still_claimed() { return 0; }
 
 func (f *prePushFixture) git(t *testing.T, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := testCommand("git", args...)
 	cmd.Dir = f.repo
 	cmd.Env = f.env
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -102,7 +102,7 @@ func (f *prePushFixture) git(t *testing.T, args ...string) {
 
 func (f *prePushFixture) gitOut(t *testing.T, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := testCommand("git", args...)
 	cmd.Dir = f.repo
 	cmd.Env = f.env
 	out, err := cmd.Output()
@@ -115,7 +115,7 @@ func (f *prePushFixture) gitOut(t *testing.T, args ...string) string {
 // run invokes the fixture's pre-push hook with the given ref lines on stdin.
 func (f *prePushFixture) run(t *testing.T, stdin string) (int, string) {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(f.repo, ".githooks", "pre-push"), "origin", "git@example.com:fixture.git")
+	cmd := testCommand(filepath.Join(f.repo, ".githooks", "pre-push"), "origin", "git@example.com:fixture.git")
 	cmd.Dir = f.repo
 	cmd.Env = f.env
 	cmd.Stdin = strings.NewReader(stdin)

@@ -41,7 +41,7 @@ func chainEnv(t *testing.T, binDir string, extra ...string) []string {
 func runChain(t *testing.T, env []string, args ...string) (int, string) {
 	t.Helper()
 	root := repoRoot(t)
-	cmd := exec.Command(filepath.Join(root, beadsChainPath), args...)
+	cmd := testCommand(filepath.Join(root, beadsChainPath), args...)
 	cmd.Dir = root
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -211,7 +211,7 @@ func runHooksOwnerCheck(t *testing.T, hooksPath string) (int, string) {
 	)
 	git := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := testCommand("git", args...)
 		cmd.Dir = repo
 		cmd.Env = env
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -226,7 +226,7 @@ func runHooksOwnerCheck(t *testing.T, hooksPath string) (int, string) {
 		git("config", "core.hooksPath", hooksPath)
 	}
 
-	cmd := exec.Command(filepath.Join(root, "scripts", "check-githooks-owner.sh"))
+	cmd := testCommand(filepath.Join(root, "scripts", "check-githooks-owner.sh"))
 	cmd.Dir = repo
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -277,7 +277,7 @@ func TestCheckGitHooksOwnerRejectsForeignHooksPath(t *testing.T) {
 // TestMakeSetupInstallsAndVerifiesGitHooksOwner keeps the installer honest: it
 // must claim core.hooksPath for .githooks and then assert the claim stuck.
 func TestMakeSetupInstallsAndVerifiesGitHooksOwner(t *testing.T) {
-	cmd := exec.Command("make", "-n", "setup")
+	cmd := testCommand("make", "-n", "setup")
 	cmd.Dir = repoRoot(t)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

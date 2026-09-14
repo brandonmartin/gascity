@@ -15,6 +15,13 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+// Ops is the exported alias for the k8sOps seam; callers outside the package
+// that only need to plumb an adapter value (build it in one place, hand it to
+// [NewSeamBackedWithOps] in another) can name the type through it without
+// golint complaining about an exported function returning an unexported type.
+// The seam itself stays unexported by design.
+type Ops = k8sOps
+
 // k8sOps abstracts Kubernetes API calls for testability.
 // Same pattern as tmux provider's startOps: separates API calls from
 // provider logic so unit tests use a fake implementation.

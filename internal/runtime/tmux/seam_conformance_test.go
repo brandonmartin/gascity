@@ -11,8 +11,8 @@ import (
 
 // TestTmuxSeamsLifecycle proves the split Runtime/Transport contracts compose
 // over one real tmux session. Full Provider behavior is covered once by
-// TestTmuxConformance through NewSeamBackedWithConfig; repeating the full suite
-// here would test the same provider and adapter path twice.
+// TestTmuxSeamConformance through NewSeamBackedWithConfig; repeating the full
+// suite here would test the same provider and adapter path twice.
 func TestTmuxSeamsLifecycle(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

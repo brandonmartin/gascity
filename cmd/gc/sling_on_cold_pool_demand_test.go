@@ -217,3 +217,124 @@ title = "Do work"
 		t.Fatalf("cold-pool demand after graph.v2 --on = %d, want 1 (work stranded if 0)", got)
 	}
 }
+
+// TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand covers ga-cke:
+// a work bead sled with `gc sling <pool> <bead>` (plain) carries
+// gc.routed_to=<pool>. If the same bead is then wrapped by a graph.v2 pour
+// formula, the source becomes an input-convoy member and the workflow's
+// executable step becomes the demand unit. If the source's stale gc.routed_to
+// is left in place, defaultScaleCheck counts the source AND the executable
+// step as separate demand — two workers spawn, both try to claim, one path
+// races the other, and one XXL bead runs twice.
+//
+// The invariant this test guards: after a graph.v2 wrap of a raw-routed
+// source, cold-pool demand is exactly 1 and exactly one open+routed+unassigned
+// executable path exists.
+func TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	graphFormula := `
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Seed a source bead that already carries the pool route AND
+	// execution_routed_to, exactly the ga-cke shape (a plain sling routed it,
+	// then a wrap was attached over the top).
+	store := beads.NewMemStoreFrom(1, []beads.Bead{
+		{
+			ID:     "BL-42",
+			Title:  "Work",
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to":           "polecat",
+				"gc.execution_routed_to": "polecat",
+			},
+		},
+	}, nil)
+	deps.Store = store
+	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "")
+
+	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.ScopeKind = "city"
+	opts.ScopeRef = "test-city"
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	// The source's stale claim-semantics route must be gone: the workflow
+	// root supplies routing/demand from here on. Its observability route
+	// (gc.execution_routed_to) is kept so downstream resolvers still find the
+	// pool that owns the workflow.
+	source, err := store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if got := source.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("source gc.routed_to = %q, want empty (workflow root owns demand; stale raw route is duplicate)", got)
+	}
+	if got := source.Metadata["gc.execution_routed_to"]; got != "polecat" {
+		t.Fatalf("source gc.execution_routed_to = %q, want polecat", got)
+	}
+
+	// Classify the workflow beads: the wrapper's executable step must supply
+	// exactly one open+routed+unassigned demand row.
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	readySteps := 0
+	for _, b := range all {
+		if b.ID == "BL-42" {
+			continue
+		}
+		if b.Metadata["gc.kind"] == "workflow" {
+			continue
+		}
+		if b.Metadata["gc.kind"] == "workflow-finalize" {
+			continue
+		}
+		if b.Metadata["gc.routed_to"] == "polecat" &&
+			b.Status == "open" && b.Assignee == "" {
+			readySteps++
+		}
+	}
+	if readySteps != 1 {
+		t.Fatalf("open+routed+unassigned executable steps = %d, want 1", readySteps)
+	}
+
+	// The anti-double-spawn invariant: cold-pool demand is exactly 1. Before
+	// the ga-cke fix, this returned 2 (source's stale gc.routed_to counted
+	// alongside the executable step's route).
+	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &a, store, nil),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["polecat"]; got != 1 {
+		t.Fatalf("cold-pool demand after raw-routed graph.v2 wrap = %d, want 1 (2 = ga-cke double-spawn)", got)
+	}
+}

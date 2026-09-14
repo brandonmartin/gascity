@@ -36,6 +36,7 @@ func TestEnsureSSHKeepaliveCommand(t *testing.T) {
 }
 
 func TestApplySSHKeepaliveEnv(t *testing.T) {
+	t.Setenv("GIT_SSH_COMMAND", "")
 	got := ApplySSHKeepaliveEnv(nil)
 	if !HasSSHKeepalive(got["GIT_SSH_COMMAND"]) {
 		t.Fatalf("nil env GIT_SSH_COMMAND = %q", got["GIT_SSH_COMMAND"])
@@ -52,6 +53,45 @@ func TestApplySSHKeepaliveEnv(t *testing.T) {
 	if env["GIT_SSH_COMMAND"] != "ssh -i /k" {
 		t.Fatalf("input env mutated: %#v", env)
 	}
+}
+
+// An ambient GIT_SSH_COMMAND belongs to the operator. git documents that the
+// environment variable overrides core.sshCommand, so writing it unconditionally
+// would shadow whatever auth the ambient value carries.
+func TestApplySSHKeepaliveEnvRespectsAmbientCommand(t *testing.T) {
+	t.Run("custom wrapper is not shadowed", func(t *testing.T) {
+		t.Setenv("GIT_SSH_COMMAND", "/usr/local/bin/ssh-wrapper --policy")
+		got := ApplySSHKeepaliveEnv(map[string]string{"OTHER": "keep"})
+		if _, ok := got["GIT_SSH_COMMAND"]; ok {
+			t.Fatalf("GIT_SSH_COMMAND = %q, want absent so the ambient wrapper survives", got["GIT_SSH_COMMAND"])
+		}
+		if got["OTHER"] != "keep" {
+			t.Fatalf("unrelated env dropped: %#v", got)
+		}
+	})
+
+	t.Run("plain ssh gains keepalive and keeps its flags", func(t *testing.T) {
+		t.Setenv("GIT_SSH_COMMAND", "ssh -i /k")
+		got := ApplySSHKeepaliveEnv(nil)["GIT_SSH_COMMAND"]
+		if !HasSSHKeepalive(got) || !strings.Contains(got, "-i /k") {
+			t.Fatalf("GIT_SSH_COMMAND = %q, want merged keepalive with -i /k", got)
+		}
+	})
+
+	t.Run("explicit env wins over ambient", func(t *testing.T) {
+		t.Setenv("GIT_SSH_COMMAND", "/usr/local/bin/ssh-wrapper")
+		got := ApplySSHKeepaliveEnv(map[string]string{"GIT_SSH_COMMAND": "ssh -i /explicit"})["GIT_SSH_COMMAND"]
+		if !HasSSHKeepalive(got) || !strings.Contains(got, "-i /explicit") {
+			t.Fatalf("GIT_SSH_COMMAND = %q, want the caller's command plus keepalive", got)
+		}
+	})
+
+	t.Run("no ambient value yields the canonical default", func(t *testing.T) {
+		t.Setenv("GIT_SSH_COMMAND", "")
+		if got := ApplySSHKeepaliveEnv(nil)["GIT_SSH_COMMAND"]; got != SSHKeepaliveCommand() {
+			t.Fatalf("GIT_SSH_COMMAND = %q, want %q", got, SSHKeepaliveCommand())
+		}
+	})
 }
 
 func TestApplySSHKeepaliveConfig(t *testing.T) {

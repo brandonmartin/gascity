@@ -3,6 +3,7 @@ package git
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -57,13 +58,35 @@ func EnsureSSHKeepaliveCommand(cmd string) string {
 
 // ApplySSHKeepaliveEnv sets GIT_SSH_COMMAND on env so agent-shell git push
 // (including polecat worktrees of a different clone) keeps the SSH transport
-// alive. Existing GIT_SSH_COMMAND values are merged, not replaced.
+// alive. An existing GIT_SSH_COMMAND — whether the caller put it on env or the
+// operator exported it into our own environment — is merged, never replaced:
+// git documents that the environment variable overrides core.sshCommand, so an
+// unconditional write would shadow a deploy-key wrapper the session depends on.
+//
+// A custom (non-ssh) wrapper is left absent from the returned map rather than
+// copied through. On a runtime that inherits our environment the wrapper keeps
+// working untouched; on one that does not (k8s, Docker) the session simply runs
+// without keepalive, which is strictly better than naming a wrapper binary that
+// does not exist inside the container.
 func ApplySSHKeepaliveEnv(env map[string]string) map[string]string {
 	out := make(map[string]string, len(env)+1)
 	for k, v := range env {
 		out[k] = v
 	}
-	out["GIT_SSH_COMMAND"] = EnsureSSHKeepaliveCommand(out["GIT_SSH_COMMAND"])
+	if explicit, ok := env["GIT_SSH_COMMAND"]; ok {
+		out["GIT_SSH_COMMAND"] = EnsureSSHKeepaliveCommand(explicit)
+		return out
+	}
+	ambient := strings.TrimSpace(os.Getenv("GIT_SSH_COMMAND"))
+	if ambient == "" {
+		out["GIT_SSH_COMMAND"] = SSHKeepaliveCommand()
+		return out
+	}
+	merged := EnsureSSHKeepaliveCommand(ambient)
+	if !HasSSHKeepalive(merged) {
+		return out
+	}
+	out["GIT_SSH_COMMAND"] = merged
 	return out
 }
 

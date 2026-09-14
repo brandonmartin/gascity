@@ -807,7 +807,8 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 }
 
 // restampWorkBeadRouting stamps gc.execution_routed_to on the work bead a
-// graph workflow was attached to. A graph.v2 work bead must not get the
+// graph workflow was attached to, and clears any pre-existing gc.routed_to
+// on that same source bead. A graph.v2 work bead must not get the
 // claim-semantics gc.routed_to key once its workflow has started, because the
 // pool's tier-3 claim query and the drain engine's own dispatch are two
 // uncoordinated authorities -- neither checks the bead's Assignee/the other's
@@ -821,6 +822,15 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 // rather than failing the launch: by this point the workflow is already
 // running, and unwinding it over a routing restamp would be worse than a
 // surfaced warning.
+//
+// The gc.routed_to clear closes ga-cke: a work bead sled by an earlier plain
+// sling carries gc.routed_to=<pool>; if it is then wrapped by a graph.v2 pour
+// (`gc sling <pool> <bead> --on <formula>`), the source becomes an input-
+// convoy member and the workflow's executable step becomes the demand unit.
+// Leaving the source's stale gc.routed_to in place lets defaultScaleCheck
+// count the source AND the executable step as separate demand, spawning two
+// workers for one job. The workflow root and its executable step supply
+// demand from here on; the source must not.
 func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, result *SlingResult) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" || deps.Store == nil || result == nil {
@@ -833,6 +843,13 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
 		result.MetadataErrors = append(result.MetadataErrors,
 			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
+	}
+	// Clear any stale claim-semantics route left by an earlier plain sling.
+	// The workflow root supplies routing/demand from here on; a stale
+	// gc.routed_to on the source is unclaimable duplicate demand (ga-cke).
+	if err := deps.Store.SetMetadata(beadID, beadmeta.RoutedToMetadataKey, ""); err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("clearing %s on %s: %v", beadmeta.RoutedToMetadataKey, beadID, err))
 	}
 }
 

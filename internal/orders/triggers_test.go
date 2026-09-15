@@ -252,6 +252,9 @@ func TestCheckTriggerConditionHonorsParentContextCancel(t *testing.T) {
 		if result.Due {
 			t.Fatalf("Due = true, want false after parent context cancel: %s", result.Reason)
 		}
+		if strings.Contains(result.Reason, "condition: not met") {
+			t.Fatalf("Reason = %q; a canceled check is a real failure, not a quiet not-met tick", result.Reason)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("checkCondition did not return within 10s of parent cancel; want prompt abort well under the 30s check_timeout")
 	}

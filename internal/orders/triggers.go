@@ -332,8 +332,15 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 			}
 			return TriggerResult{Due: false, Reason: reason}
 		}
+		// A non-zero exit is the condition-probe contract, but *exec.ExitError
+		// also covers processes we killed and processes something else killed.
+		// Both predicates are load-bearing and neither subsumes the other:
+		// ctx.Err() == nil rules out our own cancel/deadline (on Windows a
+		// canceled check is Kill()ed and reports a clean-looking exit 1), and
+		// Exited() rules out a signal death we did not cause (OOM killer,
+		// external SIGKILL), where ExitCode() is a meaningless -1.
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if ctx.Err() == nil && errors.As(err, &exitErr) && exitErr.Exited() {
 			return TriggerResult{Due: false, Reason: fmt.Sprintf("condition: not met (exit %d)", exitErr.ExitCode())}
 		}
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}

@@ -2030,6 +2030,94 @@ func TestWispGC_ClosesSteplessRootWhenAttachmentSourceTerminal(t *testing.T) {
 	}
 }
 
+// TestWispGC_LeavesSteplessRootWithLiveGraphV2AttachmentSourcePastTTL is the
+// graph.v2 half of the attachment guard. The v1 attach path writes molecule_id
+// on the source bead; the graph.v2 path writes workflow_id
+// (internal/sling/sling_core.go). steplessRootHasLiveAttachmentSource checks
+// both keys, so both need a case — without this one, deleting the workflow_id
+// iteration would fail no test.
+func TestWispGC_LeavesSteplessRootWithLiveGraphV2AttachmentSourcePastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-live-graphv2",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{"workflow_id": "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("graph.v2-attached stepless wisp status = %q, want open (live source bead still attached)", root.Status)
+	}
+}
+
+// TestWispGC_LeavesSteplessRootWhenAttachmentQueryFails pins the fail-CLOSED
+// posture steplessRootHasLiveAttachmentSource promises: an unreadable store
+// must never widen what the sweep destroys. With the attachment-holder query
+// erroring, the root is indistinguishable from one with a live source, so it
+// stays open and the sweep says why.
+func TestWispGC_LeavesSteplessRootWhenAttachmentQueryFails(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+	})
+	store.listErrors[gcQueryKey{Metadata: metadataQueryKey(map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"})}] = fmt.Errorf("attachment holder list failed")
+
+	var logOutput string
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			logOutput = captureWispGCLog(t, func() {
+				wg := newWispGC(5*time.Minute, time.Hour, 0)
+				if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now); err != nil {
+					t.Fatalf("runGC: %v", err)
+				}
+			})
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("stepless wisp status = %q, want open (attachment query failed; fail closed)", root.Status)
+	}
+	if !strings.Contains(logOutput, "leaving it open") {
+		t.Fatalf("log output = %q, want unresolvable-attachment-holder log", logOutput)
+	}
+}
+
 func TestWispGC_RespectsTTLCutoff(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{

@@ -324,6 +324,10 @@ func assignmentPrefix(token string) (string, bool) {
 func ReplaceSchemaFlags(command string, schema []ProviderOption, overrideArgs []string) string {
 	allFlags := CollectAllSchemaFlags(schema)
 	stripped := StripFlags(command, allFlags)
+	// Exact-match stripping only knows declared choices, so a value honored
+	// through an open option's FlagTemplate survives it. Strip by shape too,
+	// or appending overrideArgs below would emit the option twice.
+	stripped = stripShapes(stripped, CollectOpenOptionShapes(schema))
 	if len(overrideArgs) > 0 {
 		stripped = stripped + " " + shellquote.Join(overrideArgs)
 	}
@@ -349,6 +353,69 @@ func CollectAllSchemaFlags(schema []ProviderOption) [][]string {
 		}
 	}
 	return flags
+}
+
+// CollectOpenOptionShapes gathers the raw FlagTemplate of every open option in
+// the schema, placeholder intact. The result feeds stripShapes, which matches
+// a rendered value positionally rather than by literal equality.
+//
+// CollectAllSchemaFlags cannot cover these: it walks Choices only, so a value
+// outside the curated list — exactly what an open option exists to honor —
+// leaves no literal flag sequence to match (ga-fyh).
+func CollectOpenOptionShapes(schema []ProviderOption) [][]string {
+	var shapes [][]string
+	seen := make(map[string]bool)
+	for _, opt := range schema {
+		if !IsOpenOption(opt) {
+			continue
+		}
+		key := strings.Join(opt.FlagTemplate, "\x00")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		shapes = append(shapes, cloneStrings(opt.FlagTemplate))
+	}
+	return shapes
+}
+
+// stripShapes removes every token run matching one of the given flag shapes.
+//
+// A shape is a FlagTemplate: its leading flag matches literally, and the
+// OptionValuePlaceholder token matches any single rendered value —
+// tokenSequenceShapeMatchesAt already refuses an empty token, a "-"-prefixed
+// token and an unrendered "{{...}}" template, so a flag whose value is missing
+// or still templated is left alone. A placeholder inside an assignment token
+// (codex's "model_reasoning_effort={value}") matches on the "key=" prefix.
+//
+// Run this after StripFlags, never instead of it: exact matching must consume
+// curated multi-flag groups (pi's "--provider ollama-cloud --model gpt-oss:20b")
+// as units first, before the shape pass can claim their "--model" half alone.
+func stripShapes(command string, shapes [][]string) string {
+	if len(shapes) == 0 {
+		return command
+	}
+	tokens := shellquote.Split(command)
+	result := make([]string, 0, len(tokens))
+	i := 0
+	for i < len(tokens) {
+		matched := false
+		for _, seq := range shapes {
+			if len(seq) == 0 {
+				continue
+			}
+			if tokenSequenceShapeMatchesAt(tokens, i, seq, nil) {
+				i += len(seq)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			result = append(result, tokens[i])
+			i++
+		}
+	}
+	return shellquote.Join(result)
 }
 
 func choiceFlagSequences(choice OptionChoice) [][]string {

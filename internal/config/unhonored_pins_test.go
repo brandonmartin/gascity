@@ -317,3 +317,85 @@ func TestCursorModelPinIsHonored(t *testing.T) {
 		}
 	}
 }
+
+// TestReplaceSchemaFlagsStripsOpenOptionValue is the strip-side half of the
+// open-option change. CollectAllSchemaFlags walks Choices only, so a value
+// honored through FlagTemplate has no literal sequence to match and survived
+// StripFlags — a later template_overrides pin then appended a second --model
+// instead of replacing the first, and the CLI sees two (ga-fyh).
+func TestReplaceSchemaFlagsStripsOpenOptionValue(t *testing.T) {
+	grok := BuiltinProviders()["grok"]
+	got := ReplaceSchemaFlags("grok --model grok-4.9-unreleased", grok.OptionsSchema, []string{"--model", "grok-build"})
+	if n := strings.Count(got, "--model"); n != 1 {
+		t.Errorf("ReplaceSchemaFlags() = %q, want exactly one --model, got %d", got, n)
+	}
+	if !strings.Contains(got, "--model grok-build") {
+		t.Errorf("ReplaceSchemaFlags() = %q, want the override --model grok-build", got)
+	}
+	if strings.Contains(got, "grok-4.9-unreleased") {
+		t.Errorf("ReplaceSchemaFlags() = %q, still carries the replaced value", got)
+	}
+}
+
+// TestReplaceSchemaFlagsStripsOpenAssignmentValue covers codex's assignment
+// form, where the value is embedded in the token rather than standing alone.
+func TestReplaceSchemaFlagsStripsOpenAssignmentValue(t *testing.T) {
+	codex := BuiltinProviders()["codex"]
+	got := ReplaceSchemaFlags("codex -c model_reasoning_effort=ultra", codex.OptionsSchema, []string{"-c", "model_reasoning_effort=high"})
+	if n := strings.Count(got, "model_reasoning_effort="); n != 1 {
+		t.Errorf("ReplaceSchemaFlags() = %q, want exactly one model_reasoning_effort=, got %d", got, n)
+	}
+	if !strings.Contains(got, "model_reasoning_effort=high") {
+		t.Errorf("ReplaceSchemaFlags() = %q, want the override tier", got)
+	}
+}
+
+// TestReplaceResumeSchemaFlagsStripsOpenOptionValue pins the identical gap on
+// the resume path, which strips via CollectAllSchemaFlags directly.
+func TestReplaceResumeSchemaFlagsStripsOpenOptionValue(t *testing.T) {
+	grok := BuiltinProviders()["grok"]
+	got := replaceResumeSchemaFlags(
+		"grok --model grok-4.9-unreleased --resume {{.SessionKey}}",
+		"--resume", "flag", grok.OptionsSchema, []string{"--model", "grok-build"},
+	)
+	if n := strings.Count(got, "--model"); n != 1 {
+		t.Errorf("replaceResumeSchemaFlags() = %q, want exactly one --model, got %d", got, n)
+	}
+	if !strings.Contains(got, "--resume {{.SessionKey}}") {
+		t.Errorf("replaceResumeSchemaFlags() = %q, lost the resume template", got)
+	}
+}
+
+// TestReplaceSchemaFlagsKeepsCuratedGroupStrippedAsUnit guards the ordering the
+// shape pass depends on. pi's curated model choice carries its own --provider,
+// so exact matching must consume the whole group before the shape pass sees
+// the --model half; otherwise a stranded --provider would survive.
+func TestReplaceSchemaFlagsKeepsCuratedGroupStrippedAsUnit(t *testing.T) {
+	pi := BuiltinProviders()["pi"]
+	got := ReplaceSchemaFlags("pi --provider ollama-cloud --model gpt-oss:20b", pi.OptionsSchema, []string{"--model", "some-other-id"})
+	if strings.Contains(got, "--provider") {
+		t.Errorf("ReplaceSchemaFlags() = %q, stranded the curated --provider", got)
+	}
+	if strings.Contains(got, "gpt-oss:20b") {
+		t.Errorf("ReplaceSchemaFlags() = %q, kept the replaced curated model", got)
+	}
+	if n := strings.Count(got, "--model"); n != 1 {
+		t.Errorf("ReplaceSchemaFlags() = %q, want exactly one --model, got %d", got, n)
+	}
+}
+
+// TestStripShapesLeavesUnrenderedTemplateAlone: a command still carrying a Go
+// template placeholder is not a rendered value, and stripping it would silently
+// drop a flag the render step is about to fill in.
+func TestStripShapesLeavesUnrenderedTemplateAlone(t *testing.T) {
+	shapes := CollectOpenOptionShapes(BuiltinProviders()["grok"].OptionsSchema)
+	for _, command := range []string{
+		"grok --model {{.Model}}",
+		"grok --model",
+		"grok --model --effort high",
+	} {
+		if got := stripShapes(command, shapes); !strings.Contains(got, "--model") {
+			t.Errorf("stripShapes(%q) = %q, dropped a --model it should not have", command, got)
+		}
+	}
+}

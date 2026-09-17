@@ -33,7 +33,7 @@ Two things hold for every recipe:
 | Grok | `grok` | — · `XAI_API_KEY` | yes |
 | Kimi Code | `kimi` | `KIMI_BASE_URL` · `KIMI_API_KEY` | yes |
 | Kiro | `kiro` | — · `KIRO_API_KEY` | — |
-| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | — |
+| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | yes |
 | GitHub Copilot | `copilot` | `COPILOT_PROVIDER_BASE_URL` · `COPILOT_PROVIDER_API_KEY` / `COPILOT_GITHUB_TOKEN` | — |
 | Sourcegraph AMP | `amp` | `AMP_URL` · `AMP_API_KEY` | — |
 | OpenCode | `opencode` | gateway (per-upstream) | yes |
@@ -150,11 +150,16 @@ api_key = "$XAI_API_KEY"
 
 ### Cursor Agent — `provider = "cursor"`
 
-Reads `CURSOR_API_KEY` (`cursor-agent`; no built-in `model` option — Cursor picks
-the model).
+Reads `CURSOR_API_KEY` (`cursor-agent`).
 
 ```toml
-provider = "cursor"
+provider        = "cursor"
+option_defaults = { model = "auto" }  # auto · composer-2.5 · gpt-5.3-codex · cursor-grok-4.6-high · claude-opus-5-thinking-high · claude-sonnet-5-thinking-high
+# `model` is open: an id not listed above is passed through to the CLI rather
+# than dropped. Cursor's catalog is account-scoped — run `cursor-agent
+# --list-models` to see yours — and accepts parameterized ids such as
+# `claude-opus-4-8[context=1m,effort=high]`.
+
 [upstreams.cursor]
 api_key = "$CURSOR_API_KEY"
 ```

@@ -285,6 +285,32 @@ func assertCompactMarkerHasEvidence(t *testing.T, markerPath string, want ...str
 	}
 }
 
+func compactLogQueryIndex(log, substr string) int {
+	for i, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+func assertCompactQueryBefore(t *testing.T, log, earlier, later string) {
+	t.Helper()
+	ei := compactLogQueryIndex(log, earlier)
+	li := compactLogQueryIndex(log, later)
+	if ei < 0 {
+		t.Fatalf("dolt log missing %q:\n%s", earlier, log)
+	}
+	if li < 0 {
+		t.Fatalf("dolt log missing %q:\n%s", later, log)
+	}
+	if ei > li {
+		t.Fatalf("want %q before %q (indices %d > %d)\n%s", earlier, later, ei, li, log)
+	}
+}
+
+const compactPreflightEvidenceRefBeads = "__gc_compact_preflight_beads"
+
 func rewriteLegacyPendingPushMarker(t *testing.T, markerPath, createdAt string) {
 	t.Helper()
 	if err := os.WriteFile(markerPath, []byte(
@@ -1121,6 +1147,13 @@ case "$query" in
     ;;
   *"DOLT_DIFF_STAT"*)
     if [ "$mode" = "absorbed_ws_db_hash_drift" ]; then
+      # Production hq 2026-09-17 (ga-f5n): flatten orphans the preflight
+      # commit, auto-GC collects it, and DOLT_DIFF_STAT fails with
+      # "target commit not found" unless compact pinned that commit first.
+      if [ ! -f "${state_file}.preflight-pin" ]; then
+        printf 'target commit not found\n' >&2
+        exit 1
+      fi
       print_cell beads
       exit 0
     fi
@@ -1140,6 +1173,18 @@ case "$query" in
     esac
     printf 'unexpected DOLT_DIFF_STAT query: %%s\n' "$query" >&2
     exit 64
+    ;;
+  *"DOLT_BRANCH"*"-D"*)
+    rm -f -- "${state_file}.preflight-pin"
+    exit 0
+    ;;
+  *"DOLT_BRANCH"*)
+    if [ "$mode" = "preflight_pin_failure" ]; then
+      printf 'could not create preflight evidence branch\n' >&2
+      exit 46
+    fi
+    printf 'pinned\n' > "${state_file}.preflight-pin"
+    exit 0
     ;;
   *"DOLT_RESET"*)
     if [[ "$query" == *"--hard"* ]]; then
@@ -1308,6 +1353,90 @@ func TestCompactScriptFlattensAndVerifies(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Fatalf("dolt log missing %s:\n%s", want, log)
 		}
+	}
+}
+
+// Flatten soft-resets to the root commit, which orphans the preflight HEAD.
+// Auto-GC then collects it, so later DOLT_DIFF_STAT(preflight, flatten) fails
+// with "target commit not found" (hq 2026-09-17 / ga-f5n). Compact must pin
+// that commit to a Dolt branch before the mutating reset.
+func TestCompactScriptPinsPreflightHeadBeforeFlatten(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	wantPin := "CALL DOLT_BRANCH('-f', '" + compactPreflightEvidenceRefBeads + "', 'headcommit')"
+	if !strings.Contains(log, wantPin) {
+		t.Fatalf("compact must pin the preflight HEAD before flatten:\n%s", log)
+	}
+	assertCompactQueryBefore(t, log, wantPin, "DOLT_RESET")
+}
+
+func TestCompactScriptDeletesPreflightPinAfterSuccessfulGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	wantDelete := "CALL DOLT_BRANCH('-D', '" + compactPreflightEvidenceRefBeads + "')"
+	if !strings.Contains(log, wantDelete) {
+		t.Fatalf("successful flatten+GC must drop the preflight evidence branch:\n%s", log)
+	}
+	assertCompactQueryBefore(t, log, "DOLT_RESET", wantDelete)
+	assertCompactQueryBefore(t, log, wantDelete, "DOLT_GC")
+}
+
+func TestCompactScriptKeepsPreflightPinWhenQuarantining(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_table_replacement_with_row_gain", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite same-table row-count gain with value-hash drift:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	wantPin := "CALL DOLT_BRANCH('-f', '" + compactPreflightEvidenceRefBeads + "', 'headcommit')"
+	if !strings.Contains(log, wantPin) {
+		t.Fatalf("quarantine path must still pin preflight evidence:\n%s", log)
+	}
+	if strings.Contains(log, "CALL DOLT_BRANCH('-D'") {
+		t.Fatalf("quarantine must keep the preflight evidence branch for manual DOLT_DIFF_STAT:\n%s", log)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	assertCompactMarkerHasEvidence(t, marker,
+		"flatten_preflight_ref="+compactPreflightEvidenceRefBeads,
+	)
+}
+
+func TestCompactScriptAbortsFlattenWhenPreflightPinFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "preflight_pin_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite failing to pin preflight evidence:\n%s", out)
+	}
+	if !strings.Contains(out, "failed to pin preflight HEAD") {
+		t.Fatalf("output missing preflight pin failure:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	if strings.Contains(log, "DOLT_RESET") {
+		t.Fatalf("flatten must not run when the preflight evidence pin fails:\n%s", log)
 	}
 }
 

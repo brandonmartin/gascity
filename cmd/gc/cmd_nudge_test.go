@@ -3600,6 +3600,162 @@ func TestClaimDueQueuedNudgesForTargetClaimsSameSessionStaleEpoch(t *testing.T) 
 	}
 }
 
+func TestQueuedNudgeClaimableForTarget_SessionReplacementTable(t *testing.T) {
+	worker := nudgeTarget{
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-new",
+		continuationEpoch: "2",
+	}
+	matching := queuedNudge{Agent: "worker", SessionID: "gc-new", ContinuationEpoch: "2"}
+	legA := queuedNudge{Agent: "worker", SessionID: "gc-new", ContinuationEpoch: "1"}
+	legB := queuedNudge{Agent: "worker", SessionID: "gc-old", ContinuationEpoch: "1"}
+	otherAgent := queuedNudge{Agent: "mayor", SessionID: "gc-old", ContinuationEpoch: "1"}
+	unresolved := nudgeTarget{agent: config.Agent{Name: "worker"}}
+
+	liveSuccessorOnly := func() map[string]struct{} {
+		return map[string]struct{}{"gc-new": {}}
+	}
+	liveSibling := func() map[string]struct{} {
+		return map[string]struct{}{"gc-new": {}, "gc-old": {}}
+	}
+
+	tests := []struct {
+		name string
+		item queuedNudge
+		tgt  nudgeTarget
+		live func() map[string]struct{}
+		want bool
+	}{
+		{name: "matching fence delivers", item: matching, tgt: worker, live: liveSuccessorOnly, want: true},
+		{name: "Leg A same session stale epoch is claimable", item: legA, tgt: worker, live: liveSuccessorOnly, want: true},
+		{name: "Leg B superseded session is claimable", item: legB, tgt: worker, live: liveSuccessorOnly, want: true},
+		{name: "live sibling keeps its own fence", item: legB, tgt: worker, live: liveSibling, want: false},
+		{name: "no census fails closed on session replacement", item: legB, tgt: worker, live: nil, want: false},
+		{name: "empty census fails closed on session replacement", item: legB, tgt: worker, live: func() map[string]struct{} { return map[string]struct{}{} }, want: false},
+		{name: "unresolved target cannot claim a fenced item", item: legB, tgt: unresolved, live: liveSuccessorOnly, want: false},
+		{name: "other agent is never claimable", item: otherAgent, tgt: worker, live: liveSuccessorOnly, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := queuedNudgeClaimableForTarget(tt.tgt, tt.item, tt.live); got != tt.want {
+				t.Fatalf("claimable = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaimDueQueuedNudgesForTargetClaimsReplacedSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-time.Minute)
+	item := newQueuedNudgeWithOptions("worker", "predecessor session", "mail", now, queuedNudgeOptions{
+		ID:                "n-replaced",
+		SessionID:         "gc-old",
+		ContinuationEpoch: "1",
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		return map[string]struct{}{"gc-new": {}}
+	}
+
+	target := nudgeTarget{
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-new",
+		continuationEpoch: "2",
+	}
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != item.ID {
+		t.Fatalf("claimed = %#v, want replaced-session nudge", claimed)
+	}
+
+	deliverable, rejected := splitQueuedNudgesForTarget(target, claimed)
+	if len(rejected) != 0 {
+		t.Fatalf("rejected = %#v, want replaced-session nudge re-fenced (not dead-lettered)", rejected)
+	}
+	if len(deliverable) != 1 || deliverable[0].ID != item.ID {
+		t.Fatalf("deliverable = %#v, want replaced-session nudge re-fenced to the live incarnation", deliverable)
+	}
+	if got := deliverable[0].SessionID; got != "gc-new" {
+		t.Fatalf("re-fenced SessionID = %q, want %q", got, "gc-new")
+	}
+	if got := deliverable[0].ContinuationEpoch; got != "2" {
+		t.Fatalf("re-fenced ContinuationEpoch = %q, want %q", got, "2")
+	}
+}
+
+func TestClaimDueQueuedNudgesForTargetLeavesLiveSiblingFencePending(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-time.Minute)
+	item := newQueuedNudgeWithOptions("worker", "for sibling session", "session", now, queuedNudgeOptions{
+		ID:                "n-sibling",
+		SessionID:         "gc-2",
+		ContinuationEpoch: "1",
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		return map[string]struct{}{"gc-1": {}, "gc-2": {}}
+	}
+
+	target := nudgeTarget{
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-1",
+		continuationEpoch: "1",
+	}
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed = %#v, want live sibling fence left pending", claimed)
+	}
+
+	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "n-sibling" {
+		t.Fatalf("pending = %#v, want n-sibling", pending)
+	}
+}
+
+func TestSessionHoldsNudgeFence(t *testing.T) {
+	tests := []struct {
+		name string
+		info session.Info
+		want bool
+	}{
+		{name: "active holds fence", info: session.Info{ID: "gc-1", State: session.StateActive}, want: true},
+		{name: "asleep holds fence", info: session.Info{ID: "gc-1", State: session.StateAsleep}, want: true},
+		{name: "draining holds fence", info: session.Info{ID: "gc-1", State: session.StateDraining}, want: true},
+		{name: "drained is superseded", info: session.Info{ID: "gc-1", State: session.StateDrained}, want: false},
+		{name: "archived is superseded", info: session.Info{ID: "gc-1", State: session.StateArchived}, want: false},
+		{name: "failed-create is superseded", info: session.Info{ID: "gc-1", State: session.StateFailedCreate}, want: false},
+		{name: "closed is superseded", info: session.Info{ID: "gc-1", State: session.StateActive, Closed: true}, want: false},
+		{name: "empty id does not hold fence", info: session.Info{State: session.StateActive}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionHoldsNudgeFence(tt.info); got != tt.want {
+				t.Fatalf("sessionHoldsNudgeFence(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSplitQueuedNudgesForTarget_ReFencesStaleSessionIDToLiveTarget pins the
 // same-seat-new-incarnation re-fence: an item pinned to the seat's prior
 // session bead (e.g. after a failed-spawn respawn re-materialized the named

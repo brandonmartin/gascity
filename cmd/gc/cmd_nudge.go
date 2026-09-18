@@ -1687,13 +1687,14 @@ func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
 // and rejects. Items whose fence (SessionID / ContinuationEpoch) does not match
 // the current target's fence are re-fenced in memory to the target's fence and
 // returned as deliverable when the target itself is resolved to a live session
-// bead — the caller already validated that this seat owns the item at claim
-// time (matchesQueueAgent), so a stale fence just marks the item as queued for
-// a prior incarnation of the same seat. Delivering it there is what the seat's
-// nudges were queued for; dead-lettering the whole queue every time a session
-// respawns (fresh wake after a failed spawn bumps ContinuationEpoch; a re-
-// materialization can mint a new SessionID) is the bug this coalesces around
-// (ga-bow, thunderfartcity:gp-u63s).
+// bead. Claim already admitted the item: either the SessionID still matches
+// (stale-epoch Leg A) or the fenced session is no longer a live occupant
+// (session-replacement Leg B; see queuedNudgeClaimableForTarget). A stale
+// fence then just marks a prior incarnation of the same seat. Delivering it
+// there is what the seat's nudges were queued for; dead-lettering the whole
+// queue every time a session respawns (fresh wake after a failed spawn bumps
+// ContinuationEpoch; a re-materialization can mint a new SessionID) is the
+// bug this coalesces around (ga-bow, thunderfartcity:gp-u63s, #5816).
 //
 // A target with no resolved session identity (sessionID == "") cannot be
 // re-fenced against and still rejects, matching the pre-existing invariant
@@ -1919,7 +1920,72 @@ func queuedNudgeMatchesTargetFence(target nudgeTarget, item queuedNudge) bool {
 	return true
 }
 
-func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
+// liveNudgeFenceSessionIDs is a test seam for the session-liveness census
+// used by queuedNudgeClaimableForTarget. When non-nil, claim uses this
+// instead of listing session beads. Tests that replace it must not use
+// t.Parallel.
+var liveNudgeFenceSessionIDs func(cityPath string) map[string]struct{}
+
+func liveNudgeFenceSessionIDsForCity(cityPath string) map[string]struct{} {
+	if liveNudgeFenceSessionIDs != nil {
+		return liveNudgeFenceSessionIDs(cityPath)
+	}
+	return loadLiveNudgeFenceSessionIDsFromCity(cityPath)
+}
+
+// loadLiveNudgeFenceSessionIDsFromCity returns session IDs that still occupy
+// a seat and therefore still own their fenced nudges. A nil result means the
+// census was unavailable; callers must fail closed and leave mismatched
+// SessionID items pending.
+func loadLiveNudgeFenceSessionIDsFromCity(cityPath string) map[string]struct{} {
+	store := openNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+	if store.Store == nil {
+		return nil
+	}
+	open, err := loadOpenSessionInfos(cliSessionStore(store.Store, nil, cityPath))
+	if err != nil {
+		return nil
+	}
+	live := make(map[string]struct{})
+	for _, info := range open {
+		if sessionHoldsNudgeFence(info) {
+			live[info.ID] = struct{}{}
+		}
+	}
+	return live
+}
+
+// sessionHoldsNudgeFence reports whether a session still occupies its seat
+// for nudge-fence purposes. Drained, archived, failed-create, and closed
+// sessions are superseded: their queued nudges may rebind to a successor.
+// Asleep, draining, and quarantined sessions still own their fence so a
+// concurrent sibling (or an in-flight drain) is not stolen.
+func sessionHoldsNudgeFence(info session.Info) bool {
+	if info.Closed || strings.TrimSpace(info.ID) == "" {
+		return false
+	}
+	switch info.State {
+	case session.StateDrained, session.StateArchived, session.StateFailedCreate:
+		return false
+	default:
+		return true
+	}
+}
+
+// queuedNudgeClaimableForTarget reports whether this target may claim item.
+// liveSessions is a lazy census of session IDs that still hold a nudge fence;
+// it is invoked only on the session-replacement path so the idle/exact-match
+// claim tick does not list session beads.
+//
+// The two fence predicates agree this way:
+//   - matching fence (same SessionID, including stale epoch) → claimable (Leg A)
+//   - mismatched SessionID whose fenced session is no longer live, and whose
+//     successor target is in the census → claimable (Leg B);
+//     splitQueuedNudgesForTarget re-fences onto the successor
+//   - mismatched SessionID that is still live → not claimable (sibling fence)
+//   - census unavailable, empty, or missing the target → fail closed
+func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge, liveSessions func() map[string]struct{}) bool {
 	if !target.matchesQueueAgent(item.Agent) {
 		return false
 	}
@@ -1927,7 +1993,25 @@ func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
 		if target.sessionID == "" {
 			return false
 		}
-		return item.SessionID == target.sessionID
+		if item.SessionID == target.sessionID {
+			return true
+		}
+		if liveSessions == nil {
+			return false
+		}
+		live := liveSessions()
+		if live == nil {
+			return false
+		}
+		if _, targetLive := live[target.sessionID]; !targetLive {
+			// Census did not observe this target (empty city, store
+			// unavailable, or the successor bead is not listed). Fail
+			// closed rather than treating "no live sessions" as a
+			// license to steal sibling fences.
+			return false
+		}
+		_, stillLive := live[item.SessionID]
+		return !stillLive
 	}
 	if item.ContinuationEpoch != "" && target.continuationEpoch == "" {
 		return false
@@ -1998,8 +2082,18 @@ func nudgeQueueHasWork(state *nudgeQueueState) bool {
 }
 
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+	var (
+		liveOnce sync.Once
+		liveIDs  map[string]struct{}
+	)
+	liveSessions := func() map[string]struct{} {
+		liveOnce.Do(func() {
+			liveIDs = liveNudgeFenceSessionIDsForCity(cityPath)
+		})
+		return liveIDs
+	}
 	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
-		return queuedNudgeClaimableForTarget(target, item)
+		return queuedNudgeClaimableForTarget(target, item, liveSessions)
 	})
 }
 

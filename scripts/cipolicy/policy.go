@@ -51,7 +51,7 @@ const (
 	//
 	// reviewed delta: cmd-gc-productmetrics-testhook timeout-minutes 5 -> 12
 	// (#6396: canceled at the 5-minute budget with no failing test).
-	expectedCIExecutionHash      = "2031411e7a08368893efa4e5bbcaf11dac7f8a53d6653f1d633a54873b2e386c"
+	expectedCIExecutionHash      = "e1ce0c687c18f42a0d5b0f8d32383154a2823db6c912dc1bce2d6c5c58f1fd37"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"

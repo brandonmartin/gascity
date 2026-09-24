@@ -364,6 +364,11 @@ func requireMaintenanceStatuses(t *testing.T, got map[string]string, want map[st
 // extmsg protocol records (group roots, participants, bindings, memberships,
 // transcript state and entries) must survive the stale sweep while an ordinary
 // stale task is still closed, and the query itself must not fail (#6380).
+//
+// A hyphenated rig database (my-rig) pins that the correlated label probe
+// binds to each database's own labels table: decoy labels in the other
+// database must not change which rows are stale candidates, and the query
+// must not fail for rig databases either.
 func TestReaperStaleIssueCloseSkipsDurableExtmsgRecordsRealDolt(t *testing.T) {
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
@@ -389,23 +394,45 @@ func TestReaperStaleIssueCloseSkipsDurableExtmsgRecordsRealDolt(t *testing.T) {
 	for id, label := range durableLabels {
 		fmt.Fprintf(&seed, ",\n  ('%s', '%s')", id, label)
 	}
-	seed.WriteString(";\n")
+	// Decoy: a durable label for the rig's ordinary row lives only in citydb.
+	seed.WriteString(",\n  ('rig-ord', 'gc:extmsg-group');\n")
+
+	// my-rig: rig-ext and rig-ext2 are durable via my-rig's own labels; rig-ord
+	// is ordinary there. The decoy label for the city's ord-stale lives only in
+	// my-rig. The asymmetric counts (1 ordinary vs 2 durable) make a probe
+	// against the wrong database's labels table visible in the candidate count.
+	rigSeed := `
+INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
+  ('rig-ord', 'ordinary stale rig task', 'open', 'task', 2, '2020-01-01 00:00:00', '2020-01-01 00:00:00', '', '{}'),
+  ('rig-ext', 'durable extmsg rig record', 'open', 'task', 2, '2020-01-01 00:00:00', '2020-01-01 00:00:00', '', '{}'),
+  ('rig-ext2', 'durable extmsg rig record', 'open', 'task', 2, '2020-01-01 00:00:00', '2020-01-01 00:00:00', '', '{}');
+INSERT INTO labels (issue_id, label) VALUES
+  ('rig-ext', 'gc:extmsg-group'),
+  ('rig-ext2', 'gc:extmsg-binding'),
+  ('ord-stale', 'gc:extmsg-group');
+`
 
 	cityDir := t.TempDir()
 	dataDir := filepath.Join(t.TempDir(), "dolt")
-	dbDir := filepath.Join(dataDir, "citydb")
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%s): %v", dbDir, err)
+	for db, dbSeed := range map[string]string{"citydb": seed.String(), "my-rig": rigSeed} {
+		dbDir := filepath.Join(dataDir, db)
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", dbDir, err)
+		}
+		runDoltForMaintenanceTest(t, doltPath, dbDir, "init", "--name", "Gas City", "--email", "test@example.com")
+		runDoltSQLForMaintenanceTest(t, doltPath, dbDir, maintenanceReaperSchemaSQL())
+		runDoltSQLForMaintenanceTest(t, doltPath, dbDir, dbSeed)
+		runDoltForMaintenanceTest(t, doltPath, dbDir, "add", ".")
+		runDoltForMaintenanceTest(t, doltPath, dbDir, "commit", "-m", "seed stale extmsg records")
 	}
-	runDoltForMaintenanceTest(t, doltPath, dbDir, "init", "--name", "Gas City", "--email", "test@example.com")
-	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, maintenanceReaperSchemaSQL())
-	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, seed.String())
-	runDoltForMaintenanceTest(t, doltPath, dbDir, "add", ".")
-	runDoltForMaintenanceTest(t, doltPath, dbDir, "commit", "-m", "seed stale extmsg records")
 
 	port := startDoltServerForMaintenanceTest(t, doltPath, dataDir)
 	waitForDoltServerForMaintenanceTest(t, doltPath, port, "citydb")
+	waitForDoltServerForMaintenanceTest(t, doltPath, port, "my-rig")
 	writeCityBeadsMetadata(t, cityDir, "citydb")
+	rigDir := filepath.Join(cityDir, "rigs", "my-rig")
+	writeCityBeadsMetadata(t, rigDir, "my-rig")
+	writeSiteRigBinding(t, cityDir, "my-rig", rigDir)
 
 	binDir := t.TempDir()
 	logDir := t.TempDir()
@@ -455,7 +482,10 @@ exit 0
 		"GC_DOLT_PASSWORD":   "",
 		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
-	runScript(t, coreScriptPath("reaper.sh"), env)
+	reaperOut, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
+	if err != nil {
+		t.Fatalf("reaper.sh failed: %v\n%s", err, reaperOut)
+	}
 
 	escalateData, err := os.ReadFile(escalateLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -463,6 +493,13 @@ exit 0
 	}
 	if strings.Contains(string(escalateData), "stale issue query failed") {
 		t.Fatalf("reaper stale issue query failed on real Dolt:\n%s", escalateData)
+	}
+	// Rig rows are never closed by the city reaper; they are counted as skipped
+	// candidates. Exactly one (rig-ord) must be a candidate: rig-ext/rig-ext2
+	// are durable via my-rig's labels, and the citydb decoy must not hide
+	// rig-ord. Probing citydb's labels instead would count 2; no filter, 3.
+	if !strings.Contains(string(reaperOut), "skipped_non_city_issues:1,") {
+		t.Fatalf("reaper did not report exactly one my-rig stale candidate:\n%s\nescalations:\n%s", reaperOut, escalateData)
 	}
 
 	bdData, err := os.ReadFile(bdLog)
@@ -483,4 +520,9 @@ exit 0
 		want[id] = "open"
 	}
 	requireMaintenanceStatuses(t, queryMaintenanceStatusByID(t, doltPath, port, "citydb", "issues"), want)
+	requireMaintenanceStatuses(t, queryMaintenanceStatusByID(t, doltPath, port, "my-rig", "issues"), map[string]string{
+		"rig-ord":  "open",
+		"rig-ext":  "open",
+		"rig-ext2": "open",
+	})
 }

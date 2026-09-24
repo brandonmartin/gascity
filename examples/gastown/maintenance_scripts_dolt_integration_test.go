@@ -358,3 +358,129 @@ func requireMaintenanceStatuses(t *testing.T, got map[string]string, want map[st
 		}
 	}
 }
+
+// TestReaperStaleIssueCloseSkipsDurableExtmsgRecordsRealDolt runs the real
+// reaper.sh Step 5 stale-issue query against a real Dolt sql-server. Durable
+// extmsg protocol records (group roots, participants, bindings, memberships,
+// transcript state and entries) must survive the stale sweep while an ordinary
+// stale task is still closed, and the query itself must not fail (#6380).
+func TestReaperStaleIssueCloseSkipsDurableExtmsgRecordsRealDolt(t *testing.T) {
+	doltPath, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skipf("dolt not found: %v", err)
+	}
+
+	durableLabels := map[string]string{
+		"ext-group":            "gc:extmsg-group",
+		"ext-participant":      "gc:extmsg-participant",
+		"ext-binding":          "gc:extmsg-binding",
+		"ext-membership":       "gc:extmsg-membership",
+		"ext-transcript-state": "gc:extmsg-transcript-state",
+		"ext-transcript":       "gc:extmsg-transcript",
+	}
+
+	var seed strings.Builder
+	seed.WriteString("INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES\n")
+	seed.WriteString("  ('ord-stale', 'ordinary stale task', 'open', 'task', 2, '2020-01-01 00:00:00', '2020-01-01 00:00:00', '', '{}')")
+	for id := range durableLabels {
+		fmt.Fprintf(&seed, ",\n  ('%s', 'durable extmsg record', 'open', 'task', 2, '2020-01-01 00:00:00', '2020-01-01 00:00:00', '', '{}')", id)
+	}
+	seed.WriteString(";\nINSERT INTO labels (issue_id, label) VALUES\n  ('ord-stale', 'unrelated-label')")
+	for id, label := range durableLabels {
+		fmt.Fprintf(&seed, ",\n  ('%s', '%s')", id, label)
+	}
+	seed.WriteString(";\n")
+
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "dolt")
+	dbDir := filepath.Join(dataDir, "citydb")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", dbDir, err)
+	}
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "init", "--name", "Gas City", "--email", "test@example.com")
+	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, maintenanceReaperSchemaSQL())
+	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, seed.String())
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "add", ".")
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "commit", "-m", "seed stale extmsg records")
+
+	port := startDoltServerForMaintenanceTest(t, doltPath, dataDir)
+	waitForDoltServerForMaintenanceTest(t, doltPath, port, "citydb")
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+
+	binDir := t.TempDir()
+	logDir := t.TempDir()
+	bdLog := filepath.Join(logDir, "bd.log")
+	escalateLog := filepath.Join(logDir, "escalate.log")
+	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
+		t.Fatalf("Symlink(dolt): %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+set -e
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+case "$1" in
+  prune)
+    printf '{"pruned_count":0}\n'
+    ;;
+  close)
+    issue_id="$2"
+    DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$GC_DOLT_HOST" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls --use-db citydb sql \
+      -q "UPDATE issues SET status='closed', closed_at=NOW() WHERE id='${issue_id}'; CALL DOLT_COMMIT('-Am', 'test bd close')"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+case "$1 $2" in
+  "session prune")
+    printf '{"count":0}\n'
+    ;;
+esac
+exit 0
+`)
+	escalateScript := filepath.Join(binDir, "escalate.sh")
+	writeExecutable(t, escalateScript, `#!/bin/sh
+printf '%s\n' "$*" >> "$ESCALATE_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":        bdLog,
+		"ESCALATE_CALL_LOG":  escalateLog,
+		"GC_ESCALATE_SCRIPT": escalateScript,
+		"GC_CITY":            cityDir,
+		"GC_CITY_PATH":       cityDir,
+		"GC_DOLT_HOST":       "127.0.0.1",
+		"GC_DOLT_PORT":       fmt.Sprintf("%d", port),
+		"GC_DOLT_USER":       "root",
+		"GC_DOLT_PASSWORD":   "",
+		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	runScript(t, coreScriptPath("reaper.sh"), env)
+
+	escalateData, err := os.ReadFile(escalateLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(escalate log): %v", err)
+	}
+	if strings.Contains(string(escalateData), "stale issue query failed") {
+		t.Fatalf("reaper stale issue query failed on real Dolt:\n%s", escalateData)
+	}
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v\nescalations:\n%s", err, escalateData)
+	}
+	if !strings.Contains(string(bdData), "close ord-stale --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not close the ordinary stale issue:\nbd calls:\n%s\nescalations:\n%s", bdData, escalateData)
+	}
+	for id := range durableLabels {
+		if strings.Contains(string(bdData), "close "+id+" ") {
+			t.Fatalf("reaper closed durable extmsg record %s:\n%s", id, bdData)
+		}
+	}
+
+	want := map[string]string{"ord-stale": "closed"}
+	for id := range durableLabels {
+		want[id] = "open"
+	}
+	requireMaintenanceStatuses(t, queryMaintenanceStatusByID(t, doltPath, port, "citydb", "issues"), want)
+}

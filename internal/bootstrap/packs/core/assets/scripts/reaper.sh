@@ -1134,7 +1134,7 @@ while IFS= read -r DB; do
         )
         AND NOT EXISTS (
             SELECT 1 FROM \`$DB\`.labels lbl
-            WHERE lbl.issue_id = i.id
+            WHERE lbl.issue_id = \`$DB\`.issues.id
             AND lbl.label IN (
                 'gc:extmsg-group',
                 'gc:extmsg-participant',

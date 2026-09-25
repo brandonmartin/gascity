@@ -130,7 +130,7 @@ func (sc *sessionConn) signalTurn(idleCh <-chan struct{}) bool {
 	default:
 	}
 	// A failure means the group is already gone; the wait observes that.
-	_ = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+	_ = runtime.SignalProcessGroup(sc.cmd, sc.pgid, syscall.SIGINT)
 	return true
 }
 

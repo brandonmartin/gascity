@@ -43,6 +43,7 @@ go_test(
         "extmsg_test.go",
         "helpers_test.go",
         "http_adapter_test.go",
+        "inbound_asleep_test.go",
         "outbound_test.go",
         "publishable_test.go",
         "rebind_test.go",

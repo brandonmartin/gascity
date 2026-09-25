@@ -188,28 +188,27 @@ func drainOrderDispatch(t *testing.T, m *memoryOrderDispatcher) {
 }
 
 // barrierCheckScript returns a condition-check shell script for the
-// concurrent-overlap fixtures below. Every check registers itself in liveDir
-// (a mktemp'd file, removed on exit via trap) and then holds that
-// registration for the full ~1s window (50 * 20ms polls), regardless of when
-// it personally observes a sibling: a seen flag latches on any poll that
-// finds >= 2 registrations, and only that flag — checked once the window is
-// over — decides exit 0 vs exit 1. It always exits normally so the trap
-// unregisters. Holding to the end of the window (rather than exiting the
-// instant a sibling is seen) makes overlap detection independent of which
-// pair happens to notice each other first, so a straggler that starts late
-// but still within the window is guaranteed to be seen by, and see, whoever
-// is still holding. A nonzero startDelay simulates a check whose own
-// subprocess spawn was delayed — host contention, a straggler — before it
-// ever gets to register.
+// straggler-overlap fixture. Every check registers itself in liveDir (a
+// mktemp'd file) and polls, bounded, until it sees a sibling. On success it
+// exits immediately and leaves the registration in place; the trap removes
+// the file only when the poll window expires without overlap. A nonzero
+// startDelay simulates a check whose own subprocess was delayed — host
+// contention, a straggler — before it ever gets to register.
+//
+// Success markers must survive the exiting check. Holding the process open
+// for every remaining poll after overlap was already visible made the script
+// outlive check_timeout under load: the check was killed after it had seen a
+// sibling but before it reached exit 0, so the whole wave reported zero
+// fires (ga-4gw). Leaving the file lets a late sibling observe the cohort
+// after the earlier checks have already exited.
 func barrierCheckScript(liveDir, ranMarker string, startDelay time.Duration) string {
 	var delay string
 	if startDelay > 0 {
 		delay = fmt.Sprintf("sleep %.3f; ", startDelay.Seconds())
 	}
 	return fmt.Sprintf(
-		`%[3]smkdir -p %[1]s; echo . >> %[2]s; f=$(mktemp %[1]s/w.XXXXXX); trap 'rm -f "$f"' EXIT; `+
-			`seen=0; i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge 2 ]; then seen=1; fi; sleep 0.02; i=$((i+1)); done; `+
-			`if [ "$seen" -eq 1 ]; then exit 0; else exit 1; fi`,
+		`%[3]smkdir -p %[1]s; echo . >> %[2]s; f=$(mktemp %[1]s/w.XXXXXX); ok=0; trap '[ "$ok" = 1 ] || rm -f "$f"' EXIT; `+
+			`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge 2 ]; then ok=1; exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
 		liveDir, ranMarker, delay)
 }
 
@@ -309,20 +308,17 @@ func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 // flaked 3-of-4 instead of 4-of-4. The cause is not a Go-level dispatch bug —
 // order_dispatch.go's goroutine fan-out and triggers.go's subprocess
 // execution both fire all four checks concurrently, unconditionally — it is
-// that the OLD check script unregisters itself the instant it personally
-// sees a sibling, so the real overlap tolerance was bounded by however fast
-// the fastest pair happened to notice each other, not by the ~1s poll
-// budget. Under host contention a straggler's subprocess spawn can be
-// delayed past that effective window, so by the time it registers, its
-// siblings have already succeeded and vanished.
+// that a check which removed its registration on the way out could vanish
+// before a straggler, whose own subprocess start was delayed, ever looked.
 //
 // This reproduces that shape on demand, without depending on real,
 // non-deterministic host contention: three checks start immediately and one
-// starts after an artificial delay comfortably inside the ~1s window. A
-// check that holds its registration for the full window — rather than
-// exiting the instant it personally detects a sibling — must still be seen
-// by a late-starting sibling, so all four fire regardless of which pair
-// notices which first.
+// starts after an artificial delay comfortably inside the ~1s poll budget.
+// Each check exits as soon as it sees a sibling and leaves its registration
+// behind, so the late start still observes the cohort and all four fire.
+// The poll budget is an upper bound, not a hold: sleeping out the rest of
+// the window after overlap was already visible blew check_timeout under
+// load and killed checks that would have exited 0 (ga-4gw).
 func TestConditionCheckOverlapSurvivesAStragglerStart(t *testing.T) {
 	const wave = 4
 	prev := orderConditionCheckConcurrency

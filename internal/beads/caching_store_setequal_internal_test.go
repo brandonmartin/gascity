@@ -42,6 +42,16 @@ func TestBeadChangedIgnoresSetOrder(t *testing.T) {
 	if !beadChanged(base, labelAdded, false) {
 		t.Error("beadChanged = false when a label was added; want true")
 	}
+
+	// maps.Equal treats a missing key as unequal, so a metadata deletion is a
+	// change even when every surviving key is unchanged (ga-cd1).
+	withMeta := base
+	withMeta.Metadata = map[string]string{"work_dir": "/tmp/wt", "branch": "polecat/x"}
+	keyDeleted := base
+	keyDeleted.Metadata = map[string]string{"branch": "polecat/x"}
+	if !beadChanged(withMeta, keyDeleted, false) {
+		t.Error("beadChanged = false when a metadata key was deleted; want true")
+	}
 	depChanged := base
 	depChanged.Dependencies = []Dep{
 		{IssueID: "x", DependsOnID: "d1", Type: "blocks"},

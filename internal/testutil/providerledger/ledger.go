@@ -91,10 +91,6 @@ const (
 	RuntimeBuiltinCatalog = "runtime.builtin"
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
-	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
-	// It is pinned by TestRuntimeWaiverOwnerIsPinnedAndWellFormed: changing it
-	// re-owns every runtime waiver at once, so it needs to be a deliberate edit.
-	runtimeContractWaiverOwner = "ga-80po0c.3"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -209,10 +205,14 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"acp", "exact:acp", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				time.Date(2026, time.October, 8, 0, 0, 0, 0, time.UTC),
-				"NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition",
+				"internal/runtime/acp/conformance_test.go",
+				"TestACPDefaultDirConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/acp", "acpConformanceCommand"),
+				SymbolRef{ImportPath: "os", Name: "Getpid"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -241,7 +241,7 @@ func Catalog() []Entry {
 				repoSymbol("internal/runtime/k8s", "NewSeamBackedWithOps"),
 				"internal/runtime/k8s/seam_conformance_test.go",
 				"TestK8sSeamBackedWithOpsConformance",
-				"proved via injectable k8sOps seam against the fake ops double; unproved residue: the real k8sOps adapter (kubeconfig + client-go wiring in NewRealAdapter) that NewSeamBacked composes over NewSeamBackedWithOps in production",
+				"proved via injectable k8sOps seam against the fake ops double; unproved residue: the real k8sOps adapter (kubeconfig + client-go wiring in NewRealAdapter) that cmd/gc's runtime registry composes with NewSeamBackedWithOps in production",
 				repoSymbol("internal/runtime/k8s", "newSeamConformanceOps"),
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
 				SymbolRef{ImportPath: "os", Name: "Getpid"},
@@ -261,10 +261,14 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"hybrid", "exact:hybrid", nil,
-			waivedRuntime(
-				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+			provedRuntimeScoped(
+				repoSymbol("internal/runtime/hybrid", "New"),
+				"internal/runtime/hybrid/conformance_test.go",
+				"TestHybridConformance",
+				"default-route conformance; remote route covered by focused hybrid routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
@@ -291,10 +295,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"tmux", "exact:tmux", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				time.Date(2026, time.September, 17, 0, 0, 0, 0, time.UTC),
-				"the existing full conformance run skips when the tmux executable is absent",
+				"internal/runtime/tmux/seam_backed_conformance_test.go",
+				"TestTmuxSeamConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/tmux", "tmuxConformanceConfig"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		{
@@ -364,6 +371,18 @@ func provedRuntime(constructor SymbolRef, file, test string, allowedCalls ...Sym
 	}
 }
 
+// provedRuntimeScoped builds a proved claim whose scope states what the proof
+// does not cover.
+//
+// It carries the seam-as-port policy (mayor decision on ga-p20, 2026-09-05):
+// a production constructor whose real backend cannot exist in the proof
+// environment counts as proved when (1) its seam-parameterized sibling passes
+// the full shared conformance suite against the in-repo double with zero
+// skips, (2) production composes that sibling over the real adapter with no
+// additional logic, and (3) the scope names the unproved residue as
+// "unproved residue: <real adapter>". An env-gated skip never counts as a
+// proof, and a constructor that cannot be reduced to such a thin composition
+// takes a written, dated waiver instead of a stretched proof.
 func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowedCalls ...SymbolRef) ContractClaim {
 	claim := provedRuntime(constructor, file, test, allowedCalls...)
 	claim.Proof.Scope = scope
@@ -378,30 +397,6 @@ func provedRuntimeDurableThread(constructor SymbolRef, file, test string, allowe
 	claim := provedRuntime(constructor, file, test, allowedCalls...)
 	claim.Proof.Runner = runtimeProviderDurableThreadRunner
 	return claim
-}
-
-// waivedRuntime builds a claim that defers proof of the runtime.Provider
-// contract to a dated waiver. Each call site supplies its own expires
-// literal rather than a shared expiry: a single shared expiry previously
-// caused every remaining waiver to lapse in lockstep and turn the whole
-// ledger check red at once (GitHub #5195), which was "fixed" by pushing
-// the one shared date forward instead of dating each gap independently.
-//
-// Prefer a short horizon (weeks, not the 90-day maxWaiverHorizon the
-// validator allows): a long horizon hides a stalled contract behind a
-// green run, while a short one puts the question back in front of the
-// owner while the context is still fresh.
-func waivedRuntime(constructor SymbolRef, expires time.Time, reason string) ContractClaim {
-	return ContractClaim{
-		Constructor: constructor,
-		Contract:    ContractRuntimeProvider,
-		Disposition: DispositionWaived,
-		Waiver: &Waiver{
-			Owner:   runtimeContractWaiverOwner,
-			Expires: expires,
-			Reason:  reason,
-		},
-	}
 }
 
 func notApplicableRuntime(constructor SymbolRef, reason string) ContractClaim {

@@ -223,6 +223,34 @@ session_bead_candidates() {
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
 }
 
+# sanitized_assignee_is_unconfigured_qualified reports whether a tmux-safe
+# session_name decodes to a pack-qualified template (rig/pack.role) that the
+# resolved agent list does not contain. is_known_agent already ran the same
+# decode; reaching the session-bead probe means that check missed. Ambiguous
+# double-dash names that do not decode to rig/pack.role (rig--polecat,
+# beads--deployer-pool) stay out of this predicate so a failed gc bd show of
+# them remains unverifiable (ga-7p4aab).
+sanitized_assignee_is_unconfigured_qualified() {
+    local name="$1"
+    local unsanitized="${name//--//}"
+    unsanitized="${unsanitized//__/.}"
+    [ "$unsanitized" != "$name" ] || return 1
+    [[ "$unsanitized" == */* ]] || return 1
+    [[ "$unsanitized" == *.* ]] || return 1
+    # A decoded form that IS configured is not proof of death. Fail closed
+    # back to the unverifiable probe even if is_known_agent missed it.
+    if agent_exists "$unsanitized"; then return 1; fi
+    local u_base="${unsanitized%-[0-9]*}"
+    if [ "$u_base" != "$unsanitized" ] && agent_exists "$u_base"; then return 1; fi
+    local u_short="${unsanitized##*.}"
+    if [ "$u_short" != "$unsanitized" ]; then
+        if agent_exists "$u_short"; then return 1; fi
+        local u_short_base="${u_short%-[0-9]*}"
+        if [ "$u_short_base" != "$u_short" ] && agent_exists "$u_short_base"; then return 1; fi
+    fi
+    return 0
+}
+
 session_probe_failure_is_unverifiable() {
     local session_id="$1"
     local assignee="$2"
@@ -233,7 +261,17 @@ session_probe_failure_is_unverifiable() {
     # nothing else resolvable to ask about -- bead ids never contain a
     # double dash, so this shape means the probe could not be performed,
     # not that the candidate resolved and came back dead.
-    [[ "$session_id" == *--* ]] && return 0
+    # Exception: a pack-qualified sanitized name (slash→--, dot→__) whose
+    # decoded template is absent from the agent list is verifiably not a
+    # configured seat. gc bd show of that name always fails because it is not
+    # a bead id, and treating every such failure as unverifiable permanently
+    # skipped dead sanitized pool slots (ga-1fx / rig-sanitized-crew-pool-slot).
+    if [[ "$session_id" == *--* ]]; then
+        if sanitized_assignee_is_unconfigured_qualified "$session_id"; then
+            return 1
+        fi
+        return 0
+    fi
     return 1
 }
 

@@ -5,9 +5,9 @@ import "testing"
 // TestNudgeSubmitKeySequenceForFamilyDefaultsToEnter pins the declarative
 // table's fallback: a family with no explicit entry in
 // nudgeSubmitKeySequences gets the single-Enter default, matching every
-// provider's historical behavior before this table existed. codex is
-// deliberately absent from this list — it is the one family with a declared
-// entry (Escape then Enter, upstream #4706); see codex_submit_test.go.
+// provider's historical behavior before this table existed. codex's explicit
+// entry is also a single Enter (Escape would interrupt a running turn); see
+// codex_submit_test.go.
 func TestNudgeSubmitKeySequenceForFamilyDefaultsToEnter(t *testing.T) {
 	for _, family := range []string{"claude", "gemini", "", "some-unregistered-family"} {
 		got := nudgeSubmitKeySequenceForFamily(family)

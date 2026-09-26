@@ -341,6 +341,54 @@ func TestProviderObserveLivenessKeepsZombieShellVisible(t *testing.T) {
 	t.Fatalf("ObserveLiveness() = %#v, want running zombie shell with dead process", obs)
 }
 
+func TestObserveLivenessCodexStuckComposerIsNotAlive(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	p := NewProviderWithConfig(cfg)
+	name := fmt.Sprintf("gc-test-codex-stuck-%d", time.Now().UnixNano()%10000)
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	// Detached codex pane parked on a drafted composer and not working.
+	command := `sh -c 'printf "│ › Run gc prime to check worker status\n"; exec sleep 60'`
+	if err := p.tm.NewSessionWithCommandAndEnv(name, t.TempDir(), command, map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	obs := runtime.ObserveLiveness(p, name, nil)
+	if !obs.Running {
+		t.Fatalf("Running = false, want the pane still up: %+v", obs)
+	}
+	if obs.Alive {
+		pane, _ := p.tm.CapturePane(name, 20)
+		t.Fatalf("Alive = true, want false for a drafted composer with no activity:\n%s", pane)
+	}
+
+	// A working turn is activity: the same draft plus the busy footer stays alive.
+	busyName := name + "b"
+	_ = p.Stop(busyName)
+	defer func() { _ = p.Stop(busyName) }()
+	busyCommand := `sh -c 'printf "│ › Run gc prime to check worker status\nesc to interrupt\n"; exec sleep 60'`
+	if err := p.tm.NewSessionWithCommandAndEnv(busyName, t.TempDir(), busyCommand, map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv busy: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	busy := runtime.ObserveLiveness(p, busyName, nil)
+	if !busy.Running || !busy.Alive {
+		pane, _ := p.tm.CapturePane(busyName, 20)
+		t.Fatalf("ObserveLiveness = %+v, want running and alive while the turn is working:\n%s", busy, pane)
+	}
+}
+
 func TestProvider_StartCanceledCleansUpSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

@@ -1535,7 +1535,7 @@ func runPreparedStartCandidate(
 		phases.PostStartObserve = time.Since(postStartBegin)
 	}
 	finished := time.Now()
-	pane, peekErr := startupHookReviewPane(item, cityPath, sp, store, cfg, err)
+	pane, peekErr := startupHookReviewPane(item, sp, cfg, err)
 	var hookReviewBlocked bool
 	if peekErr == nil {
 		hookReviewBlocked, err = blockStartupHealthyOnHookReview(item.candidate.name(), err, pane)
@@ -1620,15 +1620,8 @@ func restartPromptNudge(prompt, nudge string) string {
 
 // startupHookReviewPane reads the pane when a start could still be reported
 // healthy. A peek failure leaves the caller on the process-liveness result.
-func startupHookReviewPane(
-	item preparedStart,
-	cityPath string,
-	sp runtime.Provider,
-	store beads.Store,
-	cfg *config.City,
-	err error,
-) (string, error) {
-	if cfg != nil && cfg.Session.Provider == "subprocess" {
+func startupHookReviewPane(item preparedStart, sp runtime.Provider, cfg *config.City, err error) (string, error) {
+	if sp == nil || (cfg != nil && cfg.Session.Provider == "subprocess") {
 		return "", nil
 	}
 	if strings.TrimSpace(item.candidate.name()) == "" {
@@ -1637,15 +1630,7 @@ func startupHookReviewPane(
 	if err != nil && !errors.Is(err, runtime.ErrSessionExists) && !shouldRollbackPendingCreateInfo(item.candidate.info) {
 		return "", nil
 	}
-	return workerSessionTargetPeekWithConfig(
-		cityPath,
-		store,
-		sp,
-		cfg,
-		item.candidate.name(),
-		rateLimitPeekLines,
-		item.cfg.ProcessNames,
-	)
+	return sp.Peek(item.candidate.name(), rateLimitPeekLines)
 }
 
 // blockStartupHealthyOnHookReview turns a live start that is still sitting on

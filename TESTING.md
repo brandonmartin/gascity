@@ -1449,14 +1449,23 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
 | `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | proved by internal/runtime/herdr/conformance_test.go#TestHerdrConformance |
 | `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `internal/runtime/hybrid.New` | runtime.builtin/exact:hybrid | `runtime.Provider` | proved by internal/runtime/hybrid/conformance_test.go#TestHybridConformance (default-route conformance; remote route covered by focused hybrid routing tests) |
-| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBackedWithOps` | runtime.builtin/exact:k8s | `runtime.Provider` | proved by internal/runtime/k8s/seam_conformance_test.go#TestK8sSeamBackedWithOpsConformance (proved via injectable k8sOps seam against the fake ops double; unproved residue: the real k8sOps adapter (kubeconfig + client-go wiring in NewRealAdapter) that NewSeamBacked composes over NewSeamBackedWithOps in production) |
+| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBackedWithOps` | runtime.builtin/exact:k8s | `runtime.Provider` | proved by internal/runtime/k8s/seam_conformance_test.go#TestK8sSeamBackedWithOpsConformance (proved via injectable k8sOps seam against the fake ops double; unproved residue: the real k8sOps adapter (kubeconfig + client-go wiring in NewRealAdapter) that cmd/gc's runtime registry composes with NewSeamBackedWithOps in production) |
 | `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | proved by internal/runtime/ssh/conformance_test.go#TestSSHConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
 | `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | proved by internal/runtime/t3bridge/conformance_test.go#TestT3BridgeConformance |
-| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-09-17: the existing full conformance run skips when the tmux executable is absent |
+| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | proved by internal/runtime/tmux/seam_backed_conformance_test.go#TestTmuxSeamConformance |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
+
+The runtime.Provider rows carry no waivers: `ga-p20` retired the last of them,
+and `TestCatalogHasNoRuntimeWaivers` ratchets the ledger there. A constructor
+whose real backend cannot exist in the proof environment is proved at its seam
+(the seam-as-port policy, `ga-p20`): the seam-parameterized sibling passes the
+full shared suite against the in-repo double with zero skips, production
+composes that sibling over the real adapter with no additional logic, and the
+row's scope names the unproved residue. The `k8s` row is proved this way. An
+env-gated skip never counts as a proof.
 
 Rows reading `waived by <bead> through <date>` are governed by "Waiver expiry
 clocks" above: the date is enforced through `internal/testpolicy/waiverclock`,

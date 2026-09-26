@@ -673,9 +673,20 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 	}
 }
 
+// t3BridgeTestServer is the package's single loopback fake of the T3
+// orchestration WebSocket API. Every t3bridge test that needs a bridge
+// endpoint goes through this one httptest.NewServer call: the resource census
+// (internal/testpolicy/resourcecensus) ratchets untagged http_test_server
+// call sites, so a second constructor in this package grows checked debt.
+//
+// Without an rpc hook it answers statically: getSnapshot returns the fixed
+// snapshot and dispatchCommand records the command type. With an rpc hook
+// (newT3BridgeRPCTestServer) every request is answered by the hook instead,
+// which is how the stateful conformance fake reflects commands into state.
 type t3BridgeTestServer struct {
 	t                 *testing.T
 	server            *httptest.Server
+	rpc               func(tag string, payload json.RawMessage) map[string]interface{}
 	mu                sync.Mutex
 	commands          []string
 	snapshot          map[string]interface{}
@@ -689,7 +700,19 @@ type t3BridgeTestServer struct {
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
 	t.Helper()
-	ts := &t3BridgeTestServer{t: t, snapshot: snapshot}
+	return startT3BridgeTestServer(t, &t3BridgeTestServer{t: t, snapshot: snapshot})
+}
+
+// newT3BridgeRPCTestServer returns a bridge fake whose WebSocket requests are
+// all answered by rpc; the auth-token endpoint and request accounting behave
+// exactly as in the static server.
+func newT3BridgeRPCTestServer(t *testing.T, rpc func(tag string, payload json.RawMessage) map[string]interface{}) *t3BridgeTestServer {
+	t.Helper()
+	return startT3BridgeTestServer(t, &t3BridgeTestServer{t: t, rpc: rpc})
+}
+
+func startT3BridgeTestServer(t *testing.T, ts *t3BridgeTestServer) *t3BridgeTestServer {
+	t.Helper()
 	upgrader := websocket.Upgrader{}
 	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" {
@@ -738,10 +761,12 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 		}
 
 		value := map[string]interface{}{}
-		switch req.Tag {
-		case "orchestration.getSnapshot":
+		switch {
+		case ts.rpc != nil:
+			value = ts.rpc(req.Tag, req.Payload)
+		case req.Tag == "orchestration.getSnapshot":
 			value = ts.snapshot
-		case "orchestration.dispatchCommand":
+		case req.Tag == "orchestration.dispatchCommand":
 			var payload map[string]interface{}
 			if err := json.Unmarshal(req.Payload, &payload); err != nil {
 				t.Errorf("decode dispatch payload: %v", err)

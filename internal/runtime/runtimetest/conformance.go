@@ -36,6 +36,30 @@ type Options struct {
 	// SkipStartError classifies Start errors that should skip the current
 	// subtest instead of failing the provider conformance suite.
 	SkipStartError func(error) (reason string, ok bool)
+
+	// IdempotentStart marks providers whose Start is idempotent by design:
+	// a duplicate-name Start reuses, rebinds, or recreates the existing
+	// session and returns nil, so [Start_DuplicateReturnsError] cannot hold.
+	// When true, that subtest is skipped honestly with a documented reason;
+	// every other lifecycle contract is still enforced. Use this only when
+	// the reuse behavior is a documented production feature (e.g. the
+	// t3bridge Reuse/Rebind/Recreate decision), not to paper over a missing
+	// duplicate-detect check.
+	IdempotentStart bool
+
+	// DurableStoppedSessions marks providers backed by a durable session
+	// store where Stop pauses a session rather than deleting it, so the
+	// stopped session remains a listable object until it is separately
+	// archived. Stop still makes the session not-running (IsRunning and
+	// ProcessAlive report false), but [ListRunning_ExcludesStopped] cannot
+	// hold because the durable record is still enumerable. When true, that
+	// one discovery subtest is skipped honestly with a documented reason;
+	// every other discovery contract (find, prefix-filter, empty-prefix,
+	// concurrent) is still enforced. Use this only when the durable-record
+	// behavior is a documented production feature (e.g. a t3bridge thread
+	// that survives session-stop and is adopted/reused on the next Start),
+	// not to paper over a Stop that fails to deregister a live session.
+	DurableStoppedSessions bool
 }
 
 // RunProviderTests runs the full conformance suite against a Provider.
@@ -58,6 +82,34 @@ func RunProviderTestsWithOptions(t *testing.T, newSession Factory, opts Options)
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start shared session")
 		RunSessionTests(t, sp, cfg, name)
+	})
+}
+
+// RunDurableThreadProviderTests runs the full runtime.Provider conformance
+// suite for providers backed by a durable, reuse-oriented session store — the
+// t3bridge shape, where a session is a T3 thread that survives Stop and is
+// reused on the next Start. It composes [RunProviderTestsWithOptions] with the
+// two documented options that class of provider requires:
+//
+//   - IdempotentStart: a duplicate-name Start reuses/rebinds/recreates the
+//     existing thread and returns nil, so [Start_DuplicateReturnsError] is
+//     skipped (see [Options.IdempotentStart]).
+//   - DurableStoppedSessions: a stopped thread stays a listable record until it
+//     is archived, so [ListRunning_ExcludesStopped] is skipped (see
+//     [Options.DurableStoppedSessions]).
+//
+// Every other lifecycle, discovery, metadata, observation, and signaling
+// contract is enforced against the real provider. It is a named 2-argument
+// runner so a provider-ledger proof can bind it directly, exactly like
+// [RunProviderTests]: the two skips are visible and reviewable here in the
+// runner's source rather than hidden behind an inline options literal at each
+// call site.
+func RunDurableThreadProviderTests(t *testing.T, newSession Factory) {
+	t.Helper()
+
+	RunProviderTestsWithOptions(t, newSession, Options{
+		IdempotentStart:        true,
+		DurableStoppedSessions: true,
 	})
 }
 
@@ -87,6 +139,9 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	})
 
 	t.Run("Start_DuplicateReturnsError", func(t *testing.T) {
+		if opts.IdempotentStart {
+			t.Skip("provider Start is idempotent by design: duplicate-name Start reuses/rebinds/recreates the existing session and returns nil")
+		}
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "first Start")
 
@@ -287,6 +342,9 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	})
 
 	t.Run("ListRunning_ExcludesStopped", func(t *testing.T) {
+		if opts.DurableStoppedSessions {
+			t.Skip("provider has durable stopped sessions by design: a stopped session remains a listable record until it is separately archived")
+		}
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
 		if err := sp.Stop(name); err != nil {

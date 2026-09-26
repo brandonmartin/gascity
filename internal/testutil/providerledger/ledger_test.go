@@ -121,7 +121,7 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 					Runner: SymbolRef{ImportPath: "example.test/contract", Name: "Run"},
 				},
 			},
-			want: "proof runner is example.test/contract.Run, want internal/runtime/runtimetest.RunProviderTests",
+			want: "proof runner is example.test/contract.Run, want one of internal/runtime/runtimetest.RunDurableThreadProviderTests, internal/runtime/runtimetest.RunProviderTests",
 		},
 		{
 			name: "not applicable also has waiver",
@@ -658,6 +658,43 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	}
 	if sawT3 {
 		t.Error("runtime.builtin.exec still binds internal/runtime/t3bridge.NewSeamBacked; the legacy gc-session-t3 exec alias has been retired")
+	}
+}
+
+func TestCatalogBindsT3BridgeToDurableThreadConformance(t *testing.T) {
+	// runtime.builtin.t3bridge selects t3bridge.NewSeamBacked, a durable-thread
+	// provider: the proof binds the sanctioned durable-thread runner and the
+	// claim may not fall back to a waiver.
+	var exactProof *ProofRef
+	for _, entry := range Catalog() {
+		if entry.ID != "runtime.builtin.t3bridge" {
+			continue
+		}
+		for _, claim := range entry.Claims {
+			if claim.Constructor != repoSymbol("internal/runtime/t3bridge", "NewSeamBacked") {
+				continue
+			}
+			if claim.Disposition != DispositionProved {
+				t.Errorf("t3bridge disposition = %q, want %q", claim.Disposition, DispositionProved)
+			}
+			if claim.Waiver != nil {
+				t.Errorf("t3bridge still carries a waiver: %+v", claim.Waiver)
+			}
+			exactProof = claim.Proof
+		}
+	}
+
+	if exactProof == nil {
+		t.Fatal("t3bridge.NewSeamBacked proof is missing")
+	}
+	if exactProof.File != "internal/runtime/t3bridge/conformance_test.go" || exactProof.Test != "TestT3BridgeConformance" {
+		t.Errorf("t3bridge proof = %s#%s, want t3bridge conformance entrypoint", exactProof.File, exactProof.Test)
+	}
+	if exactProof.Runner != runtimeProviderDurableThreadRunner {
+		t.Errorf("t3bridge runner = %s, want %s", renderSymbolRef(exactProof.Runner), renderSymbolRef(runtimeProviderDurableThreadRunner))
+	}
+	if got, want := renderSymbolRefs(exactProof.AllowedCalls), "fmt.Sprintf, internal/runtime/t3bridge.t3ConformanceConfig, sync/atomic.AddInt64"; got != want {
+		t.Errorf("t3bridge allowed calls = %q, want %q", got, want)
 	}
 }
 

@@ -2075,6 +2075,14 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 			envelope.Startup.InitialNudge = cfg.Nudge
 		}
 	}
+	// A pre-built envelope (the GC_STARTUP_ENVELOPE path above) may omit the
+	// session name; the env-built path already sets it. Default it to the
+	// runtime session name so every downstream lookup — which resolves threads
+	// by gc.sessionName — can find this session. Production always fills it, so
+	// this only fires for envelopes that leave it blank.
+	if strings.TrimSpace(envelope.GC.SessionName) == "" {
+		envelope.GC.SessionName = name
+	}
 	if envelope.Runtime.Branch != "" {
 		hasWorktree = true
 		cwd = envelope.GC.RigPath

@@ -674,14 +674,24 @@ func writeCodexHooksManaged(fs fsys.FS, cityDir, dst string, data []byte) error 
 	}
 	if existing, err := fs.ReadFile(dst); err == nil {
 		upgraded, changed, upgradeErr := upgradeCodexHooks(existing, data, cityDir)
-		if upgradeErr != nil || !changed {
+		if upgradeErr != nil {
 			return nil
 		}
-		return writeManagedData(fs, dst, upgraded)
+		final := existing
+		if changed {
+			if err := writeManagedData(fs, dst, upgraded); err != nil {
+				return err
+			}
+			final = upgraded
+		}
+		return pretrustInstalledCodexHooks(dst, final)
 	} else if _, statErr := fs.Stat(dst); statErr == nil {
 		return nil
 	}
-	return writeManagedData(fs, dst, data)
+	if err := writeManagedData(fs, dst, data); err != nil {
+		return err
+	}
+	return pretrustInstalledCodexHooks(dst, data)
 }
 
 func writeManagedData(fs fsys.FS, dst string, data []byte) error {

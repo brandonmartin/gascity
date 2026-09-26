@@ -1535,9 +1535,14 @@ func runPreparedStartCandidate(
 		phases.PostStartObserve = time.Since(postStartBegin)
 	}
 	finished := time.Now()
+	pane, peekErr := startupHookReviewPane(item, cityPath, sp, store, cfg, err)
+	var hookReviewBlocked bool
+	if peekErr == nil {
+		hookReviewBlocked, err = blockStartupHealthyOnHookReview(item.candidate.name(), err, pane)
+	}
 	rollbackPending := err != nil && shouldRollbackPendingCreateInfo(item.candidate.info)
 	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
-	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+	if err != nil && rollbackPending && !rateLimitScreen && !hookReviewBlocked && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
 			prepared:        item,
 			err:             nil,
@@ -1570,7 +1575,7 @@ func runPreparedStartCandidate(
 		switch {
 		case runningErr != nil || !runtimeObservationLive(obs):
 			outcome = TraceOutcomeProviderError
-		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
+		case rollbackPending && !rateLimitScreen && !hookReviewBlocked && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
 			outcome = TraceOutcomeSessionExistsConverged
 			err = nil
 			rollbackPending = false
@@ -1611,6 +1616,49 @@ func restartPromptNudge(prompt, nudge string) string {
 		return nudge
 	}
 	return prependStartupPromptToNudge(prompt, nudge)
+}
+
+// startupHookReviewPane reads the pane when a start could still be reported
+// healthy. A peek failure leaves the caller on the process-liveness result.
+func startupHookReviewPane(
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+	err error,
+) (string, error) {
+	if cfg != nil && cfg.Session.Provider == "subprocess" {
+		return "", nil
+	}
+	if strings.TrimSpace(item.candidate.name()) == "" {
+		return "", nil
+	}
+	if err != nil && !errors.Is(err, runtime.ErrSessionExists) && !shouldRollbackPendingCreateInfo(item.candidate.info) {
+		return "", nil
+	}
+	return workerSessionTargetPeekWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		item.candidate.name(),
+		rateLimitPeekLines,
+		item.cfg.ProcessNames,
+	)
+}
+
+// blockStartupHealthyOnHookReview turns a live start that is still sitting on
+// Codex's hook-review dialog into a failure. Process liveness alone would
+// otherwise converge that session to success.
+func blockStartupHealthyOnHookReview(name string, err error, pane string) (bool, error) {
+	if !runtime.ContainsCodexHookReviewDialog(pane) {
+		return false, err
+	}
+	if err == nil || errors.Is(err, runtime.ErrSessionExists) {
+		return true, fmt.Errorf("session %q blocked on Codex hook review: %w", name, runtime.ErrCodexHookReviewBlocked)
+	}
+	return true, err
 }
 
 func startupRateLimitScreenDetected(

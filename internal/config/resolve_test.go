@@ -2426,6 +2426,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		TitleModel:             "haiku",
 		ACPCommand:             "custom-acp",
 		ACPArgs:                []string{"acp-mode"},
+		ModelDiscovery:         &ModelDiscovery{Args: []string{"models"}, Format: "id-lines"},
 	}
 
 	// Verify every field on city is non-zero (catches new fields not added to test data).

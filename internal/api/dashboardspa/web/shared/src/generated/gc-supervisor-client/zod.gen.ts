@@ -9509,6 +9509,10 @@ export const zGetV0CityByCityNameProvidersPublicPath = z.object({
     cityName: z.string().min(1).regex(/\S/)
 });
 
+export const zGetV0CityByCityNameProvidersPublicQuery = z.object({
+    fresh: z.boolean().optional()
+});
+
 /**
  * OK
  */

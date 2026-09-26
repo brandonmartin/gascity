@@ -189,6 +189,11 @@ type ProviderSpec struct {
 	// ACPArgs overrides Args when the session transport is ACP.
 	// When nil, Args is used for both tmux and ACP transports.
 	ACPArgs []string `toml:"acp_args,omitempty"`
+	// ModelDiscovery declares the CLI verb that lists the model ids this
+	// provider accepts, turning the curated "model" choices into a fallback
+	// seed. Nil inherits the base provider's declaration; built-ins without a
+	// listing verb leave it nil. See ModelDiscovery.
+	ModelDiscovery *ModelDiscovery `toml:"model_discovery,omitempty"`
 }
 
 // Reserved prefixes for the Base field.
@@ -255,6 +260,9 @@ type ResolvedProvider struct {
 	TitleModel             string
 	ACPCommand             string
 	ACPArgs                []string
+	// ModelDiscovery is the listing-verb declaration the model option's
+	// discovered choices came from (nil = curated only).
+	ModelDiscovery *ModelDiscovery
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
@@ -507,10 +515,11 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 			APIKey:    spec.UpstreamAPIKeyEnv,
 			AuthToken: spec.UpstreamAuthTokenEnv,
 		},
-		PrintArgs:  cloneStrings(spec.PrintArgs),
-		TitleModel: spec.TitleModel,
-		ACPCommand: spec.ACPCommand,
-		ACPArgs:    cloneStrings(spec.ACPArgs),
+		PrintArgs:      cloneStrings(spec.PrintArgs),
+		TitleModel:     spec.TitleModel,
+		ACPCommand:     spec.ACPCommand,
+		ACPArgs:        cloneStrings(spec.ACPArgs),
+		ModelDiscovery: modelDiscoveryFromWorker(spec.ModelDiscovery),
 	}
 }
 

@@ -1,5 +1,10 @@
 package builtin
 
+import (
+	"bufio"
+	"strings"
+)
+
 // cursorModel is one entry of the cursor-agent model catalog: the id accepted
 // by `cursor-agent --model <id>` and the display name cursor-agent prints for
 // it in `--list-models`.
@@ -45,4 +50,22 @@ func cursorModelOption() BuiltinProviderOption {
 		// claude-opus-4-8[context=1m,effort=high], so any id must reach the CLI.
 		FlagTemplate: []string{"--model", optionValuePlaceholder},
 	}
+}
+
+// parseCursorModelList parses `cursor-agent --list-models` output, whose body
+// lines are "<id> - <label>". Header, tip, and malformed lines are skipped.
+// This is the same line grammar scripts/gen-cursor-models.sh uses to refresh
+// the snapshot, and the parser runtime discovery uses to read the live binary
+// (ModelListFormatCursor).
+func parseCursorModelList(out string) []cursorModel {
+	var models []cursorModel
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		id, label, ok := strings.Cut(strings.TrimSpace(scanner.Text()), " - ")
+		if !ok || id == "" || label == "" || strings.ContainsAny(id, " \t") {
+			continue
+		}
+		models = append(models, cursorModel{ID: id, Label: label})
+	}
+	return models
 }

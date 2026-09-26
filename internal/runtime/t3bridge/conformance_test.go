@@ -3,11 +3,8 @@ package t3bridge
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,7 +12,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
-	"github.com/gorilla/websocket"
 )
 
 // TestMain points HOME/T3_HOME and the bridge state dir at throwaway
@@ -47,15 +43,19 @@ func TestMain(m *testing.M) {
 
 // statefulT3Server is an in-process fake of the T3 orchestration WebSocket API
 // that REFLECTS dispatched commands into snapshot state, unlike the static
-// test server in provider_test.go. thread.create adds a running thread,
-// thread.meta.update merges its metadata, thread.session.stop pauses it (the
-// session stops running but the thread stays listable), and thread.archive
-// removes it. That state machine is what lets the real t3bridge provider's
-// IsRunning / ListRunning / ProcessAlive / Stop contracts execute against
-// realistic bridge behavior in the shared runtime conformance suite.
+// answers of the shared test server in provider_test.go. thread.create adds a
+// running thread, thread.meta.update merges its metadata, thread.session.stop
+// pauses it (the session stops running but the thread stays listable), and
+// thread.archive removes it. That state machine is what lets the real t3bridge
+// provider's IsRunning / ListRunning / ProcessAlive / Stop contracts execute
+// against realistic bridge behavior in the shared runtime conformance suite.
+//
+// It is served through the package's single loopback server
+// (newT3BridgeRPCTestServer) rather than opening its own, so the untagged
+// http_test_server census stays at its checked baseline.
 type statefulT3Server struct {
 	t        *testing.T
-	server   *httptest.Server
+	server   *t3BridgeTestServer
 	mu       sync.Mutex
 	projects map[string]map[string]interface{}
 	threads  map[string]map[string]interface{}
@@ -68,47 +68,13 @@ func newStatefulT3Server(t *testing.T) *statefulT3Server {
 		projects: make(map[string]map[string]interface{}),
 		threads:  make(map[string]map[string]interface{}),
 	}
-	upgrader := websocket.Upgrader{}
-	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		for {
-			var req struct {
-				ID      string          `json:"id"`
-				Tag     string          `json:"tag"`
-				Payload json.RawMessage `json:"payload"`
-			}
-			// A read error here is the provider closing the connection after it
-			// received its response (one request per connection); treat it as a
-			// normal end of the exchange, not a test failure.
-			if err := conn.ReadJSON(&req); err != nil {
-				return
-			}
-			value := s.handle(req.Tag, req.Payload)
-			resp := map[string]interface{}{
-				"_tag":      "Exit",
-				"requestId": req.ID,
-				"exit": map[string]interface{}{
-					"_tag":  "Success",
-					"value": value,
-				},
-			}
-			if err := conn.WriteJSON(resp); err != nil {
-				return
-			}
-		}
-	}))
+	s.server = newT3BridgeRPCTestServer(t, s.handle)
 	return s
 }
 
 func (s *statefulT3Server) Close() { s.server.Close() }
 
-func (s *statefulT3Server) wsURL() string {
-	return "ws" + strings.TrimPrefix(s.server.URL, "http")
-}
+func (s *statefulT3Server) wsURL() string { return s.server.wsURL() }
 
 // handle applies one RPC and returns its result value.
 func (s *statefulT3Server) handle(tag string, payload json.RawMessage) map[string]interface{} {

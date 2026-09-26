@@ -31,14 +31,19 @@ const (
 	codexSessionEndMaxTimeout     = 3
 )
 
-// codexUserConfigPath is where Codex persists hook trust. Tests leave it
-// empty unless GC_CODEX_HOOK_TRUST_CONFIG points at a fixture, so hook
-// installs under go test never rewrite a developer's real config.toml.
+// codexHookTrustConfigOverride, when non-empty, is the config.toml that
+// receives hook trust instead of Codex's real one. Tests point it at a
+// fixture; production leaves it empty.
+var codexHookTrustConfigOverride string
+
+// codexUserConfigPath is where Codex persists hook trust. Under go test it
+// is empty unless codexHookTrustConfigOverride names a fixture, so hook
+// installs in tests never rewrite a developer's real config.toml.
 func codexUserConfigPath() string {
-	if override := strings.TrimSpace(os.Getenv("GC_CODEX_HOOK_TRUST_CONFIG")); override != "" {
-		return override
+	if codexHookTrustConfigOverride != "" {
+		return codexHookTrustConfigOverride
 	}
-	if testing.Testing() || os.Getenv("GC_CODEX_HOOK_TRUST") == "off" {
+	if testing.Testing() {
 		return ""
 	}
 	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))

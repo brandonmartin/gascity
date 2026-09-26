@@ -111,7 +111,8 @@ func TestInstallCodexPretrustsManagedHooks(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte("model = \"gpt\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GC_CODEX_HOOK_TRUST_CONFIG", cfg)
+	codexHookTrustConfigOverride = cfg
+	t.Cleanup(func() { codexHookTrustConfigOverride = "" })
 	work := t.TempDir()
 	if err := Install(fsys.OSFS{}, "/city", work, []string{"codex"}); err != nil {
 		t.Fatal(err)

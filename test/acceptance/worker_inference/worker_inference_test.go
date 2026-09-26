@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	workerpkg "github.com/gastownhall/gascity/internal/worker"
@@ -6088,6 +6089,12 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 		return &liveBlockedInteraction{
 			Kind:     "workspace_trust",
 			Detail:   "worker is blocked on a workspace trust dialog",
+			PaneTail: paneTail,
+		}
+	case runtime.ContainsCodexHookReviewDialog(paneTail):
+		return &liveBlockedInteraction{
+			Kind:     "hook_review",
+			Detail:   "worker is blocked on the Codex hook review dialog",
 			PaneTail: paneTail,
 		}
 	case strings.Contains(haystack, "bypass permissions mode"):

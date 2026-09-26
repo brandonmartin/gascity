@@ -370,6 +370,21 @@ func TestAcceptStartupDialogsTrustsCompactCodexHookReviewDialog(t *testing.T) {
 	}
 }
 
+func TestContainsCodexHookReviewDialogForeground(t *testing.T) {
+	foreground := "Hooks need review\n" +
+		"  5 hooks are new or changed.\n" +
+		"  2. Trust all\n" +
+		"  3. Continue without trusting\n" +
+		"  Press enter to confirm or esc to go back\n"
+	if !ContainsCodexHookReviewDialog(foreground) {
+		t.Fatal("foreground hook review dialog was not detected")
+	}
+	scrolled := foreground + "\n❯ ready for work\n"
+	if ContainsCodexHookReviewDialog(scrolled) {
+		t.Fatal("dismissed hook review dialog in scrollback counted as foreground")
+	}
+}
+
 func TestContainsCodexHookReviewDialogRequiresAllCompactSignals(t *testing.T) {
 	for name, content := range map[string]string{
 		"missing title":  "Press t to trust all; enter to review hooks; esc to skip",

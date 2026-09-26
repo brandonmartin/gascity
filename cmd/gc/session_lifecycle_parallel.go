@@ -1909,13 +1909,21 @@ func runPreparedStartCandidate(
 	}
 	finished := time.Now()
 	livenessUnavailable := errors.Is(err, runtime.ErrRuntimeUnavailable)
+	var hookReviewBlocked bool
+	if !livenessUnavailable {
+		pane, peekErr := startupHookReviewPane(item, sp, cfg, err)
+		if peekErr == nil {
+			hookReviewBlocked, err = blockStartupHealthyOnHookReview(item.candidate.name(), err, pane)
+		}
+	}
 	capacityRefused := !livenessUnavailable && runtime.IsProviderCapacity(err)
 	rollbackPending := err != nil && !livenessUnavailable && shouldRollbackPendingCreateInfo(item.candidate.info)
 	// The two probes that classify a failed start, the rate-limit screen peek
 	// and the pending-create identity reads, share one startFailureProbeBudget.
 	// A peek that does not answer reads as no screen. An identity read that does
 	// not answer is unverifiable, so the attribution is unknown and the start
-	// defers without a rollback.
+	// defers without a rollback. A Codex hook-review dialog is already a
+	// failure, so it does not take those probes and cannot converge.
 	probeCtx, cancelProbes := ctx, func() {}
 	if err != nil {
 		probeCtx, cancelProbes = context.WithTimeout(ctx, startFailureProbeBudget)
@@ -1923,14 +1931,14 @@ func runPreparedStartCandidate(
 	defer cancelProbes()
 	// A capacity refusal never peeks for a rate-limit screen: the launcher
 	// exited before the provider drew one, and the peek is a provider call.
-	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && startupRateLimitScreenDetected(probeCtx, item, cityPath, sp, store, cfg)
+	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && !hookReviewBlocked && startupRateLimitScreenDetected(probeCtx, item, cityPath, sp, store, cfg)
 	attribution := pendingCreateRuntimeForeign
 	var identity pendingCreateIdentity
-	if err != nil && rollbackPending && !rateLimitScreen {
+	if err != nil && rollbackPending && !rateLimitScreen && !hookReviewBlocked {
 		identity = readPendingCreateIdentityBounded(probeCtx, cityPath, item.candidate.info, item.candidate.name(), sp)
 		attribution = identity.attribution()
 	}
-	if attribution == pendingCreateRuntimeOurs {
+	if attribution == pendingCreateRuntimeOurs && !hookReviewBlocked {
 		return startResult{
 			prepared:            item,
 			err:                 nil,
@@ -2025,6 +2033,37 @@ func restartPromptNudge(prompt, nudge string) string {
 		return nudge
 	}
 	return prependStartupPromptToNudge(prompt, nudge)
+}
+
+// startupHookReviewPane reads the pane when a start could still be reported
+// healthy. A peek failure leaves the caller on the process-liveness result.
+// The peek goes to the provider directly: the worker handle's peek calls
+// IsRunning again and would consume the liveness result the start path
+// already used.
+func startupHookReviewPane(item preparedStart, sp runtime.Provider, cfg *config.City, err error) (string, error) {
+	if sp == nil || (cfg != nil && cfg.Session.Provider == "subprocess") {
+		return "", nil
+	}
+	if strings.TrimSpace(item.candidate.name()) == "" {
+		return "", nil
+	}
+	if err != nil && !errors.Is(err, runtime.ErrSessionExists) && !shouldRollbackPendingCreateInfo(item.candidate.info) {
+		return "", nil
+	}
+	return sp.Peek(item.candidate.name(), rateLimitPeekLines)
+}
+
+// blockStartupHealthyOnHookReview turns a live start that is still sitting on
+// Codex's hook-review dialog into a failure. Process liveness alone would
+// otherwise converge that session to success.
+func blockStartupHealthyOnHookReview(name string, err error, pane string) (bool, error) {
+	if !runtime.ContainsCodexHookReviewDialog(pane) {
+		return false, err
+	}
+	if err == nil || errors.Is(err, runtime.ErrSessionExists) {
+		return true, fmt.Errorf("session %q blocked on Codex hook review: %w", name, runtime.ErrCodexHookReviewBlocked)
+	}
+	return true, err
 }
 
 // startupRateLimitScreenDetected reports whether the session's pane shows a

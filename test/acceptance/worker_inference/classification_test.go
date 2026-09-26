@@ -117,6 +117,28 @@ func TestClassifyLivePaneBlockedIgnoresBypassPermissionsStatusLine(t *testing.T)
 	require.Nil(t, blocked)
 }
 
+func TestClassifyLivePaneBlockedCodexHookReview(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+Hooks need review
+  5 hooks are new or changed.
+  2. Trust all
+  3. Continue without trusting
+  Press enter to confirm or esc to go back
+`)
+	require.NotNil(t, blocked)
+	require.Equal(t, "hook_review", blocked.Kind)
+}
+
+func TestClassifyLivePaneBlockedIgnoresDismissedCodexHookReview(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+Hooks need review
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+❯ ready
+`)
+	require.Nil(t, blocked)
+}
+
 func TestClassifyLivePaneBlockedThemePicker(t *testing.T) {
 	blocked := classifyLivePaneBlocked(`
 Let's get started.

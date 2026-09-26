@@ -45,12 +45,10 @@ func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {
 // submit keystrokes stripped.
 //
 // This proof is about delivery of the configured nudge, not about how the
-// carrier submits it. Since upstream #4706 a codex pane's submit sequence is
-// Escape then Enter (nudgeSubmitKeySequences), so the ESC byte lands on the
-// provider's stdin right behind the text and a whitespace-only trim leaves
-// "nudge-codex\x1b" — a keystroke, not content. Strip the ASCII control bytes
-// the submit sequence can contribute; a nudge body never legitimately carries a
-// bare ESC.
+// carrier submits it. Strip the ASCII control bytes a submit sequence can
+// contribute (CR, and a leftover ESC from an older codex sequence); a nudge
+// body never legitimately carries a bare ESC. Codex delivery itself no longer
+// sends Escape — that key interrupts a running turn (ga-biss).
 func phase2ObservedNudgeText(observed string) string {
 	return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(observed), "\x1b\r\n"))
 }

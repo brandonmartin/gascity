@@ -1,10 +1,12 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // nudgeKeystrokesForFamily composes the keys a nudge actually puts into a pane,
@@ -20,22 +22,28 @@ func nudgeKeystrokesForFamily(family string) []string {
 	return append(keys, nudgeSubmitKeySequenceForFamily(family)...)
 }
 
-// TestCodexNudgeSubmitsWithExactlyOneEscapeThenEnter is the #4706 fix and its
-// own guard rail. codex buffers a send-keys burst as a paste, so a lone trailing
-// Enter is swallowed as a composer newline and the agent's first turn never
-// starts. Escape-then-Enter submits it — but a SECOND Escape would be
-// backtrack/edit-previous, so the count matters as much as the keys.
-func TestCodexNudgeSubmitsWithExactlyOneEscapeThenEnter(t *testing.T) {
+// TestCodexNudgeNeverSendsEscape pins ga-biss: a nudge must not interrupt a
+// running codex turn. Escape is "cancel the current turn" ("Conversation
+// interrupted"), so the delivery keystrokes are a single Enter — the TUI's
+// queued-follow-up submit. A second Escape would also be backtrack. The
+// swallowed-paste newline from #4706 is handled by retrying Enter once when
+// the composer still holds a draft, not by putting Escape in this sequence.
+func TestCodexNudgeNeverSendsEscape(t *testing.T) {
 	got := nudgeKeystrokesForFamily("codex")
-	want := []string{"Escape", "Enter"}
+	want := []string{"Enter"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("codex nudge keystrokes = %v, want %v", got, want)
 	}
 	if got := nudgeSubmitKeySequenceForFamily("codex"); !reflect.DeepEqual(got, want) {
-		t.Fatalf("codex submit sequence = %v, want %v declared as one retryable unit", got, want)
+		t.Fatalf("codex submit sequence = %v, want %v", got, want)
+	}
+	for _, key := range got {
+		if key == "Escape" {
+			t.Fatalf("codex nudge keystrokes include Escape: %v", got)
+		}
 	}
 	if !providerEnvSkipsEscape("codex") {
-		t.Fatal("codex left providersSkippingEscapeBeforeEnter; combined with its submit entry that sends Escape twice, which codex binds to backtrack rather than submit")
+		t.Fatal("codex left providersSkippingEscapeBeforeEnter; the pre-submit Escape would interrupt a running turn")
 	}
 }
 
@@ -105,6 +113,128 @@ func TestNudgeSessionComposesEscapeThenSubmitSequence(t *testing.T) {
 		t.Fatal("NudgeSession no longer consults nudgeSubmitKeySequence; nudgeKeystrokesForFamily models a step that is gone")
 	case submitAt < escapeAt:
 		t.Fatal("NudgeSession now resolves the submit sequence BEFORE the pre-submit Escape decision; re-derive nudgeKeystrokesForFamily against the new order")
+	}
+}
+
+func TestCodexComposerDraftIsTheBottomGlyphLine(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"empty composer", []string{"│ ›"}, false},
+		{"empty composer with space", []string{"│ › "}, false},
+		{"drafted nudge", []string{"│ › Run 'gc prime' to check worker status"}, true},
+		{"ascii prompt draft", []string{"> Run gc prime"}, true},
+		{
+			"scrollback user line above an empty composer",
+			[]string{"› earlier submitted turn", "│ ›"},
+			false,
+		},
+		{"no composer line", []string{"hello from cat"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexComposerHasDraft(tc.lines); got != tc.want {
+				t.Fatalf("codexComposerHasDraft() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexComposerLivenessFailureRequiresDraftAndNoActivity(t *testing.T) {
+	draft := []string{"│ › Run 'gc prime' to check worker status"}
+	if !codexComposerLivenessFailure(draft) {
+		t.Fatal("draft with no busy indicator must be a liveness failure")
+	}
+	busy := append(append([]string{}, draft...), "◦ Working (2m 48s • esc to interrupt)")
+	if codexComposerLivenessFailure(busy) {
+		t.Fatal("a working turn is activity, even with text still in the composer")
+	}
+	if codexComposerLivenessFailure([]string{"│ ›"}) {
+		t.Fatal("an empty composer is idle, not a liveness failure")
+	}
+}
+
+func TestConfirmCodexFollowUpAcceptsQueuedFollowUpWithoutSecondEnter(t *testing.T) {
+	var enters int
+	// Already-busy pane whose composer clears on the first Enter: the nudge
+	// queued behind the running turn. A second Enter would be a second message.
+	err := confirmCodexFollowUp(
+		func() error { enters++; return nil },
+		func() (bool, bool, error) { return false, true, nil },
+		func(time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if enters != 1 {
+		t.Fatalf("enters = %d, want 1", enters)
+	}
+}
+
+func TestConfirmCodexFollowUpRetriesEnterOnceWhenDraftRemains(t *testing.T) {
+	var enters int
+	err := confirmCodexFollowUp(
+		func() error { enters++; return nil },
+		func() (bool, bool, error) { return enters < 2, false, nil },
+		func(time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if enters != 2 {
+		t.Fatalf("enters = %d, want 2 (initial Enter plus one retry)", enters)
+	}
+}
+
+func TestConfirmCodexFollowUpLivenessWhenDraftHasNoActivity(t *testing.T) {
+	var enters int
+	err := confirmCodexFollowUp(
+		func() error { enters++; return nil },
+		func() (bool, bool, error) { return true, false, nil },
+		func(time.Duration) {},
+	)
+	if !errors.Is(err, ErrCodexComposerLiveness) {
+		t.Fatalf("err = %v, want ErrCodexComposerLiveness", err)
+	}
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatal("liveness failure must wrap ErrNudgeSubmitUnconfirmed so the queue retries")
+	}
+	if enters != 1+codexFollowUpEnterRetries {
+		t.Fatalf("enters = %d, want %d", enters, 1+codexFollowUpEnterRetries)
+	}
+}
+
+func TestConfirmCodexFollowUpUnconfirmedWhenBusyDraftRemains(t *testing.T) {
+	err := confirmCodexFollowUp(
+		func() error { return nil },
+		func() (bool, bool, error) { return true, true, nil },
+		func(time.Duration) {},
+	)
+	if errors.Is(err, ErrCodexComposerLiveness) {
+		t.Fatal("a busy pane is activity; a remaining draft is an unconfirmed submit, not the no-activity liveness failure")
+	}
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+}
+
+// TestNudgeSessionConfirmsCodexByComposer pins the call order. The busy-indicator
+// confirm false-succeeds when the turn was already running, which is exactly
+// when a follow-up must queue instead of looking delivered.
+func TestNudgeSessionConfirmsCodexByComposer(t *testing.T) {
+	body := nudgeSessionSource(t)
+	codexAt := strings.Index(body, "t.isCodexTarget(target)")
+	confirmAt := strings.Index(body, "confirmCodexFollowUp(")
+	busyAt := strings.Index(body, "t.submitVerifyEligible(target)")
+	switch {
+	case codexAt < 0 || confirmAt < 0:
+		t.Fatal("NudgeSession no longer confirms codex through confirmCodexFollowUp")
+	case busyAt < 0:
+		t.Fatal("NudgeSession no longer consults submitVerifyEligible")
+	case codexAt > busyAt || confirmAt > busyAt:
+		t.Fatal("codex follow-up confirm must run before the busy-indicator confirm")
 	}
 }
 

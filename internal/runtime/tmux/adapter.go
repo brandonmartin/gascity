@@ -438,17 +438,38 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	if len(processNames) == 0 {
 		processNames = p.sessionProcessNames(name)
 	}
-	if len(processNames) == 0 {
-		return runtime.Liveness{Running: running, Alive: running}
+	obs := runtime.Liveness{Running: running, Alive: running}
+	if len(processNames) > 0 {
+		alive := p.cache.ProcessAlive(name, processNames)
+		if alive && !running {
+			running = true
+		}
+		obs = runtime.Liveness{Running: running, Alive: alive}
 	}
-	alive := p.cache.ProcessAlive(name, processNames)
-	if alive && !running {
-		running = true
+	// A detached codex pane with a drafted composer and no working indicator
+	// is not a live agent: the process is up, but the turn was never
+	// submitted (ga-biss). An attached client may be a person mid-typing, so
+	// that pane stays alive. Capture failure leaves the process verdict.
+	// This applies even when no process-name hints are configured — that
+	// path otherwise reports Alive==Running and would hide the stall.
+	if obs.Alive && p.codexDetachedComposerStuck(name) {
+		obs.Alive = false
 	}
-	return runtime.Liveness{
-		Running: running,
-		Alive:   alive,
+	return obs
+}
+
+// codexDetachedComposerStuck reports whether name is a detached codex pane
+// whose composer holds a draft and which is not working. A nil tmux handle
+// (tests that stub only the state cache) and capture errors are not stuck.
+func (p *Provider) codexDetachedComposerStuck(name string) bool {
+	if p.tm == nil || p.tm.IsSessionAttached(name) || !p.tm.isCodexTarget(name) {
+		return false
 	}
+	lines, err := p.tm.CapturePaneLines(name, promptObservationLines)
+	if err != nil {
+		return false
+	}
+	return codexComposerLivenessFailure(lines)
 }
 
 func (p *Provider) sessionProcessNames(name string) []string {

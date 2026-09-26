@@ -341,6 +341,86 @@ func TestProviderObserveLivenessKeepsZombieShellVisible(t *testing.T) {
 	t.Fatalf("ObserveLiveness() = %#v, want running zombie shell with dead process", obs)
 }
 
+func TestObserveLivenessCodexStuckComposerIsNotAlive(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	p := NewProviderWithConfig(cfg)
+	name := fmt.Sprintf("gc-test-codex-stuck-%d", time.Now().UnixNano()%10000)
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	// Detached codex pane parked on a drafted composer and not working.
+	command := `sh -c 'printf "│ › Run gc prime to check worker status\n"; exec sleep 60'`
+	if err := p.tm.NewSessionWithCommandAndEnv(name, t.TempDir(), command, map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	waitForPaneText(t, p.tm, name, "› Run gc prime")
+
+	obs := runtime.ObserveLiveness(p, name, nil)
+	if !obs.Running {
+		t.Fatalf("Running = false, want the pane still up: %+v", obs)
+	}
+	if obs.Alive {
+		pane, _ := p.tm.CapturePane(name, 20)
+		t.Fatalf("Alive = true, want false for a drafted composer with no activity:\n%s", pane)
+	}
+
+	// A working turn is activity: the same draft plus the busy footer stays alive.
+	busyName := name + "b"
+	_ = p.Stop(busyName)
+	defer func() { _ = p.Stop(busyName) }()
+	busyCommand := `sh -c 'printf "│ › Run gc prime to check worker status\nesc to interrupt\n"; exec sleep 60'`
+	if err := p.tm.NewSessionWithCommandAndEnv(busyName, t.TempDir(), busyCommand, map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv busy: %v", err)
+	}
+	waitForPaneText(t, p.tm, busyName, "› Run gc prime", "esc to interrupt")
+	busy := runtime.ObserveLiveness(p, busyName, nil)
+	if !busy.Running || !busy.Alive {
+		pane, _ := p.tm.CapturePane(busyName, 20)
+		t.Fatalf("ObserveLiveness = %+v, want running and alive while the turn is working:\n%s", busy, pane)
+	}
+}
+
+// waitForPaneText blocks until every want string is visible in the pane, then
+// returns. A tmux pane exposes no paint-complete signal, so the bounded ticker
+// is the lifecycle probe; on timeout the failure carries the last capture.
+func waitForPaneText(t *testing.T, tm *Tmux, name string, want ...string) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	var last string
+	for {
+		if pane, err := tm.CapturePane(name, promptObservationLines); err == nil {
+			last = pane
+			visible := true
+			for _, w := range want {
+				if !strings.Contains(pane, w) {
+					visible = false
+					break
+				}
+			}
+			if visible {
+				return
+			}
+		}
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatalf("pane %q never showed %q (timed out); last capture:\n%s", name, want, last)
+		}
+	}
+}
+
 func TestProvider_StartCanceledCleansUpSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

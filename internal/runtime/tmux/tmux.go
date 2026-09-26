@@ -61,20 +61,22 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // upstream gastownhall/gascity#4706. A family with no entry here gets
 // defaultNudgeSubmitKeySequence.
 //
-// #4706 was filed against a k8s codex agent whose first turn never started:
-// codex's TUI buffers a send-keys burst as a paste, so a lone trailing Enter
-// is swallowed as a composer newline rather than treated as submit — codex's
-// actual submit sequence is Escape then Enter, which is the codex entry below.
+// Codex's entry is a single Enter and must not contain Escape. Escape during
+// a running turn is "cancel" — the pane prints "Conversation interrupted"
+// and the nudge sits unsubmitted in the composer (ga-biss). Enter while a
+// turn is in progress is codex's queued follow-up: the draft leaves the
+// composer and runs after the current turn, without aborting it. Enter while
+// idle submits the turn.
 //
-// Exactly ONE Escape reaches a codex pane, and that is load-bearing. codex stays
-// in providersSkippingEscapeBeforeEnter, so the pre-submit Escape at step 3 of
-// NudgeSession is skipped and this entry supplies the only one; sending both
-// would put Escape-Escape into the pane, which codex binds to
-// backtrack/edit-previous rather than to submit. Declaring it here (instead of
-// dropping codex from the skip list, which would produce the same two keystrokes
-// today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
-// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
-// bare Enter would be swallowed exactly like the first one.
+// #4706's swallowed-paste newline (a lone Enter consumed as a composer
+// newline) is not solved by putting Escape back in this sequence. confirmCodexFollowUp
+// retries Enter once when the composer still holds a draft, which is the
+// second keystroke that submits after the paste window closes, and it does
+// so without ever interrupting.
+//
+// codex stays in providersSkippingEscapeBeforeEnter so step 3 of NudgeSession
+// does not add an Escape in front of this entry. Two Escapes would be
+// backtrack/edit-previous; one Escape is already an interrupt.
 //
 // This table does NOT yet contain an entry for the claude-specific stall
 // this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
@@ -92,7 +94,7 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // to need — is a single entry in this table plus a test, not a rewrite of
 // NudgeSession.
 var nudgeSubmitKeySequences = map[string][]string{
-	"codex": {"Escape", "Enter"},
+	"codex": {"Enter"},
 }
 
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
@@ -216,6 +218,12 @@ var (
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
 	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// ErrCodexComposerLiveness is the codex form of an unconfirmed submit where
+	// the composer still holds the draft and the pane shows no busy indicator.
+	// The session process is alive, but the agent is not working and will not
+	// see the nudge. It wraps ErrNudgeSubmitUnconfirmed so queue callers keep
+	// retrying it as a delivery failure.
+	ErrCodexComposerLiveness = fmt.Errorf("codex liveness failure: composer non-empty with no activity: %w", ErrNudgeSubmitUnconfirmed)
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -2118,11 +2126,14 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 // "esc to interrupt" string that function has always matched.
 //
 // Eligibility is what makes an unconfirmed submit an ERROR instead of a silent
-// success, and that is the point for codex: the best-effort fallback reports
-// delivery as soon as the keys reach tmux, so the queue acks and DELETES an item
-// whose paste may still be sitting unsubmitted in the composer — the nudge is
-// then gone with nothing to retry. With verification, an unconfirmed submit
-// requeues under the existing attempt cap instead.
+// success. Codex stays listed because its busy indicator is readable — the
+// liveness check treats "esc to interrupt" as activity — but NudgeSession does
+// not confirm a codex submit by waiting for that indicator. A turn that is
+// already busy would look confirmed while the draft is still in the composer.
+// confirmCodexFollowUp is the codex path: Enter only, success is an empty
+// composer, one Enter retry if the draft remains. An unconfirmed submit
+// requeues under the existing attempt cap instead of the queue acking and
+// deleting a nudge that never left the composer.
 //
 // Adding a family here is a promise about its busy indicator: a provider whose
 // indicator is unreadable would report every delivery as unconfirmed and burn
@@ -2178,6 +2189,110 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 		}
 	}
 	return nil
+}
+
+// codexComposerScanLines is the footer window inspected for the composer.
+// Submitted turns echo the same › glyph higher in the scrollback; only the
+// bottom-most glyph line is the live composer.
+const codexComposerScanLines = 16
+
+// codexFollowUpEnterRetries is the single extra Enter confirmCodexFollowUp
+// may send when the first Enter left the draft in the composer. One retry
+// covers #4706's swallowed paste newline without a second submit once the
+// composer has already cleared.
+const codexFollowUpEnterRetries = 1
+
+// isCodexTarget reports whether target is a codex-family pane. The pane's
+// GC_PROVIDER wins; a missing env falls back to the process name so ad-hoc
+// `codex` sessions still take the no-interrupt path.
+func (t *Tmux) isCodexTarget(target string) bool {
+	if provider := t.providerEnv(target); provider != "" {
+		return sessionlog.ProviderFamily(provider) == "codex"
+	}
+	return t.targetLooksLikeProvider(target, "codex")
+}
+
+// codexComposerRemainder returns the text after the composer prompt glyph.
+// ok is false when line is not a composer line. An empty rest is an empty
+// composer (idle prompt or a follow-up that already queued).
+func codexComposerRemainder(line string) (string, bool) {
+	s := strings.TrimSpace(line)
+	s = strings.TrimLeft(s, "│┃ ")
+	s = strings.TrimSpace(s)
+	s = strings.TrimRight(s, "│┃ ")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	for _, glyph := range []string{"› ", "›", "> ", ">"} {
+		if strings.HasPrefix(s, glyph) {
+			return strings.TrimSpace(strings.TrimPrefix(s, glyph)), true
+		}
+	}
+	return "", false
+}
+
+// codexComposerHasDraft reports whether the live composer (the bottom-most
+// prompt-glyph line in the footer window) still holds text.
+func codexComposerHasDraft(lines []string) bool {
+	window := lines
+	if len(window) > codexComposerScanLines {
+		window = window[len(window)-codexComposerScanLines:]
+	}
+	for i := len(window) - 1; i >= 0; i-- {
+		rest, ok := codexComposerRemainder(window[i])
+		if !ok {
+			continue
+		}
+		return rest != ""
+	}
+	return false
+}
+
+// codexComposerLivenessFailure reports a pane whose composer still holds a
+// draft and that is not working. The process can be alive while the agent
+// never sees the nudge — the stalled-heartbeat case in ga-biss.
+func codexComposerLivenessFailure(lines []string) bool {
+	return codexComposerHasDraft(lines) && !paneContainsBusyIndicator(lines)
+}
+
+// confirmCodexFollowUp submits by Enter only. Success is an empty composer:
+// an idle turn started, or a follow-up queued onto a turn that was already
+// busy. Busy-by-itself is not success — the turn may have been busy before
+// the nudge, with the draft still sitting in the composer. When the draft
+// remains, Enter is retried once. A draft that survives that retry with no
+// busy indicator is ErrCodexComposerLiveness; a draft that survives while
+// the turn is busy is ErrNudgeSubmitUnconfirmed.
+func confirmCodexFollowUp(sendEnter func() error, observe func() (drafted, busy bool, err error), sleep func(time.Duration)) error {
+	for send := 0; send <= codexFollowUpEnterRetries; send++ {
+		if send > 0 {
+			sleep(submitReEnterBackoff)
+		}
+		if err := sendEnter(); err != nil {
+			return err
+		}
+		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
+			drafted, _, err := observe()
+			if err != nil {
+				return err
+			}
+			if !drafted {
+				return nil
+			}
+			sleep(submitConfirmPollInterval)
+		}
+	}
+	drafted, busy, err := observe()
+	if err != nil {
+		return err
+	}
+	if !drafted {
+		return nil
+	}
+	if !busy {
+		return ErrCodexComposerLiveness
+	}
+	return fmt.Errorf("%w: codex composer still holds the nudge", ErrNudgeSubmitUnconfirmed)
 }
 
 // NudgeSession sends a message to a Claude Code session reliably.
@@ -2290,16 +2405,42 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
 	// Escape is only safe to repeat while the pane is still idle. If the first
 	// attempt actually submitted and the pane went busy, a re-sent Escape is an
-	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
-	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
-	// re-checks busy before every re-send, which is why the verified path is safe
-	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
-	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
-	// only for single-key (plain Enter) sequences, which is what every family
-	// without a table entry has. Adding a multi-key entry for a family that is
-	// not submit-verify eligible would need that gap closed first.
+	// INTERRUPT. submitEnterAndConfirm re-checks busy before every re-send,
+	// which is why the verified path is safe. Codex does not use that path:
+	// Escape aborts the running turn (ga-biss), so confirmCodexFollowUp sends
+	// Enter only and retries it once while the composer still holds a draft.
+	// The best-effort fallback below and NudgePane's retry loop do NOT
+	// re-check busy; they are safe only for single-key (plain Enter)
+	// sequences. Adding a multi-key entry for a family that is not
+	// submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
+	if t.isCodexTarget(target) {
+		err := confirmCodexFollowUp(func() error {
+			if err := sendSubmit(); err != nil {
+				return err
+			}
+			wake()
+			return nil
+		}, func() (bool, bool, error) {
+			lines, err := t.CapturePaneLines(target, promptObservationLines)
+			if err != nil {
+				return false, false, err
+			}
+			return codexComposerHasDraft(lines), paneContainsBusyIndicator(lines), nil
+		}, time.Sleep)
+		if err != nil {
+			if errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+				// The Enter reached tmux. Record the poke so the keystroke
+				// echo is not later read as the agent responding, and leave
+				// the nudge unacked so the queue retries.
+				delivered = true
+			}
+			return fmt.Errorf("codex follow-up submit: %w", err)
+		}
+		delivered = true
+		return nil
+	}
 	if t.submitVerifyEligible(target) {
 		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
 		if err != nil {

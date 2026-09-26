@@ -2384,7 +2384,7 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
 	}
-	assertCodexEscapeIsPartOfTheSubmitSequence(t, out)
+	assertCodexNudgeSendsNoEscape(t, out)
 }
 
 func TestNudgeSessionSkipsEscapeForCodexWithoutProviderEnv(t *testing.T) {
@@ -2443,32 +2443,18 @@ func main() {
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
 	}
-	assertCodexEscapeIsPartOfTheSubmitSequence(t, out)
+	assertCodexNudgeSendsNoEscape(t, out)
 }
 
-// assertCodexEscapeIsPartOfTheSubmitSequence is what these two rows guard now
-// that codex has a declared submit sequence.
-//
-// They used to assert that NO Escape reached a codex pane. That was true when
-// codex's submit was a lone Enter and the only Escape on offer was the
-// pre-submit one at step 3 of NudgeSession, which codex skips. It is false by
-// design since upstream #4706: codex buffers a send-keys burst as a paste, so a
-// lone trailing Enter is swallowed as a composer newline, and codex's actual
-// submit is Escape then Enter (nudgeSubmitKeySequences).
-//
-// What still matters, and what these rows now pin against a real pane, is that
-// codex never receives Escape-Escape — the step-3 Escape plus the submit
-// sequence's would be exactly that, and codex binds it to backtrack rather than
-// submit. The COUNT is deliberately not pinned: a never-busy fake pane makes
-// submitEnterAndConfirm re-send, so the pane legitimately sees one Escape per
-// attempt. Adjacency is the invariant.
-func assertCodexEscapeIsPartOfTheSubmitSequence(t *testing.T, out string) {
+// assertCodexNudgeSendsNoEscape pins ga-biss against a real pane: codex
+// delivery must not synthesize Escape. Escape cancels the running turn
+// ("Conversation interrupted") instead of queueing a follow-up. The
+// swallowed-paste case is an extra Enter, which these fakes do not need to
+// show — the unit tests own that branch.
+func assertCodexNudgeSendsNoEscape(t *testing.T, out string) {
 	t.Helper()
-	if !strings.Contains(out, "^[") {
-		t.Fatalf("codex pane saw no Escape; its submit sequence is Escape then Enter (#4706):\n%s", out)
-	}
-	if strings.Contains(out, "^[^[") {
-		t.Fatalf("codex pane saw Escape-Escape, which codex reads as backtrack rather than submit:\n%s", out)
+	if strings.Contains(out, "^[") {
+		t.Fatalf("codex pane saw Escape, which interrupts a running turn:\n%s", out)
 	}
 }
 

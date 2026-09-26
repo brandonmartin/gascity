@@ -44,6 +44,7 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
+	installProviderModelDiscovery()
 	return run(args, stdout, stderr)
 }
 

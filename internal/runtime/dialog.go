@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -581,6 +582,15 @@ func containsPostUpdateStartupDialog(content string) bool {
 		ContainsRateLimitDialog(content)
 }
 
+// ErrCodexHookReviewBlocked reports that Codex is parked on its "Hooks need
+// review" dialog. The process is alive, but the seat cannot take work until
+// the dialog is cleared, so startup liveness must not report it healthy.
+var ErrCodexHookReviewBlocked = errors.New("codex hook review dialog blocking startup")
+
+// codexHookReviewTailLines is how much of a pane counts as the current
+// screen when deciding the hook-review dialog is still in front.
+const codexHookReviewTailLines = 24
+
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?"; pi (>= 0.79) shows
@@ -1146,12 +1156,56 @@ func acceptCodexHookReviewDialogFromStream(
 }
 
 func containsCodexHookReviewDialog(content string) bool {
-	return (strings.Contains(content, "Hooks need review") ||
-		strings.Contains(content, "hooks need review")) &&
-		(strings.Contains(content, "Trust all and continue") ||
-			strings.Contains(content, "trust all")) &&
-		(strings.Contains(content, "Continue without trusting") ||
-			strings.Contains(content, "enter to review hooks"))
+	folded := strings.ToLower(content)
+	return strings.Contains(folded, "hooks need review") &&
+		strings.Contains(folded, "trust all") &&
+		(strings.Contains(folded, "continue without trusting") ||
+			strings.Contains(folded, "enter to review hooks"))
+}
+
+// ContainsCodexHookReviewDialog reports whether the recent pane tail is
+// Codex's hook-review dialog still in the foreground. A dismissed copy left
+// higher in the scrollback does not match.
+func ContainsCodexHookReviewDialog(content string) bool {
+	tail := tailLines(content, codexHookReviewTailLines)
+	if !containsCodexHookReviewDialog(tail) {
+		return false
+	}
+	last := strings.ToLower(lastNonEmptyLine(tail))
+	switch {
+	case strings.Contains(last, "press enter"),
+		strings.Contains(last, "esc to"),
+		strings.Contains(last, "continue without trusting"),
+		strings.Contains(last, "trust all"),
+		strings.Contains(last, "review hooks"),
+		strings.Contains(last, "hooks need review"),
+		strings.Contains(last, "hooks won't run"),
+		strings.Contains(last, "outside the sandbox"):
+		return true
+	default:
+		return false
+	}
+}
+
+func tailLines(content string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) <= n {
+		return content
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+func lastNonEmptyLine(content string) string {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return lines[i]
+		}
+	}
+	return ""
 }
 
 func containsPostCodexHookReviewStartupDialog(content string) bool {

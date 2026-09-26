@@ -16579,7 +16579,12 @@ export type GetV0CityByCityNameProvidersPublicData = {
          */
         cityName: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Re-run provider model discovery, bypassing the per-binary cache.
+         */
+        fresh?: boolean;
+    };
     url: '/v0/city/{cityName}/providers/public';
 };
 

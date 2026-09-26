@@ -90,11 +90,16 @@ func (s *Server) humaHandleProviderList(_ context.Context, _ *ProviderListInput)
 // GET /v0/city/{cityName}/providers/public. It returns the browser-safe
 // projection of every provider — city-level first, then built-ins — and
 // never exposes command/args/env or prompt-delivery details.
-func (s *Server) humaHandleProviderPublicList(_ context.Context, _ *ProviderPublicListInput) (*ProviderPublicListOutput, error) {
+func (s *Server) humaHandleProviderPublicList(ctx context.Context, input *ProviderPublicListInput) (*ProviderPublicListOutput, error) {
 	resolved := s.resolveAllProviders()
 	providers := make([]ProviderPublicResponse, 0, len(resolved))
 	for _, p := range resolved {
-		providers = append(providers, toProviderPublicResponse(p.Name, p.Merged, p.Builtin, p.CityLevel))
+		// The model picker shows what the provider binary reports today, not
+		// just the curated seed compiled into this release (ga-k67). The merge
+		// is per read; the merged spec itself is never mutated.
+		merged := p.Merged
+		merged.OptionsSchema = config.DiscoverProviderOptions(ctx, p.Name, merged, input.Fresh)
+		providers = append(providers, toProviderPublicResponse(p.Name, merged, p.Builtin, p.CityLevel))
 	}
 	return &ProviderPublicListOutput{
 		Index: s.latestIndex(),

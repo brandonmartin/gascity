@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"bufio"
 	"sort"
 	"strings"
 	"testing"
@@ -235,19 +234,4 @@ func diffCursorCatalog(catalog, live []cursorModel) cursorCatalogDiff {
 	}
 	sort.Strings(diff.extraCatalog)
 	return diff
-}
-
-// parseCursorModelList parses `cursor-agent --list-models` output, whose body
-// lines are "<id> - <label>".
-func parseCursorModelList(out string) []cursorModel {
-	var models []cursorModel
-	scanner := bufio.NewScanner(strings.NewReader(out))
-	for scanner.Scan() {
-		id, label, ok := strings.Cut(strings.TrimSpace(scanner.Text()), " - ")
-		if !ok || id == "" || label == "" || strings.ContainsAny(id, " \t") {
-			continue
-		}
-		models = append(models, cursorModel{ID: id, Label: label})
-	}
-	return models
 }

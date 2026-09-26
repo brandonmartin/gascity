@@ -114,6 +114,15 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		resolved.EffectiveDefaults = nil
 	}
 
+	// Step 4c: widen the model picker with the ids the provider binary itself
+	// reports (ga-k67). Purely additive — curated choices keep their aliases
+	// and labels — and soft: with no discoverer installed, no listing verb
+	// declared, or a binary that cannot answer, the schema is exactly the
+	// curated catalog. Runs after 4b so a cleared schema never execs anything.
+	if len(resolved.OptionsSchema) > 0 {
+		applyDiscoveredModels(resolved, spec.pathCheckBinary())
+	}
+
 	// Step 5: default prompt_mode.
 	if resolved.PromptMode == "" {
 		resolved.PromptMode = "arg"
@@ -321,6 +330,11 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 	if city.ACPCommand != "" {
 		result.ACPCommand = city.ACPCommand
+	}
+	// A child that declares its own listing verb replaces the parent's; nil
+	// inherits it (a wrapper around the same CLI keeps the same listing).
+	if city.ModelDiscovery != nil {
+		result.ModelDiscovery = city.ModelDiscovery.clone()
 	}
 
 	// Slice fields: replace entirely when non-nil.
@@ -637,6 +651,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		TitleModel:             spec.TitleModel,
 		ACPCommand:             spec.ACPCommand,
 		UpstreamEnv:            spec.UpstreamEnv,
+		ModelDiscovery:         spec.ModelDiscovery.clone(),
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {
@@ -880,6 +895,9 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	}
 	if r.PrintArgs != nil {
 		out.PrintArgs = append([]string(nil), r.PrintArgs...)
+	}
+	if r.ModelDiscovery != nil {
+		out.ModelDiscovery = r.ModelDiscovery.clone()
 	}
 	if r.Env != nil {
 		out.Env = make(map[string]string, len(r.Env))

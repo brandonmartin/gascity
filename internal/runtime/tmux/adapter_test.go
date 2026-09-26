@@ -360,7 +360,7 @@ func TestObserveLivenessCodexStuckComposerIsNotAlive(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	waitForPaneText(t, p.tm, name, "› Run gc prime")
 
 	obs := runtime.ObserveLiveness(p, name, nil)
 	if !obs.Running {
@@ -381,11 +381,43 @@ func TestObserveLivenessCodexStuckComposerIsNotAlive(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv busy: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	waitForPaneText(t, p.tm, busyName, "› Run gc prime", "esc to interrupt")
 	busy := runtime.ObserveLiveness(p, busyName, nil)
 	if !busy.Running || !busy.Alive {
 		pane, _ := p.tm.CapturePane(busyName, 20)
 		t.Fatalf("ObserveLiveness = %+v, want running and alive while the turn is working:\n%s", busy, pane)
+	}
+}
+
+// waitForPaneText blocks until every want string is visible in the pane, then
+// returns. A tmux pane exposes no paint-complete signal, so the bounded ticker
+// is the lifecycle probe; on timeout the failure carries the last capture.
+func waitForPaneText(t *testing.T, tm *Tmux, name string, want ...string) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	var last string
+	for {
+		if pane, err := tm.CapturePane(name, promptObservationLines); err == nil {
+			last = pane
+			visible := true
+			for _, w := range want {
+				if !strings.Contains(pane, w) {
+					visible = false
+					break
+				}
+			}
+			if visible {
+				return
+			}
+		}
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatalf("pane %q never showed %q (timed out); last capture:\n%s", name, want, last)
+		}
 	}
 }
 

@@ -5372,6 +5372,24 @@ func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
 // discrimination is still exercised exactly as before.
 const doctorBackupStaleEnv = "GC_DOCTOR_BACKUP_STALE_S=300"
 
+// doctorLatencyQuietEnv lifts the doctor's latency-warn horizon for fixtures
+// whose contract is a healthy tick (no latency advisory).
+//
+// The default horizon is 1000ms. These fixtures' dolt is a shell stub, so the
+// measured latency is process-startup time, not a server RTT. A loaded
+// parallel run pushes that startup past 1s (observed 1302ms during
+// make test-fast-parallel, ga-kvj). The tick then takes the advisory path:
+// it sweeps superseded mail and sends a Dolt health advisory, and
+// TestDoctorScriptSteadyHealthySkipsSweep treats that sweep as a failure of
+// the steady-healthy skip. The same false warn turns
+// TestDoctorScriptHealthySweepsRecordedAdvisory into a suppressed latency
+// repeat, so the recorded advisory is neither swept nor cleared.
+//
+// 60s sits above the probe's own 10s run_bounded cap, so a probe that returns
+// cannot trip the warn. These fixtures do not assert a latency warning. Tests
+// that want the warn path set GC_DOCTOR_LATENCY_WARN_S=0.
+const doctorLatencyQuietEnv = "GC_DOCTOR_LATENCY_WARN_S=60"
+
 func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -5871,6 +5889,7 @@ func TestDoctorScriptHealthySweepsRecordedAdvisory(t *testing.T) {
 	}
 
 	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		doctorLatencyQuietEnv,
 		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
@@ -5901,12 +5920,12 @@ func TestDoctorScriptSteadyHealthySkipsSweep(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeDogHealthyFakeDolt(t, binDir)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorLatencyQuietEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
 	}
-	if gcLog := readDogGCLog(t, gcLogPath); strings.Contains(gcLog, "mail archive") {
-		t.Fatalf("steady healthy tick must not invoke the sweep, log:\n%s", gcLog)
+	if gcLog := readDogGCLog(t, gcLogPath); strings.Contains(gcLog, "mail archive") || strings.Contains(gcLog, "mail send") {
+		t.Fatalf("steady healthy tick must not sweep or send, log:\n%s", gcLog)
 	}
 }
 

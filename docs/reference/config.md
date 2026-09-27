@@ -524,6 +524,16 @@ MaintenanceConfig groups periodic store-maintenance subsections.
 |-------|------|----------|---------|-------------|
 | `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop (CALL DOLT_GC + backup snapshot). |
 
+## ModelDiscovery
+
+ModelDiscovery declares how a provider CLI lists the model ids it accepts.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `args` | []string | **yes** |  | Args are appended to the provider command to print the listing. |
+| `format` | string | **yes** |  | Format names the listing parser: "cursor-list-models" ("&lt;id&gt; - &lt;label&gt;" lines), "grok-models" ("* &lt;id&gt;" / "- &lt;id&gt;" bullets) or "id-lines" (one bare id per line). Enum: `cursor-list-models`, `grok-models`, `id-lines` |
+| `prefix` | string |  |  | Prefix, when set, keeps only ids that start with it. Providers that share one binary across upstream namespaces (the opencode family) use it to scope a listing that spans every configured upstream. |
+
 ## ModelPricing
 
 ModelPricing is a complete pricing entry for a (Provider, Model) pair.
@@ -715,6 +725,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
 | `acp_command` | string |  |  | ACPCommand overrides Command when the session transport is ACP. When empty, Command is used for both tmux and ACP transports. |
 | `acp_args` | []string |  |  | ACPArgs overrides Args when the session transport is ACP. When nil, Args is used for both tmux and ACP transports. |
+| `model_discovery` | ModelDiscovery |  |  | ModelDiscovery declares the CLI verb that lists the model ids this provider accepts, turning the curated "model" choices into a fallback seed. Nil inherits the base provider's declaration; built-ins without a listing verb leave it nil. See ModelDiscovery. |
 
 ## Rig
 

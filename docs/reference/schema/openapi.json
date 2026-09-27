@@ -42232,6 +42232,16 @@
               "pattern": "\\S",
               "type": "string"
             }
+          },
+          {
+            "description": "Re-run provider model discovery, bypassing the per-binary cache.",
+            "explode": false,
+            "in": "query",
+            "name": "fresh",
+            "schema": {
+              "description": "Re-run provider model discovery, bypassing the per-binary cache.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {

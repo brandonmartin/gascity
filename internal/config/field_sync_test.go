@@ -497,6 +497,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"ForkFlag":               "internal fork-launch config (claude-only), not patched",
 		"PrintArgs":              "internal print-mode args, not patched",
 		"TitleModel":             "internal title-model key, not patched",
+		"ModelDiscovery":         "listing-verb declaration; merged via MergeProviderOverBuiltin, not ProviderPatch",
 	}
 
 	// Fields on ProviderPatch that don't map 1:1 to ProviderSpec.

@@ -694,6 +694,32 @@ func TestTickDebouncer_CancelPendingDropsTimer(t *testing.T) {
 	}
 }
 
+// TestTickDebouncer_CancelPendingDropsInFlightCallback parks the AfterFunc
+// callback after the timer has fired and before it publishes. cancelPending
+// must still drop that fire: time.Timer.Stop does not wait for an AfterFunc
+// that has already started, and under host load the callback publishes after
+// the drain (ga-4gw).
+func TestTickDebouncer_CancelPendingDropsInFlightCallback(t *testing.T) {
+	d := newTickDebouncer()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	d.beforeFire = func() {
+		close(entered)
+		<-release
+	}
+	d.arm(time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timer callback did not reach beforeFire")
+	}
+	d.cancelPending()
+	close(release)
+	if got := drainFiredCount(d, 50*time.Millisecond); got != 0 {
+		t.Fatalf("fired count = %d, want 0 after cancelPending raced an in-flight callback", got)
+	}
+}
+
 func TestTickDebouncer_CancelPendingDrainsQueuedFire(t *testing.T) {
 	d := newTickDebouncer()
 	d.arm(0) // queue a fire on fireCh

@@ -6982,7 +6982,12 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		t.Fatalf("Create: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The initial snapshot is synchronous, but History walks the transcript
+	// under host load, and a missed wake falls back to outputStreamPollInterval
+	// (2s). A 1s wait inside a 2s request context expired before the first
+	// turn was written (ga-4gw). The request context has to cover both waits
+	// even when each one runs to its deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
@@ -6993,7 +6998,7 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first-remembered-output", time.Second); !strings.Contains(body, "first-remembered-output") {
+	if body := waitForRecorderSubstring(t, rec, "first-remembered-output", 3*time.Second); !strings.Contains(body, "first-remembered-output") {
 		t.Fatalf("stream body missing initial transcript turn: %s", body)
 	}
 
@@ -7013,7 +7018,7 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "second-continued-output", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "second-continued-output", 5*time.Second)
 
 	cancel()
 	<-done

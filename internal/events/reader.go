@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 )
@@ -20,7 +21,10 @@ var readRotationDir = os.ReadDir
 
 // Filter specifies predicates for ReadFiltered. Zero values are ignored.
 type Filter struct {
-	Type     string    // match events with this Type
+	Type string // match events with this Type
+	// Types matches events whose Type is any listed value. It is ANDed with
+	// Type when both are set. Empty means no constraint.
+	Types    []string
 	Actor    string    // match events with this Actor
 	Subject  string    // match events with this Subject
 	Since    time.Time // match events at or after this time
@@ -56,6 +60,9 @@ func matchesFilter(e Event, f Filter) bool {
 	if f.Type != "" && e.Type != f.Type {
 		return false
 	}
+	if len(f.Types) > 0 && !slices.Contains(f.Types, e.Type) {
+		return false
+	}
 	if f.Actor != "" && e.Actor != f.Actor {
 		return false
 	}
@@ -85,6 +92,28 @@ func ApplyFilter(evts []Event, filter Filter) []Event {
 		}
 	}
 	return result
+}
+
+// lineMayMatchType is a cheap pre-decode screen for a raw JSONL line. A line
+// whose Type satisfies the filter must contain that type's text verbatim, so a
+// line containing none of the wanted types cannot match and is skipped without
+// paying for json.Unmarshal. It is deliberately a substring test on the type
+// value alone, not on `"type":"..."`, so it never depends on how the producer
+// spaces its JSON. False positives (a payload mentioning the type) are fine:
+// matchesFilter still runs on the decoded event.
+func lineMayMatchType(line []byte, f Filter) bool {
+	if f.Type != "" && !bytes.Contains(line, []byte(f.Type)) {
+		return false
+	}
+	if len(f.Types) == 0 {
+		return true
+	}
+	for _, t := range f.Types {
+		if bytes.Contains(line, []byte(t)) {
+			return true
+		}
+	}
+	return false
 }
 
 func limitReached(count int, filter Filter) bool {
@@ -262,6 +291,9 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
 	for scanner.Scan() {
+		if !lineMayMatchType(scanner.Bytes(), filter) {
+			continue
+		}
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
@@ -428,7 +460,7 @@ func archiveFilesIn(dir string) ([]archiveInfo, error) {
 // as an Event and invoking fn for every event. fn returns false to
 // abort iteration early. Returns nil if iteration completed cleanly
 // or fn requested abort; errors from gzip / scanner are wrapped.
-func streamArchive(path string, _ Filter, fn func(Event) bool) error {
+func streamArchive(path string, filter Filter, fn func(Event) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -444,6 +476,9 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		if !lineMayMatchType(scanner.Bytes(), filter) {
+			continue
+		}
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue

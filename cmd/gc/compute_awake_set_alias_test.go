@@ -23,7 +23,7 @@ func TestSessionAssigneeMatchesPoolAlias(t *testing.T) {
 	if !sessionHasAssignedWork(work, nil, bead) {
 		t.Fatalf("claimed in_progress work under the alias must count as assigned work")
 	}
-	// An unaliased session bead keeps the pre-existing behaviour.
+	// An unaliased session bead keeps the pre-existing behavior.
 	bead.Alias = ""
 	if sessionAssigneeMatches(nil, bead, "gascity/gasburger.anvil") {
 		t.Fatalf("no alias, no match")

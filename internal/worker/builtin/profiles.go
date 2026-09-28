@@ -77,6 +77,11 @@ type BuiltinProviderSpec struct {
 	UpstreamBaseURLEnv   string
 	UpstreamAPIKeyEnv    string
 	UpstreamAuthTokenEnv string
+	// ModelDiscovery declares the CLI verb that lists the model ids this
+	// provider accepts (see BuiltinModelDiscovery). Nil = the CLI publishes no
+	// listing verb; the curated model choices in OptionsSchema are the whole
+	// catalog rather than a fallback seed.
+	ModelDiscovery *BuiltinModelDiscovery
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -456,6 +461,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			"full-auto":    "--permission-mode dontAsk",
 			"unrestricted": "--permission-mode bypassPermissions",
 		},
+		// `grok models` (verified against grok 1.0.41) prints the account's
+		// catalog as bullet lines; the curated ids below are the fallback seed.
+		ModelDiscovery: &BuiltinModelDiscovery{Args: []string{"models"}, Format: ModelListFormatGrok},
 		OptionsSchema: []BuiltinProviderOption{
 			{
 				Key:     "permission_mode",
@@ -545,6 +553,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "--resume",
 		ResumeStyle:       "flag",
+		// `cursor-agent --list-models` (verified against cursor-agent
+		// 2026.09.15) prints the account's catalog; the generated snapshot in
+		// cursor_models.go is the fallback seed when the binary cannot answer.
+		ModelDiscovery: &BuiltinModelDiscovery{Args: []string{"--list-models"}, Format: ModelListFormatCursor},
 		OptionsSchema: []BuiltinProviderOption{
 			{
 				Key:     "mcp_approval",
@@ -635,6 +647,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:           "--session",
 		ResumeStyle:          "flag",
 		ACPArgs:              []string{"acp"},
+		// `opencode models` prints one "<provider>/<model>" id per line for
+		// every configured upstream (documented CLI verb; not verified locally).
+		ModelDiscovery: &BuiltinModelDiscovery{Args: []string{"models"}, Format: ModelListFormatIDLines},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
@@ -666,6 +681,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:       "--session",
 		ResumeStyle:      "flag",
 		ACPArgs:          []string{"acp"},
+		// mimo is an OpenCode fork and keeps its `models` verb: one
+		// "<provider>/<model>" id per line (documented; not verified locally).
+		ModelDiscovery: &BuiltinModelDiscovery{Args: []string{"models"}, Format: ModelListFormatIDLines},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("mimo/mimo-auto", "MiMo Auto (free)"),
@@ -722,6 +740,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile: "AGENTS.md",
 		ACPArgs:          []string{"acp"},
 		TitleModel:       "cerebras/gpt-oss-120b",
+		// `opencode models` lists every configured upstream as "<provider>/<model>";
+		// the prefix scopes it to the cerebras namespace this provider launches with.
+		ModelDiscovery: &BuiltinModelDiscovery{Args: []string{"models"}, Format: ModelListFormatIDLines, Prefix: "cerebras/"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoiceNoAlias("cerebras/gpt-oss-120b", "GPT-OSS 120B"),
@@ -745,6 +766,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile: "AGENTS.md",
 		ACPArgs:          []string{"acp"},
 		TitleModel:       "groq/openai/gpt-oss-20b",
+		// `opencode models` lists every configured upstream as "<provider>/<model>";
+		// the prefix scopes it to the groq namespace this provider launches with.
+		ModelDiscovery: &BuiltinModelDiscovery{Args: []string{"models"}, Format: ModelListFormatIDLines, Prefix: "groq/"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoiceNoAlias("groq/openai/gpt-oss-120b", "GPT-OSS 120B"),
@@ -954,6 +978,7 @@ func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.PrintArgs = cloneStrings(spec.PrintArgs)
 	spec.OptionsSchema = cloneBuiltinOptions(spec.OptionsSchema)
 	spec.ACPArgs = cloneStrings(spec.ACPArgs)
+	spec.ModelDiscovery = cloneBuiltinModelDiscovery(spec.ModelDiscovery)
 	return spec
 }
 

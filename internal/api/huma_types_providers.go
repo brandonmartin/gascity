@@ -17,6 +17,7 @@ type ProviderListInput struct {
 // /v0/city/{cityName}/providers/public.
 type ProviderPublicListInput struct {
 	CityScope
+	Fresh bool `query:"fresh" required:"false" doc:"Re-run provider model discovery, bypassing the per-binary cache."`
 }
 
 // ProviderPublicResponse is the browser-safe DTO for a single provider.

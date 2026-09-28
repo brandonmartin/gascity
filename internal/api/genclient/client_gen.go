@@ -9602,6 +9602,12 @@ type CreateProviderParams struct {
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
+// GetV0CityByCityNameProvidersPublicParams defines parameters for GetV0CityByCityNameProvidersPublic.
+type GetV0CityByCityNameProvidersPublicParams struct {
+	// Fresh Re-run provider model discovery, bypassing the per-binary cache.
+	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
+}
+
 // GetV0CityByCityNameReadinessParams defines parameters for GetV0CityByCityNameReadiness.
 type GetV0CityByCityNameReadinessParams struct {
 	// Items Comma-separated readiness items to check (default: claude,codex,gemini,github_cli).
@@ -19414,7 +19420,7 @@ type ClientInterface interface {
 	CreateProvider(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProvidersPublic request
-	GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersPublicParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameReadiness request
 	GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21375,8 +21381,8 @@ func (c *Client) CreateProvider(ctx context.Context, cityName string, params *Cr
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameProvidersPublicRequest(c.Server, cityName)
+func (c *Client) GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersPublicParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameProvidersPublicRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -29461,7 +29467,7 @@ func NewCreateProviderRequestWithBody(server string, cityName string, params *Cr
 }
 
 // NewGetV0CityByCityNameProvidersPublicRequest generates requests for GetV0CityByCityNameProvidersPublic
-func NewGetV0CityByCityNameProvidersPublicRequest(server string, cityName string) (*http.Request, error) {
+func NewGetV0CityByCityNameProvidersPublicRequest(server string, cityName string, params *GetV0CityByCityNameProvidersPublicParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -29484,6 +29490,28 @@ func NewGetV0CityByCityNameProvidersPublicRequest(server string, cityName string
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Fresh != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "fresh", *params.Fresh, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -32948,7 +32976,7 @@ type ClientWithResponsesInterface interface {
 	CreateProviderWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
 
 	// GetV0CityByCityNameProvidersPublicWithResponse request
-	GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error)
+	GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersPublicParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error)
 
 	// GetV0CityByCityNameReadinessWithResponse request
 	GetV0CityByCityNameReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameReadinessResponse, error)
@@ -38863,8 +38891,8 @@ func (c *ClientWithResponses) CreateProviderWithResponse(ctx context.Context, ci
 }
 
 // GetV0CityByCityNameProvidersPublicWithResponse request returning *GetV0CityByCityNameProvidersPublicResponse
-func (c *ClientWithResponses) GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error) {
-	rsp, err := c.GetV0CityByCityNameProvidersPublic(ctx, cityName, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProvidersPublicParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error) {
+	rsp, err := c.GetV0CityByCityNameProvidersPublic(ctx, cityName, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

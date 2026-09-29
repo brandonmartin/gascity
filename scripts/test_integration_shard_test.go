@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/build"
 	"go/parser"
@@ -169,6 +170,37 @@ func TestRuntimeTmuxIntegrationShardClearsAmbientManifestOnDynamicFallback(t *te
 	)
 }
 
+// TestRestSmokeValidationSurvivesEarlyGrepExit pins ga-4ps9: validating
+// requested names against the discovered test list must not report a present
+// test as missing. A `printf "$available" | grep -q` pipeline under pipefail
+// did exactly that whenever grep matched and exited while printf still had
+// output to write: printf died of SIGPIPE and pipefail failed the membership
+// check. Putting every requested name ahead of more than a pipe buffer of
+// filler makes that early exit deterministic instead of load-dependent.
+func TestRestSmokeValidationSurvivesEarlyGrepExit(t *testing.T) {
+	repo := repoRoot(t)
+	smoke := parseIntegrationShardTestArray(t, filepath.Join(repo, "scripts", "test-integration-shard"), "rest_smoke_tests")
+
+	var listing strings.Builder
+	for _, name := range smoke {
+		listing.WriteString(name + "\n")
+	}
+	const pipeBufferBytes = 64 << 10
+	for i := 0; listing.Len() < 4*pipeBufferBytes; i++ {
+		fmt.Fprintf(&listing, "TestFillerDiscoveredIntegrationCase%06d\n", i)
+	}
+	listing.WriteString("ok  \tgithub.com/gastownhall/gascity/test/integration\t0.001s\n")
+	fixture := newIntegrationShardFixtureWithListing(t, "linux", "amd64", listing.String())
+
+	out, err := fixture.runShard(t, "rest-smoke-1-of-2")
+	if err != nil {
+		t.Fatalf("rest-smoke shard failed although every requested test was listed: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "missing integration test") {
+		t.Fatalf("rest-smoke shard reported a listed test as missing:\n%s", out)
+	}
+}
+
 func TestCmdGCIntegrationManifestMatchesTaggedDeclarations(t *testing.T) {
 	repo := repoRoot(t)
 	manifest := parseCmdGCIntegrationManifest(t, filepath.Join(repo, "scripts", "test-integration-shard"))
@@ -259,12 +291,19 @@ func TestOrdinary(t *testing.T) {}
 
 func parseCmdGCIntegrationManifest(t *testing.T, path string) []string {
 	t.Helper()
+	return parseIntegrationShardTestArray(t, path, "cmd_gc_integration_tests")
+}
+
+// parseIntegrationShardTestArray returns the test names declared in the named
+// one-name-per-line bash array of scripts/test-integration-shard.
+func parseIntegrationShardTestArray(t *testing.T, path, array string) []string {
+	t.Helper()
 	content, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read cmd/gc integration manifest: %v", err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 
-	const declaration = "cmd_gc_integration_tests=("
+	declaration := array + "=("
 	inManifest := false
 	var tests []string
 	for _, rawLine := range strings.Split(string(content), "\n") {
@@ -277,7 +316,7 @@ func parseCmdGCIntegrationManifest(t *testing.T, path string) []string {
 		}
 		if line == ")" {
 			if len(tests) == 0 {
-				t.Fatal("cmd_gc_integration_tests is empty")
+				t.Fatalf("%s is empty", array)
 			}
 			return tests
 		}
@@ -286,11 +325,11 @@ func parseCmdGCIntegrationManifest(t *testing.T, path string) []string {
 		}
 		fields := strings.Fields(line)
 		if len(fields) != 1 {
-			t.Fatalf("unsupported cmd_gc_integration_tests entry %q", rawLine)
+			t.Fatalf("unsupported %s entry %q", array, rawLine)
 		}
 		testName := strings.Trim(fields[0], "'\"")
 		if !isGoTestName(testName) {
-			t.Fatalf("invalid cmd_gc_integration_tests entry %q", testName)
+			t.Fatalf("invalid %s entry %q", array, testName)
 		}
 		tests = append(tests, testName)
 	}
@@ -452,8 +491,21 @@ func newIntegrationShardFixture(t *testing.T) integrationShardFixture {
 
 func newIntegrationShardFixtureForPlatform(t *testing.T, goos, goarch string) integrationShardFixture {
 	t.Helper()
+	return newIntegrationShardFixtureWithListing(t, goos, goarch, "")
+}
+
+// newIntegrationShardFixtureWithListing builds a fake go toolchain whose
+// `go test -list` prints listing verbatim. An empty listing keeps the default
+// three-test discovery output.
+func newIntegrationShardFixtureWithListing(t *testing.T, goos, goarch, listing string) integrationShardFixture {
+	t.Helper()
 
 	tmp := t.TempDir()
+	listingPath := ""
+	if listing != "" {
+		listingPath = filepath.Join(tmp, "go-test.listing")
+		writeTestFile(t, listingPath, listing)
+	}
 	binDir := filepath.Join(tmp, "bin")
 	if err := os.Mkdir(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir fake bin: %v", err)
@@ -466,6 +518,7 @@ set -euo pipefail
 capture_path=`+shellQuote(capturePath)+`
 modeled_goos=`+shellQuote(goos)+`
 modeled_goarch=`+shellQuote(goarch)+`
+listing_path=`+shellQuote(listingPath)+`
 
 case "$1" in
   env)
@@ -489,7 +542,9 @@ case "$1" in
     done
     printf '%s\0' "$@" >> "$capture_path"
     printf '\0' >> "$capture_path"
-    if [[ "$is_list" == "1" ]]; then
+    if [[ "$is_list" == "1" && -n "$listing_path" ]]; then
+      cat "$listing_path"
+    elif [[ "$is_list" == "1" ]]; then
       printf '%s\n' TestDarwinAlpha TestDarwinBeta TestDarwinGamma 'ok  github.com/gastownhall/gascity/internal/runtime/tmux  0.001s'
     fi
     ;;

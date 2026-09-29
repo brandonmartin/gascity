@@ -22,6 +22,7 @@ func TestSleepReasonConstantValues(t *testing.T) {
 		SleepReasonQuarantine:            "quarantine",
 		SleepReasonContextChurn:          "context-churn",
 		SleepReasonMaxSessionAge:         "max-session-age",
+		SleepReasonStartupCrash:          "startup-crash",
 	}
 	for reason, str := range want {
 		if string(reason) != str {

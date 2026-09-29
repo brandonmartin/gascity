@@ -409,6 +409,11 @@ var sessionRelocationRoutedFiles = []string{
 	// relocated sessions class — a green result that reads as "no stuck
 	// sessions" when the check simply looked in the wrong store.
 	"doctor_startup_health.go",
+	// The wake-attempt-churn doctor check enumerates session beads and reads
+	// wake_attempts / last_woke_at. Unrouted, it reports "no wake-attempt churn"
+	// under a relocated sessions class — a green result that reads as "no
+	// creating→asleep flaps" when the check simply looked in the wrong store.
+	"doctor_wake_attempt_churn.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

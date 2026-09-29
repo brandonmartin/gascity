@@ -35,6 +35,11 @@ const (
 	SleepReasonContextChurn          SleepReason = "context-churn"
 	SleepReasonMaxSessionAge         SleepReason = "max-session-age"
 	SleepReasonAssignedWorkExhausted SleepReason = "assigned-work-exhausted"
+	// SleepReasonStartupCrash records that the provider pane died during
+	// Start/wake rather than a deliberate idle stop. It is intentionally
+	// absent from IsDeliberateSleepReason so a real crash still accrues
+	// churn instead of being classified as idle-timeout.
+	SleepReasonStartupCrash SleepReason = "startup-crash"
 )
 
 // IsDeliberateSleepReason reports whether a sleep_reason records an

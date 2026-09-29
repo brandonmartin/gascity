@@ -65,8 +65,7 @@ func (c *startupHealthEpisodesCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 			details = append(details, fmt.Sprintf("malformed startup-health episode: missing session name (consecutive=%d)", ep.ConsecutiveCount))
 			continue
 		}
-		activelyQuarantined := !ep.QuarantinedUntil.IsZero() && ep.QuarantinedUntil.After(now)
-		if ep.ConsecutiveCount >= defaultMaxWakeAttempts || activelyQuarantined {
+		if startupHealthEpisodeReportable(ep, now) {
 			details = append(details, formatStartupHealthEpisodeDetail(ep))
 		}
 	}
@@ -78,6 +77,14 @@ func (c *startupHealthEpisodesCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 		fmt.Sprintf("%d startup-health episode issue(s) found", len(details)),
 		"investigate the affected session's provider start failures; a malformed episode's bead metadata needs manual repair. The episode clears automatically on the session's next successful start.",
 		details)
+}
+
+// startupHealthEpisodeReportable reports whether ep is at or past the
+// defaultMaxWakeAttempts quarantine threshold or still actively quarantined —
+// the bar at which startup-health-episodes flags a session.
+func startupHealthEpisodeReportable(ep session.StartupHealthEpisode, now time.Time) bool {
+	activelyQuarantined := !ep.QuarantinedUntil.IsZero() && ep.QuarantinedUntil.After(now)
+	return ep.ConsecutiveCount >= defaultMaxWakeAttempts || activelyQuarantined
 }
 
 // formatStartupHealthEpisodeDetail renders one episode's diagnostic fields.

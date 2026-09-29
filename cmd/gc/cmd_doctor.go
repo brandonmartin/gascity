@@ -463,6 +463,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 			registerCityStoreCheck(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 			registerCityStoreCheck(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newWakeAttemptChurnCheck(cfg, cityPath, storeFactory))
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
 			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).

@@ -1014,6 +1014,7 @@ func TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	if api.SupportsProviderReadiness("omp") {
 		t.Fatal("test assumption broken: \"omp\" now has a readiness probe, pick a different probe-less builtin")
@@ -1059,6 +1060,7 @@ func TestCmdInitNoStartSkipsSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	calledRegister := false

@@ -215,7 +215,11 @@ validate_selected_tests() {
   available="$(list_integration_tests)"
   missing=0
   for requested_name in "${requested[@]}"; do
-    if ! printf '%s\n' "$available" | grep -Fxq -- "$requested_name"; then
+    # Membership checks read a here-string, never `printf | grep -q`: grep -q
+    # exits on its first match, and under pipefail the SIGPIPE that kills a
+    # printf still writing the rest of the list fails the check, reporting a
+    # listed test as missing (ga-4ps9).
+    if ! grep -Fxq -- "$requested_name" <<< "$available"; then
       echo "missing integration test for shard ${shard}: ${requested_name}" >&2
       missing=1
     fi
@@ -349,7 +353,7 @@ run_rest_full_shard_modulo() {
   done <<< "$listed"
 
   for test_name in "${all_tests[@]}"; do
-    if ! printf '%s' "$excluded" | grep -Fxq -- "$test_name"; then
+    if ! grep -Fxq -- "$test_name" <<< "$excluded"; then
       rest_tests+=("$test_name")
     fi
   done

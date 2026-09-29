@@ -1888,6 +1888,37 @@
       "type": "object",
       "description": "MaintenanceConfig groups periodic store-maintenance subsections."
     },
+    "ModelDiscovery": {
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args are appended to the provider command to print the listing."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "cursor-list-models",
+            "grok-models",
+            "id-lines"
+          ],
+          "description": "Format names the listing parser: \"cursor-list-models\" (\"\u003cid\u003e - \u003clabel\u003e\"\nlines), \"grok-models\" (\"* \u003cid\u003e\" / \"- \u003cid\u003e\" bullets) or \"id-lines\" (one\nbare id per line)."
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix, when set, keeps only ids that start with it. Providers that\nshare one binary across upstream namespaces (the opencode family) use it\nto scope a listing that spans every configured upstream."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "args",
+        "format"
+      ],
+      "description": "ModelDiscovery declares how a provider CLI lists the model ids it accepts."
+    },
     "ModelPricing": {
       "properties": {
         "provider": {
@@ -2518,6 +2549,10 @@
           },
           "type": "array",
           "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+        },
+        "model_discovery": {
+          "$ref": "#/$defs/ModelDiscovery",
+          "description": "ModelDiscovery declares the CLI verb that lists the model ids this\nprovider accepts, turning the curated \"model\" choices into a fallback\nseed. Nil inherits the base provider's declaration; built-ins without a\nlisting verb leave it nil. See ModelDiscovery."
         }
       },
       "additionalProperties": false,

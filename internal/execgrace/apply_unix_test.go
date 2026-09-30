@@ -6,11 +6,126 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// ignoredInterruptHelperEnv marks the re-executed test binary that runs
+// TestApplyTrapRunsWhenInterruptInheritedIgnored's scenario with SIGINT
+// ignored from process start.
+const ignoredInterruptHelperEnv = "GC_EXECGRACE_IGNORED_INTERRUPT_HELPER"
+
+// TestApplyTrapRunsWhenInterruptInheritedIgnored is the regression test for
+// ga-g8d5: a process started as a background job of a non-interactive shell
+// (a parallel test runner, a backgrounded gc) begins with SIGINT ignored, and
+// every child it spawns inherits that ignore across exec. A shell cannot trap
+// a signal ignored on entry, so a group SIGINT silently does nothing: the
+// rollback trap never runs and the WaitDelay kill wins, leaking whatever the
+// command had staged (a created Docker container, a moved worktree).
+//
+// The scenario must start with SIGINT genuinely ignored — not merely
+// simulated — so the test re-executes its own binary under a shell that
+// ignores SIGINT before exec.
+func TestApplyTrapRunsWhenInterruptInheritedIgnored(t *testing.T) {
+	if os.Getenv(ignoredInterruptHelperEnv) == "1" {
+		runTrapWithInheritedIgnoredInterrupt(t)
+		return
+	}
+	t.Parallel()
+
+	marker := filepath.Join(t.TempDir(), "signal")
+	cmd := exec.Command("sh", "-c", `trap '' INT; exec "$@"`, "sh",
+		os.Args[0], "-test.run=^TestApplyTrapRunsWhenInterruptInheritedIgnored$", "-test.count=1", "-test.v")
+	cmd.Env = append(helperBaseEnv(), ignoredInterruptHelperEnv+"=1", "MARKER="+marker)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper with inherited SIGINT ignore failed: %v\noutput:\n%s", err, out)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("rollback trap never ran with SIGINT inherited ignored: %v\noutput:\n%s", err, out)
+	}
+	if strings.TrimSpace(string(got)) != "TERM" {
+		t.Fatalf("rollback trap ran on %q, want TERM (the INT trap is dead when SIGINT is ignored on entry)", got)
+	}
+}
+
+// TestApplyInterruptsWhenInterruptNotIgnored pins the ordinary path: when
+// SIGINT is not inherited ignored, the cooperative signal stays SIGINT, so
+// commands that trap only INT keep their rollback.
+func TestApplyInterruptsWhenInterruptNotIgnored(t *testing.T) {
+	if signal.Ignored(os.Interrupt) {
+		t.Skip("SIGINT inherited ignored; the TERM fallback is covered by TestApplyTrapRunsWhenInterruptInheritedIgnored")
+	}
+	t.Parallel()
+	marker := filepath.Join(t.TempDir(), "signal")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	script := `trap 'echo INT > "$MARKER"; exit 130' INT; trap 'echo TERM > "$MARKER"; exit 143' TERM; sleep 30`
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Env = append(os.Environ(), "MARKER="+marker)
+	Apply(cmd, 5*time.Second)
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("rollback trap never ran: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != "INT" {
+		t.Fatalf("rollback trap ran on %q, want INT", got)
+	}
+}
+
+// runTrapWithInheritedIgnoredInterrupt is the helper-process half of
+// TestApplyTrapRunsWhenInterruptInheritedIgnored.
+func runTrapWithInheritedIgnoredInterrupt(t *testing.T) {
+	if !signal.Ignored(os.Interrupt) {
+		t.Fatal("helper precondition: SIGINT must be ignored from process start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	// Real rollback traps (worktree-setup's restore_stage, gc-session-docker's
+	// failed-start cleanup) cover INT and TERM; with INT ignored on entry the
+	// shell silently drops the INT trap and only the TERM trap is live. The
+	// marker records which trap ran.
+	script := `trap 'echo INT > "$MARKER"; exit 130' INT; trap 'echo TERM > "$MARKER"; exit 143' TERM; sleep 30`
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	result := Apply(cmd, 3*time.Second)
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	if _, err := os.Stat(os.Getenv("MARKER")); err != nil {
+		t.Fatalf("rollback trap never ran — cooperative cancel was swallowed by the inherited SIGINT ignore: %v", err)
+	}
+	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
+		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
+	}
+}
+
+// helperBaseEnv returns the current environment without the Bazel sharding
+// variables, so a re-executed test binary runs the single named test instead
+// of a shard of it.
+func helperBaseEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "TEST_SHARD_INDEX=") || strings.HasPrefix(entry, "TEST_TOTAL_SHARDS=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
 
 // TestApplyTrapRunsBeforeKill is the regression test for the staged-content
 // data-loss class: a setup script that has moved files aside and registered a

@@ -14,7 +14,8 @@ import (
 // vendor/testdata stay excluded, a `// boundary:allow org_` annotation still
 // suppresses, and a genuine tracked `org_` violation still blocks — including
 // one under a path containing whitespace. It also covers the fail-closed path
-// outside a git work tree and the lone-tracked-_test.go case. Hermetic: temp
+// outside a git work tree and the lone-tracked-_test.go case, and pins that its
+// output assertions do not race grep's early exit under pipefail. Hermetic: temp
 // git repos and real grep only, no network or bd calls. HOME is overridden so
 // a developer's global core.excludesFile cannot reach the temp repos.
 func TestCheckCoreBoundary(t *testing.T) {

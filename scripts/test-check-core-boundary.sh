@@ -49,6 +49,12 @@ run_check() {
     printf '%s\x1e%s' "$ec" "$out"
 }
 
+# output_contains <output> <needle>: succeeds when the literal <needle> occurs
+# in <output>. A bash substring match, never `printf | grep -q`: see Test 8.
+output_contains() {
+    [[ "$1" == *"$2"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Test 1: an UNTRACKED in-tree cache directory carrying a third-party org_
 # hit must NOT trip check (b). This is the exact bug: a project-local
@@ -93,7 +99,7 @@ EOF
     git -C "$repo" commit -qm "add tracked violation"
     result="$(run_check "$repo")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED (b)'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
         record_pass "tracked org_ token in core .go still blocks (b)"
     else
         record_fail "tracked org_ token in core .go still blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
@@ -178,7 +184,7 @@ func resolveOrgID() string { return "" }
 EOF
     result="$(run_check "$dir")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED'; then
         record_pass "non-git directory fails closed"
     else
         record_fail "non-git directory fails closed" "exit=$ec, expected nonzero with BLOCKED
@@ -207,7 +213,7 @@ EOF
     git -C "$repo" commit -qm "add tracked violation under a path with a space"
     result="$(run_check "$repo")"
     ec="${result%%$'\x1e'*}"; out="${result#*$'\x1e'}"
-    if [ "$ec" -ne 0 ] && printf '%s' "$out" | grep -q 'BLOCKED (b)'; then
+    if [ "$ec" -ne 0 ] && output_contains "$out" 'BLOCKED (b)'; then
         record_pass "tracked path containing whitespace still blocks (b)"
     else
         record_fail "tracked path containing whitespace still blocks (b)" "exit=$ec, expected nonzero with BLOCKED (b)
@@ -247,6 +253,28 @@ $out"
     rm -rf "$repo"
 }
 
+# ---------------------------------------------------------------------------
+# Test 8: output_contains must not depend on how the writer and reader race.
+# The assertions above look for a marker in captured script output under
+# `set -o pipefail`. A `printf | grep -q` pipe fails that lookup when grep
+# exits on its first match while printf is still writing the rest: printf dies
+# of SIGPIPE (141) and pipefail reports a marker that was printed as absent
+# (ga-vxl8, same class as ga-4ps9). Putting the marker ahead of more than
+# 64 KiB of filler makes the early exit deterministic, so one lookup fails on
+# a pipe-based helper every time.
+# ---------------------------------------------------------------------------
+test_output_contains_survives_early_grep_exit() {
+    local filler out
+    filler="$(head -c 200000 /dev/zero | tr '\0' 'x')"
+    out="BLOCKED (b)
+$filler"
+    if output_contains "$out" 'BLOCKED (b)'; then
+        record_pass "output_contains finds a marker ahead of 200 KB of output"
+    else
+        record_fail "output_contains finds a marker ahead of 200 KB of output" "marker present but lookup failed"
+    fi
+}
+
 test_untracked_cache_dir_ignored
 test_tracked_org_token_still_blocked
 test_tracked_vendor_and_testdata_still_excluded
@@ -254,6 +282,7 @@ test_boundary_allow_annotation_still_suppresses
 test_non_git_dir_fails_closed
 test_tracked_path_with_space_still_blocked
 test_lone_tracked_test_file_not_blocked
+test_output_contains_survives_early_grep_exit
 
 echo "----"
 echo "test-check-core-boundary.sh: $pass passed, $fail failed"

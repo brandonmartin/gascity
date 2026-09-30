@@ -4460,19 +4460,25 @@ func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
 	}
 }
 
-func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
+// The readiness budget is wall-clock, so how many polls fit inside a tight
+// budget depends on how long each sleep really takes under host load. This test
+// therefore gates success on the poll count and gives the deadline a budget it
+// cannot plausibly exhaust; the budget-expiry contract is covered by
+// TestWaitForSupervisorReadyUsesHookedTimeout.
+func TestWaitForSupervisorReadyPollsUntilAlive(t *testing.T) {
 	oldAlive := supervisorAliveHook
 	oldTimeout := supervisorReadyTimeout
 	oldPoll := supervisorReadyPollInterval
+	const missesBeforeAlive = 3
 	calls := 0
 	supervisorAliveHook = func() int {
 		calls++
-		if calls < 4 {
+		if calls <= missesBeforeAlive {
 			return 0
 		}
 		return 4242
 	}
-	supervisorReadyTimeout = 25 * time.Millisecond
+	supervisorReadyTimeout = time.Minute
 	supervisorReadyPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
@@ -4484,8 +4490,50 @@ func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 	if code := waitForSupervisorReady(&stderr); code != 0 {
 		t.Fatalf("waitForSupervisorReady code = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if calls < 4 {
-		t.Fatalf("supervisorAliveHook called %d times, want at least 4", calls)
+	if want := missesBeforeAlive + 1; calls != want {
+		t.Fatalf("supervisorAliveHook called %d times, want %d", calls, want)
+	}
+}
+
+func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldTimeout := supervisorReadyTimeout
+	oldPoll := supervisorReadyPollInterval
+	calls := 0
+	supervisorAliveHook = func() int {
+		calls++
+		return 0
+	}
+	hookedTimeout := 25 * time.Millisecond
+	supervisorReadyTimeout = hookedTimeout
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyTimeout = oldTimeout
+		supervisorReadyPollInterval = oldPoll
+	})
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	code := waitForSupervisorReady(&stderr)
+	elapsed := time.Since(start)
+
+	if code != 1 {
+		t.Fatalf("waitForSupervisorReady code = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "supervisor did not become ready") {
+		t.Fatalf("stderr = %q, want readiness failure message", stderr.String())
+	}
+	if calls == 0 {
+		t.Fatal("supervisorAliveHook never called")
+	}
+	// Elapsed time only ever overshoots the budget under load, so the lower
+	// bound is exact and the upper bound (the unhooked default) is far away.
+	if elapsed < hookedTimeout {
+		t.Fatalf("gave up after %v, before the hooked timeout %v", elapsed, hookedTimeout)
+	}
+	if elapsed >= oldTimeout {
+		t.Fatalf("waited %v, want the hooked timeout %v rather than the default %v", elapsed, hookedTimeout, oldTimeout)
 	}
 }
 

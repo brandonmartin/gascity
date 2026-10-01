@@ -2143,6 +2143,79 @@ func clearPendingStartInFlightLease(handle string, sessFront *sessionpkg.Store, 
 	setMeta(sessFront, handle, "last_woke_at", "", stderr) //nolint:errcheck
 }
 
+// samePendingCreateAttempt reports whether current is still the pending-create
+// attempt expected recorded. A closed row, a successor incarnation, or a row
+// whose claim was already cleared is not this attempt. Requiring the claim is
+// what keeps the sequential Tx fallback — which clears pending_create_claim
+// before Close — from being rewritten after a failed close.
+func samePendingCreateAttempt(expected, current sessionpkg.Info) bool {
+	if current.Closed || !current.PendingCreateClaim {
+		return false
+	}
+	// Awake is advisory for CanRollback: a lost close fence can leave the row
+	// awake because a concurrent wake landed. That row is no longer the
+	// creating attempt, and its lease must stay (TestRollbackPendingCreateKeepsTheNameWhenTheCloseFails).
+	if !pendingCreateRollbackState(current.MetadataState) {
+		return false
+	}
+	return sessionpkg.LeaseFromInfo(expected).CanRollback(sessionpkg.LeaseFromInfo(current))
+}
+
+// releasePreservedPendingCreateLease clears last_woke_at after a configured
+// named session's start failed and the bead was kept open for retry. The claim
+// and pending_create_started_at stay, so the next tick re-attempts the start
+// instead of aging the episode into a failed-create close.
+func releasePreservedPendingCreateLease(expected sessionpkg.Info, sessFront *sessionpkg.Store, stderr io.Writer) {
+	if sessFront == nil || strings.TrimSpace(expected.ID) == "" {
+		return
+	}
+	if err := sessionpkg.WithSessionMutationLock(expected.ID, func() error {
+		current, err := sessFront.Get(expected.ID)
+		if err != nil {
+			return err
+		}
+		if !samePendingCreateAttempt(expected, current) {
+			return nil
+		}
+		return sessFront.SetMarker(expected.ID, "last_woke_at", "")
+	}); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: releasing preserved start lease for %s: %v\n", expected.ID, err) //nolint:errcheck
+	}
+}
+
+// releaseUncommittedPendingCreateRollback runs when a pending-create rollback
+// failed before any of its writes landed. FileStore's atomic close commits the
+// lease clear, the failed-create patch, and the closed status together, so a
+// failed close leaves last_woke_at set and the next ticks skip the session as
+// still in flight (ga-jpub). Clearing only last_woke_at would turn that
+// startup-window lease into a 10-minute never-started lease and the next tick
+// would start again instead of retrying the close this attempt already chose.
+// Backdating pending_create_started_at past pendingCreateNeverStartedTimeout
+// makes the next tick's lease-expired rollback retry the close. The claim stays
+// set so that retry still passes CanRollback. A sequential Tx that already
+// cleared the claim before Close failed is left untouched.
+func releaseUncommittedPendingCreateRollback(expected sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) {
+	if sessFront == nil || strings.TrimSpace(expected.ID) == "" {
+		return
+	}
+	anchor := now.Add(-pendingCreateNeverStartedTimeout - time.Second).UTC().Format(time.RFC3339)
+	if err := sessionpkg.WithSessionMutationLock(expected.ID, func() error {
+		current, err := sessFront.Get(expected.ID)
+		if err != nil {
+			return err
+		}
+		if !samePendingCreateAttempt(expected, current) {
+			return nil
+		}
+		return sessFront.ApplyPatch(expected.ID, sessionpkg.MetadataPatch{
+			"last_woke_at":              "",
+			"pending_create_started_at": anchor,
+		})
+	}); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: releasing in-flight lease for %s after failed pending-create rollback: %v\n", expected.ID, err) //nolint:errcheck
+	}
+}
+
 // stopStaleAsyncStartRuntime stops the runtime a discarded async start may have
 // left behind. It normally requires positive attribution (GC_SESSION_ID or the
 // instance token) so it never stops a box it cannot prove is this attempt's.
@@ -2813,6 +2886,13 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
 				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 			}
+		} else {
+			// The bead stays open, but PreWakePatch already stamped last_woke_at.
+			// Leaving that stamp makes the next ticks treat the finished attempt
+			// as still in flight for the whole startup window (ga-jpub). Clear
+			// only the in-flight lease; the claim and episode anchor stay so the
+			// next tick retries the start instead of closing the session.
+			releasePreservedPendingCreateLease(info, sessFront, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
@@ -3159,11 +3239,20 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 		// rollback tick would then short-circuit on the already-closed guard
 		// above and return before retired-session cleanup, stranding the closed
 		// session's waits and extmsg bindings. Run that cleanup here when the
-		// close did land. On the atomic production store a failed Tx rolls the
-		// close back, so the bead reads not-closed and this is skipped — the
-		// existing whole-rollback retry path stays unchanged.
+		// close did land. On the atomic close a failed write rolls nothing back
+		// because nothing landed, so the bead reads not-closed. The in-flight
+		// lease is released below so the next tick retries the close instead of
+		// waiting out the startup window (ga-jpub).
 		if snapshot, err := store.Get(info.ID); err == nil && snapshot.Status == "closed" {
 			cancelStateAssignedToRetiredSessionBead(store.Store, info.ID, now, stderr)
+		} else {
+			// The atomic close writes the lease clear together with the closed
+			// status, so a failed close leaves the in-flight lease in place and
+			// the next tick will not retry until it expires (ga-jpub). Release
+			// it and age the never-started anchor so the next tick retries this
+			// close. The sequential Tx path already cleared the claim before
+			// Close, and releaseUncommittedPendingCreateRollback no-ops there.
+			releaseUncommittedPendingCreateRollback(info, sessFront, now, stderr)
 		}
 		return nil, false
 	}

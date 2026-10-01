@@ -83,7 +83,7 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 
 	providers, err := c.GetV0CityByCityNameProvidersWithResponse(ctx, city)
 	expectStatus(t, "list providers", providers, err, http.StatusOK)
-	public, err := c.GetV0CityByCityNameProvidersPublicWithResponse(ctx, city)
+	public, err := c.GetV0CityByCityNameProvidersPublicWithResponse(ctx, city, nil)
 	expectStatus(t, "list public providers", public, err, http.StatusOK)
 	claude, err := c.GetV0CityByCityNameProviderByNameWithResponse(ctx, city, "claude")
 	expectStatus(t, "get provider", claude, err, http.StatusOK)

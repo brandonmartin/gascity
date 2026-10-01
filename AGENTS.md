@@ -276,7 +276,10 @@ and policy targets, and a green `go test` is not evidence a change passes CI.
 - **Never run `go clean -cache`** — it corrupts shared build caches.
   `go clean -testcache` is fine. Maintainers on the shared build hosts: read
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`
-  or `TMPDIR`.
+  or `TMPDIR`. The test runners replace a `TMPDIR` or `GOTMPDIR` longer than
+  20 bytes with a short directory under `/var/tmp` before `go test`, and leave
+  `GOCACHE` on the caller's path, so a refinery temp root does not blow past
+  `sun_path`.
 - **Git hooks:** `make setup` installs `.githooks` as `core.hooksPath`;
   `make check-hooks` verifies it. Pre-commit runs nogo on staged packages;
   pre-push runs `bazel test //...` and says loudly when it falls back to

@@ -3,7 +3,6 @@ package scripts_test
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -216,7 +215,9 @@ func TestShortTestTMPDirMarkerStaysInTheRunner(t *testing.T) {
 			_ = os.RemoveAll(marker)
 		}
 	})
-	cmd := exec.Command("bash", "-c", `
+	// testCommand already owns the package's os/exec call. A direct
+	// exec.Command here would grow the untagged subprocess census (ga-7g3k).
+	cmd := testCommand("bash", "-c", `
 set -euo pipefail
 source "$1"
 export TMPDIR="$2"

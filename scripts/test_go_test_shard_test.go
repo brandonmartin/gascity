@@ -371,10 +371,10 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"PATH": fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME": fixture.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
 		"GIT_CONFIG_NOSYSTEM": "1",
-		"LANG":                "C.UTF-8", "TMPDIR": fixture.tmpDir, "XDG_RUNTIME_DIR": "",
+		"LANG":                "C.UTF-8", "XDG_RUNTIME_DIR": "",
 		"GOPATH": filepath.Join(fixture.tmpDir, "gopath"), "GOCACHE": filepath.Join(fixture.tmpDir, "gocache"),
-		"GOMODCACHE": filepath.Join(fixture.tmpDir, "gomodcache"), "GOTMPDIR": filepath.Join(fixture.tmpDir, "gotmp"),
-		"GOROOT": filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
+		"GOMODCACHE": filepath.Join(fixture.tmpDir, "gomodcache"),
+		"GOROOT":     filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
 		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
 		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
@@ -382,8 +382,20 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
 	fixture.assertSeededGitConfig(t, got)
 	delete(got, "GIT_CONFIG_GLOBAL")
+	// The fixture TMPDIR and the fake `go env GOTMPDIR` are both longer than
+	// the sun_path budget. The runner replaces them with one short directory
+	// and leaves GOCACHE on the fixture path (ga-7g3k).
+	gotTMP := got["TMPDIR"]
+	gotGO := got["GOTMPDIR"]
+	delete(got, "TMPDIR")
+	delete(got, "GOTMPDIR")
 	if !maps.Equal(got, wantEnv) {
 		t.Fatalf("direct product environment = %#v, want %#v", got, wantEnv)
+	}
+	assertShortReplacementTMPDir(t, gotTMP, fixture.tmpDir)
+	assertShortReplacementTMPDir(t, gotGO, filepath.Join(fixture.tmpDir, "gotmp"))
+	if gotTMP != gotGO {
+		t.Fatalf("TMPDIR %q and GOTMPDIR %q differ; one over-long temp root should be shared", gotTMP, gotGO)
 	}
 	if probes, err := os.ReadFile(fixture.probeFile); err == nil {
 		t.Fatalf("timing-disabled shard ran metadata probes:\n%s", probes)

@@ -32,6 +32,8 @@ source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-go-test-shard" "$@"
 # shellcheck source=lib/harness-reap.sh
 source "$repo_root/scripts/lib/harness-reap.sh"
+# shellcheck source=lib/short-test-tmpdir.sh
+source "$repo_root/scripts/lib/short-test-tmpdir.sh"
 
 # This shard owns its product run's process tree. Without these traps a
 # terminated runner leaves the test binary running under init, which is how
@@ -44,7 +46,7 @@ gc_shard_on_signal() {
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"' EXIT
+trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"; gc_cleanup_short_test_tmpdir' EXIT
 trap 'gc_shard_on_signal INT' INT
 trap 'gc_shard_on_signal TERM' TERM
 trap 'gc_shard_on_signal HUP' HUP
@@ -56,6 +58,10 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+# After the gitconfig path is resolved (it lives under the caller's TMPDIR)
+# and after GOTMPDIR is snapshotted from `go env`. A long refinery temp root
+# is replaced for the test process only; GOCACHE stays on gocache_val.
+gc_pin_short_test_tmpdir
 
 # Mirror the Makefile's CGO path detection here so tests run via this script
 # see the same system dependency paths as `make`. When invoked from

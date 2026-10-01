@@ -435,13 +435,26 @@ defeats it.
 
 **If you truly need an isolated cold build** (a from-scratch compile without
 `go clean -cache`), put the throwaway cache **on disk** and remove it
-unconditionally with a `trap`, and redirect `TMPDIR` to the same dir so the
-linker's own scratch also stays off tmpfs:
+unconditionally with a `trap`. That snippet is for `go build` only. Do not
+point `TMPDIR` or `GOTMPDIR` at the cache directory when you run `go test`.
 
 ```bash
+# go build only. Do not prefix go test with this TMPDIR.
 tmp=$(mktemp -d -p /var/tmp) && trap 'rm -rf "$tmp"' EXIT
 GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
 ```
+
+`go test` builds Unix socket paths under `os.TempDir()`, and Go 1.26's
+`testing.T.TempDir` prefers `GOTMPDIR` when it is set. `sun_path` is 108
+bytes on Linux and 104 on macOS. A cache directory from `mktemp -d -p
+/var/tmp` — including the refinery's `/var/tmp/gc-refinery-cache.*` and
+`/var/tmp/gc-refinery-bisect-<bead>.*` prefixes, about 40 bytes — makes those
+socket tests fail on a clean tree (`bind: invalid argument`, `file name too
+long`). Leave `TMPDIR` unset (the runners default to `/var/tmp`) or set it
+to a short on-disk path. `/var/tmp/gotmp` is a fine `GOTMPDIR`. The test
+runners replace a `TMPDIR` or `GOTMPDIR` longer than 20 bytes with a short
+directory under `/var/tmp` for the test process only, and they leave
+`GOCACHE` where the caller put it.
 
 **Exception:** `go clean -testcache` is explicitly allowed. It clears only the
 test-result cache, not the compiled-object cache, and does not corrupt
@@ -453,7 +466,8 @@ nested `env -i` wrappers in `scripts/test-local-parallel`,
 `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. Updating only the
 Makefile is insufficient because each nested runner rebuilds the environment
 and would otherwise restore user Git configuration through the preserved
-`HOME`.
+`HOME`. Those same four sites shorten an over-long `TMPDIR` or `GOTMPDIR`
+before `go test` (see the sun_path note above). `GOCACHE` is passed through.
 
 ## Bazel (side-by-side build)
 

@@ -18,6 +18,9 @@ source "$repo_root/scripts/lib/common.sh"
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-integration-shard" "$@"
+# shellcheck source=lib/short-test-tmpdir.sh
+source "$repo_root/scripts/lib/short-test-tmpdir.sh"
+trap gc_cleanup_short_test_tmpdir EXIT
 
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
@@ -27,6 +30,9 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+# Gitconfig was resolved above, under the caller's TMPDIR. Shorten only the
+# temp roots the test binary will inherit. GOCACHE stays on gocache_val.
+gc_pin_short_test_tmpdir
 
 # Mirror the Makefile's CGO path detection here so tests run via this script
 # see the same system dependency paths as `make`.

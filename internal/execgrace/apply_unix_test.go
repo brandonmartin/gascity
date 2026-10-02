@@ -6,11 +6,132 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// ignoredInterruptHelperEnv marks the re-executed test binary that runs
+// TestApplyTrapRunsWhenInterruptInheritedIgnored's scenario with SIGINT
+// ignored from process start.
+const ignoredInterruptHelperEnv = "GC_EXECGRACE_IGNORED_INTERRUPT_HELPER"
+
+// TestApplyTrapRunsWhenInterruptInheritedIgnored is the regression test for
+// ga-g8d5: a process started as a background job of a non-interactive shell
+// (a parallel test runner, a backgrounded gc) begins with SIGINT ignored, and
+// every child it spawns inherits that ignore across exec. A shell cannot trap
+// a signal ignored on entry, so a group SIGINT silently does nothing: the
+// rollback trap never runs and the WaitDelay kill wins, leaking whatever the
+// command had staged (a created Docker container, a moved worktree).
+//
+// The scenario must start with SIGINT genuinely ignored — not merely
+// simulated — so the test re-executes its own binary under a shell that
+// ignores SIGINT before exec.
+func TestApplyTrapRunsWhenInterruptInheritedIgnored(t *testing.T) {
+	if os.Getenv(ignoredInterruptHelperEnv) == "1" {
+		runTrapWithInheritedIgnoredInterrupt(t)
+		return
+	}
+	t.Parallel()
+
+	marker := filepath.Join(t.TempDir(), "signal")
+	cmd := exec.Command("sh", "-c", `trap '' INT; exec "$@"`, "sh",
+		os.Args[0], "-test.run=^TestApplyTrapRunsWhenInterruptInheritedIgnored$", "-test.count=1", "-test.v")
+	cmd.Env = append(helperBaseEnv(), ignoredInterruptHelperEnv+"=1", "MARKER="+marker)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper with inherited SIGINT ignore failed: %v\noutput:\n%s", err, out)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("rollback trap never ran with SIGINT inherited ignored: %v\noutput:\n%s", err, out)
+	}
+	if strings.TrimSpace(string(got)) != "TERM" {
+		t.Fatalf("rollback trap ran on %q, want TERM (the INT trap is dead when SIGINT is ignored on entry)", got)
+	}
+}
+
+// TestApplyInterruptsWhenInterruptNotIgnored pins the ordinary path: when
+// SIGINT is not inherited ignored, the cooperative signal stays SIGINT, so
+// commands that trap only INT keep their rollback.
+func TestApplyInterruptsWhenInterruptNotIgnored(t *testing.T) {
+	if signal.Ignored(os.Interrupt) {
+		t.Skip("SIGINT inherited ignored; the TERM fallback is covered by TestApplyTrapRunsWhenInterruptInheritedIgnored")
+	}
+	t.Parallel()
+	marker := filepath.Join(t.TempDir(), "signal")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	cmd := rollbackTrapCommand(ctx, marker)
+	Apply(cmd, 5*time.Second)
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("rollback trap never ran: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != "INT" {
+		t.Fatalf("rollback trap ran on %q, want INT", got)
+	}
+}
+
+// runTrapWithInheritedIgnoredInterrupt is the helper-process half of
+// TestApplyTrapRunsWhenInterruptInheritedIgnored.
+func runTrapWithInheritedIgnoredInterrupt(t *testing.T) {
+	if !signal.Ignored(os.Interrupt) {
+		t.Fatal("helper precondition: SIGINT must be ignored from process start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	// With INT ignored on entry the shell silently drops the INT trap and only
+	// the TERM trap is live.
+	cmd := rollbackTrapCommand(ctx, os.Getenv("MARKER"))
+	result := Apply(cmd, 3*time.Second)
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	if _, err := os.Stat(os.Getenv("MARKER")); err != nil {
+		t.Fatalf("rollback trap never ran — cooperative cancel was swallowed by the inherited SIGINT ignore: %v", err)
+	}
+	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
+		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
+	}
+}
+
+// rollbackTrapCommand returns a long-running shell whose rollback traps cover
+// INT and TERM, as real ones do (worktree-setup's restore_stage,
+// gc-session-docker's failed-start cleanup). Whichever trap runs records its
+// signal name in marker.
+func rollbackTrapCommand(ctx context.Context, marker string) *exec.Cmd {
+	script := `trap 'echo INT > "$MARKER"; exit 130' INT; trap 'echo TERM > "$MARKER"; exit 143' TERM; sleep 30`
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Env = append(os.Environ(), "MARKER="+marker)
+	return cmd
+}
+
+// helperBaseEnv returns the current environment without the Bazel sharding
+// variables, so a re-executed test binary runs the single named test instead
+// of a shard of it.
+func helperBaseEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "TEST_SHARD_INDEX=") || strings.HasPrefix(entry, "TEST_TOTAL_SHARDS=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
 
 // TestApplyTrapRunsBeforeKill is the regression test for the staged-content
 // data-loss class: a setup script that has moved files aside and registered a
@@ -40,107 +161,6 @@ func TestApplyTrapRunsBeforeKill(t *testing.T) {
 	}
 	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
 		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
-	}
-}
-
-// TestApplyTrapRunsWhenSIGINTIgnoredOnEntry proves cancellation still reaches
-// a rollback trap when the command inherited SIGINT ignored. That is the
-// normal state for anything launched as a background job of a non-interactive
-// shell (POSIX: asynchronous lists start with SIGINT and SIGQUIT ignored), and
-// a non-interactive shell cannot trap a signal that was ignored on entry, so a
-// SIGINT-based cancellation could never run the trap and every rollback was
-// lost to the WaitDelay SIGKILL. SIGTERM is never ignored this way.
-//
-// The launcher ignores SIGINT and execs the adapter shell, which reproduces
-// the inherited disposition deterministically. The readiness file is the
-// barrier: cancellation fires only once the adapter has installed its trap
-// and is blocked on its foreground child.
-func TestApplyTrapRunsWhenSIGINTIgnoredOnEntry(t *testing.T) {
-	t.Parallel()
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash not available")
-	}
-	dir := t.TempDir()
-	marker := filepath.Join(dir, "rolled-back")
-	ready := filepath.Join(dir, "ready")
-	// The foreground child writes the readiness file itself before exec'ing
-	// sleep, so the barrier also proves the child exists: a signal that lands
-	// while the shell is still forking it would reach only the shell, whose
-	// trap then waits for the 30s child to finish.
-	//
-	// The trailing `exit 0` keeps the child from being the last command of
-	// the -c string: bash 3.2 (macOS /bin/bash) execs that last simple
-	// command in place of the shell even with traps set, which would replace
-	// the trap-carrying adapter with the child and lose the trap. A real
-	// adapter is a script file, where that optimization does not apply.
-	adapter := `trap 'echo rolled-back > "$MARKER"; exit 1' INT TERM
-"$BASH" -c ': > "$READY"; exec sleep 30'
-exit 0`
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	launcher := `trap '' INT; exec "$BASH" -c "$ADAPTER"`
-	cmd := exec.CommandContext(ctx, bash, "-c", launcher)
-	cmd.Env = append(os.Environ(), "MARKER="+marker, "READY="+ready, "ADAPTER="+adapter)
-	result := Apply(cmd, 2*time.Second)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	waitErr := make(chan error, 1)
-	go func() { waitErr <- cmd.Wait() }()
-
-	readyDeadline := time.NewTimer(10 * time.Second)
-	defer readyDeadline.Stop()
-	readyPoll := time.NewTicker(5 * time.Millisecond)
-	defer readyPoll.Stop()
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		select {
-		case err := <-waitErr:
-			t.Fatalf("command exited before the readiness barrier: %v", err)
-		case <-readyDeadline.C:
-			t.Fatal("timed out waiting for the adapter to install its trap")
-		case <-readyPoll.C:
-		}
-	}
-
-	cancel()
-	if err := <-waitErr; err == nil {
-		t.Fatal("expected the canceled command to report an error")
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("rollback trap never ran — the cancellation signal cannot reach a shell that inherited it ignored: %v", err)
-	}
-	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
-		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
-	}
-}
-
-// TestApplyCooperativeSignalIsSIGTERM pins the adapter cancellation contract:
-// the process group receives SIGTERM, so a command that installs no handler
-// dies of SIGTERM rather than of SIGINT or the WaitDelay SIGKILL.
-func TestApplyCooperativeSignalIsSIGTERM(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "sleep", "30")
-	result := Apply(cmd, 5*time.Second)
-	if err := cmd.Run(); err == nil {
-		t.Fatal("expected the canceled command to report an error")
-	}
-	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
-		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
-	}
-	status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-	if !ok {
-		t.Fatalf("expected a syscall.WaitStatus, got %T", cmd.ProcessState.Sys())
-	}
-	if !status.Signaled() || status.Signal() != syscall.SIGTERM {
-		t.Fatalf("expected the group to be terminated by SIGTERM, got signaled=%v signal=%v", status.Signaled(), status.Signal())
 	}
 }
 
@@ -233,13 +253,6 @@ func TestApplyLeaderSignaledOnlyWhenGetpgidFails(t *testing.T) {
 	}
 	if outcome := result.Outcome(); outcome != CancelLeaderSignaledOnly {
 		t.Fatalf("expected CancelLeaderSignaledOnly, got %v", outcome)
-	}
-	status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-	if !ok {
-		t.Fatalf("expected a syscall.WaitStatus, got %T", cmd.ProcessState.Sys())
-	}
-	if !status.Signaled() || status.Signal() != syscall.SIGTERM {
-		t.Fatalf("expected the leader to be terminated by SIGTERM, got signaled=%v signal=%v", status.Signaled(), status.Signal())
 	}
 }
 

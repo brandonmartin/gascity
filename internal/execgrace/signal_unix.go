@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"syscall"
 )
 
@@ -30,25 +31,42 @@ func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
-// interruptProcessGroup sends os.Interrupt to the command's process group so a
-// foreground child receives it alongside the shell leader, reporting which
-// path delivered the signal. It preserves the os.ErrProcessDone signal the
-// caller special-cases: an already-exited target reports ErrProcessDone
-// rather than a spurious failure. If the group id cannot be resolved it falls
+// cooperativeSignal returns the signal that asks a command to roll back and
+// exit: SIGINT, unless this process ignores SIGINT. A process started as a
+// background job of a non-interactive shell (a parallel test runner, a
+// backgrounded gc) begins with SIGINT ignored, and its children inherit that
+// ignore across exec — a shell cannot even trap a signal ignored on entry, so
+// a group SIGINT would be silently dropped and the forced kill would win.
+// SIGTERM is never ignored by job-control rules, so it is the fallback.
+// (Once a Go handler is installed via signal.Notify, children are reset to the
+// default disposition and SIGINT is used again.)
+func cooperativeSignal() syscall.Signal {
+	if signal.Ignored(os.Interrupt) {
+		return syscall.SIGTERM
+	}
+	return syscall.SIGINT
+}
+
+// interruptProcessGroup sends the cooperative signal (see cooperativeSignal)
+// to the command's process group so a foreground child receives it alongside
+// the shell leader, reporting which path delivered the signal. It preserves
+// the os.ErrProcessDone signal the caller special-cases: an already-exited
+// target reports ErrProcessDone rather than a spurious failure. If the group id cannot be resolved it falls
 // back to signaling the leader directly. The returned CancelOutcome is only
 // meaningful when the error is nil.
 func interruptProcessGroup(cmd *exec.Cmd) (CancelOutcome, error) {
 	if cmd.Process == nil {
 		return CancelNotDelivered, os.ErrProcessDone
 	}
+	sig := cooperativeSignal()
 	pgid, err := getpgid(cmd.Process.Pid)
 	if err != nil {
-		if sigErr := cmd.Process.Signal(os.Interrupt); sigErr != nil {
+		if sigErr := cmd.Process.Signal(sig); sigErr != nil {
 			return CancelNotDelivered, sigErr
 		}
 		return CancelLeaderSignaledOnly, nil
 	}
-	if killErr := killProcessGroup(-pgid, syscall.SIGINT); killErr != nil {
+	if killErr := killProcessGroup(-pgid, sig); killErr != nil {
 		if errors.Is(killErr, syscall.ESRCH) {
 			return CancelNotDelivered, os.ErrProcessDone
 		}

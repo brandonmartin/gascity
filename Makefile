@@ -412,7 +412,10 @@ GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
 GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
 GOROOT_VAL    := $(shell go env GOROOT)
-TEST_ENV = env -i \
+# scripts/with-short-tmpdir rewrites an over-long TMPDIR or GOTMPDIR (sun_path)
+# and removes the replacement directory when the command exits. GOCACHE is
+# not rewritten. See scripts/lib/short-test-tmpdir.sh.
+TEST_ENV = scripts/with-short-tmpdir env -i \
 	PATH="$$PATH" \
 	HOME="$$HOME" \
 	USER="$$USER" \

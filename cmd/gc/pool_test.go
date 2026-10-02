@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -244,11 +245,35 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 	}
 }
 
+// pinTestOwnedBDHome pins HOME to a fresh directory for the duration of the
+// test and returns it. The directory comes from doltIdentityHomeDir, outside
+// every t.TempDir() tree, because bd and its embedded dolt write $HOME/.dolt
+// there: a writer still running at cleanup must fail only that best-effort
+// removal, not the test's TempDir RemoveAll (ga-34kj, ga-7dgcg6).
 func pinTestOwnedBDHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
+	home := doltIdentityHomeDir(t)
 	t.Setenv("HOME", home)
 	return home
+}
+
+// TestPinTestOwnedBDHomeIsOutsideTestTempDir guards against ga-34kj: bd and
+// its embedded dolt write $HOME/.dolt into the pinned HOME, so a writer still
+// running when t.TempDir()'s single-pass RemoveAll fires recreates the HOME
+// entry and fails an otherwise-passing test with ENOTEMPTY on the test's
+// TempDir root. The pinned HOME must live outside every t.TempDir() tree,
+// exactly like the dolt identity HOME (ga-7dgcg6).
+func TestPinTestOwnedBDHomeIsOutsideTestTempDir(t *testing.T) {
+	tempRoot := filepath.Dir(t.TempDir())
+
+	home := pinTestOwnedBDHome(t)
+
+	if got := os.Getenv("HOME"); got != home {
+		t.Fatalf("HOME = %q, want pinned %q", got, home)
+	}
+	if pathutil.PathWithin(tempRoot, home) {
+		t.Fatalf("pinned bd HOME %q must not live under this test's t.TempDir() root %q — a bd/dolt writer still running when t.TempDir()'s single-pass RemoveAll fires fails an otherwise-passing test (ga-34kj)", home, tempRoot)
+	}
 }
 
 func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {

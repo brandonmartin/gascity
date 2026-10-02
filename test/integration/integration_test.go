@@ -38,6 +38,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -234,7 +235,7 @@ func TestMain(m *testing.M) {
 	} else if bazeltest.IsBazel() {
 		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
 		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_1_rc_2", "bd"); bd != "" {
+		if bd := runfilesBinaryAt("bd_bin_v1_3_1", "bd"); bd != "" {
 			realBDBinary = bd
 		}
 	} else {
@@ -523,6 +524,30 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 	}
 }
 
+// pinnedBdStoreCommandRunnerWithEnv keeps direct BdStore integration tests on
+// the same bd shim used by their setup commands. The default runner resolves
+// the ambient process PATH before its per-command environment applies, so
+// using it directly could select a host bd whose schema knowledge predates the
+// pinned Beads module that created the test database. overrides (layered over
+// beadstest.BdSubprocessEnv's defaults) are applied on top of the inherited
+// process environment of every bd invocation; callers pin HOME there so a
+// shared-server config.yaml in the ambient HOME cannot divert them. Its
+// workspaces are bound to a Dolt server (bd init --server-port), so test mode
+// is off unless an override says otherwise: see beadstest.EnvBeadsTestMode.
+func pinnedBdStoreCommandRunnerWithEnv(overrides map[string]string) beads.CommandRunner {
+	env := map[string]string{beadstest.EnvBeadsTestMode: "0"}
+	for k, v := range overrides {
+		env[k] = v
+	}
+	runner := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(env))
+	return func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			name = bdBinary
+		}
+		return runner(dir, name, args...)
+	}
+}
+
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
 	cmd.Dir = findModuleRoot()
@@ -541,7 +566,7 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.1-rc.2"
+const wantPinnedBeadsModuleVersion = "v1.3.1"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()

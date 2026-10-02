@@ -154,9 +154,21 @@ type CityRuntime struct {
 	ordersLane     *ordersLane
 	ordersLaneOnce sync.Once
 
+	// inventoryLane lists runtimes at patrol cadence and publishes the
+	// observation cache (runtime_inventory_lane.go). run() creates it; it
+	// stays nil with no provider or bead store, and on runtimes constructed
+	// directly.
+	inventoryLane *runtimeInventoryLane
+
 	// managedDoltPreflightMu serializes the managed-Dolt preflight, which the
 	// tick, the control dispatcher and the orders lane all run.
 	managedDoltPreflightMu sync.Mutex
+
+	// acpRouteSeed is the input of the last seedACPRoutes. The tick and the
+	// control dispatcher reach it through their snapshot loads, both on the
+	// controller loop; the mutex guards a caller off that loop.
+	acpRouteSeedMu sync.Mutex
+	acpRouteSeed   acpRouteSeedKey
 
 	// orderSetScan overrides the order-set scan (tests); nil scans the city.
 	orderSetScan func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error)
@@ -176,9 +188,14 @@ type CityRuntime struct {
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
 
-	poolSessions      map[string]time.Duration
-	poolDeathHandlers map[string]poolDeathInfo
-	suspendedNames    map[string]bool
+	poolSessions map[string]time.Duration
+	// poolDeathHandlers is the on_death handler map, read by the tick and the
+	// inventory lane and replaced whole at reload (publishPoolDeathHandlers).
+	poolDeathHandlers atomic.Pointer[map[string]poolDeathInfo]
+	// poolDeathHookRunner runs on_death hooks; nil is shellRunHook (tests
+	// inject a recorder).
+	poolDeathHookRunner poolDeathHookRunner
+	suspendedNames      map[string]bool
 
 	// standaloneCityStore and standaloneRigStores are the runtime's own store
 	// handles when there is no controller state (API disabled). A config reload
@@ -469,7 +486,6 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		rec:                     p.Rec,
 		reapSkips:               newReapSkipTracker(),
 		poolSessions:            p.PoolSessions,
-		poolDeathHandlers:       p.PoolDeathHandlers,
 		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
@@ -503,6 +519,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		stdout:            p.Stdout,
 		stderr:            p.Stderr,
 	}
+	cr.publishPoolDeathHandlers(p.PoolDeathHandlers)
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -687,6 +704,22 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	// The runtime inventory lane starts after the startup reload, which can
+	// swap the provider, with one synchronous pass so startup reconciliation
+	// finds a published inventory: the runtime reapers take their candidates
+	// from it. From then on it owns on_death detection, and its worker runs
+	// the hooks, off the tick. run() stops both and waits for them on every
+	// exit.
+	if cr.initRuntimeInventoryLane() != nil {
+		inventoryPrimeStart := time.Now()
+		cr.primeNow(ctx)
+		logPhaseElapsed("inventory-prime", inventoryPrimeStart)
+		defer cr.runRuntimeInventoryLane(ctx)()
+		if ctx.Err() != nil {
+			return
+		}
+	}
+
 	// Dispatch due orders before startup session reconciliation. A cold-start
 	// reconcile can take minutes when it has stale or config-drifted sessions;
 	// due event/condition formulas should not wait behind that maintenance work.
@@ -758,11 +791,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			}
 		}()
 
-		cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+		inv := cr.inventoryViewForTick()
+		phaseStart := time.Now()
+		cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, inv, clock.Real{}, cr.stderr)
+		startupTrace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete,
+			"cleanup_dead_runtime_session_corpses", time.Since(phaseStart), inv.corpsePhaseFields())
 		// Reap live runtimes still bound to a closed bead (e.g. a named-session
 		// identity re-minted as a pool slot) so the name's current owner can
 		// rebind it and attach lands on the right runtime.
-		reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+		phaseStart = time.Now()
+		reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, inv, cr.stderr)
+		startupTrace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete,
+			"reap_runtimes_bound_to_closed_beads", time.Since(phaseStart), inv.closedBoundPhaseFields())
 		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr); swept > 0 {
 			fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 		}
@@ -874,6 +914,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// surfacing at the next patrol scan. Config reload re-points the pump
 	// when it swaps the provider.
 	cr.sessionEvents = newSessionEventPump(ctx, cr.pokeCh, cr.stderr, cr.logPrefix)
+	if cr.inventoryLane != nil {
+		cr.sessionEvents.wakeInventory = cr.inventoryLane.wake
+	}
 	cr.sessionEvents.restart(cr.sp)
 
 	// Reload acceptance runs on its own goroutine so that a slow tick
@@ -1113,7 +1156,8 @@ func convergenceStartupComplete(cr *CityRuntime) bool {
 // reconcilePoolDeaths detects pool instances that stopped since the prior
 // reconciliation and runs their configured death hooks.
 func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
-	if len(cr.poolDeathHandlers) == 0 {
+	handlers := cr.publishedPoolDeathHandlers()
+	if len(handlers) == 0 {
 		return
 	}
 	currentRunning, listErr := cr.sp.ListRunning("")
@@ -1130,24 +1174,14 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 		currentSet[name] = true
 	}
 	if *prevPoolRunning != nil {
-		for sn, info := range cr.poolDeathHandlers {
+		for sn, info := range handlers {
 			if (*prevPoolRunning)[sn] && !currentSet[sn] {
-				out, err := shellRunHook(info.Command, info.Dir, info.Env)
-				if err != nil {
-					fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
-				}
-				// Surface only the DEFAULT hook's gc-recovery diagnostic for
-				// a bd release it could not complete (the loop exits 0 even
-				// when a bd write fails, so this is the only signal). A user
-				// on_death override carries no marker and is left alone.
-				if strings.Contains(out, config.RecoveryHookMarker) {
-					fmt.Fprintf(cr.stderr, "on_death %s: %s\n", sn, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
-				}
+				_ = runPoolDeathHook(cr.poolDeathHook(), cr.stderr, sn, info) // reported on stderr
 			}
 		}
 	}
 	*prevPoolRunning = make(map[string]bool)
-	for sn := range cr.poolDeathHandlers {
+	for sn := range handlers {
 		if currentSet[sn] {
 			(*prevPoolRunning)[sn] = true
 		}
@@ -1188,7 +1222,11 @@ func (cr *CityRuntime) tick(
 	}()
 	// Detect pool instance deaths since last tick. Ordered ahead of the config
 	// reload so it compares against the config the deaths happened under.
-	cr.reconcilePoolDeaths(prevPoolRunning)
+	// While the inventory lane runs it owns on_death, off the tick
+	// (runtime_inventory_ondeath.go).
+	if cr.inventoryLane == nil {
+		cr.reconcilePoolDeaths(prevPoolRunning)
+	}
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
@@ -1299,6 +1337,14 @@ func (cr *CityRuntime) tick(
 	addBackstopAgeFields(ordersFields, passAt, passReason, passRan)
 	recordPhase(TraceSiteControllerTickPhase, "wake_orders_lane", phaseStart, ordersFields)
 
+	// The runtime inventory lane also runs on its own goroutine: the tick
+	// records its pass age, its last result and the age of the published
+	// snapshot and generation, per backend.
+	if lane := cr.inventoryLane; lane != nil && trace != nil {
+		phaseStart = time.Now()
+		recordPhase(TraceSiteControllerTickPhase, "runtime_inventory_lane", phaseStart, lane.tickFields(phaseStart))
+	}
+
 	// Re-route ready work whose canonical pool route was lost or never written
 	// (gc.run_target set, gc.routed_to empty), so the autoscaler — which keys on
 	// gc.routed_to — sees it as demand without a manual `gc sling` (ga-n2d.4).
@@ -1341,16 +1387,19 @@ func (cr *CityRuntime) tick(
 	// corrects bead state, and the pre-reconcile sync is sufficient for
 	// the reconciler to read/write hashes during reconciliation.
 	// Reap open session beads whose tmux session is dead before loading demand
-	// so stale names cannot block desired-state computation (#742).
+	// so stale names cannot block desired-state computation (#742). Both
+	// runtime reapers take their candidates from the inventory lane's last
+	// pass when it is fresh, and list live otherwise.
+	inv := cr.inventoryViewForTick()
 	phaseStart = time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
+	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, inv, clock.Real{}, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, inv.corpsePhaseFields())
 	// Reap live runtimes still bound to a closed bead (e.g. a named-session
 	// identity re-minted as a pool slot) so the name's current owner can rebind
 	// it and attach lands on the right runtime.
 	phaseStart = time.Now()
-	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
+	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, inv, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, inv.closedBoundPhaseFields())
 	phaseStart = time.Now()
 	swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr)
 	if swept > 0 {
@@ -1474,9 +1523,10 @@ func (cr *CityRuntime) tick(
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
-	// Graph stores intentionally do not emit bead.closed, so a step closed
-	// between the durable write and the best-effort journal append would be a
-	// permanent lifecycle gap. The tick repairs only the roots the journal named
+	// A step close and its journal row are two writes, and the row is
+	// best-effort: a crash between them, or a close that emitted nothing (a
+	// Tx-shaped write), leaves a lifecycle gap no event names. The tick repairs
+	// only the roots the journal named
 	// since the last pass; the whole-corpus convergence sweep runs off-tick in
 	// the background lane.
 	//
@@ -2217,7 +2267,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 		newProviderName = v
 	}
 	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
-		newSp, spErr := newSessionProviderForCityByName(nextCfg, newProviderName, nextCfg.Session, cr.cityName, cr.cityPath)
+		// Build through the transport resolver, not the bare registry, so a city
+		// that routes some sessions to ACP keeps its auto composition.
+		newSp, spErr := resolveSessionTransportProvider(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), cr.loadSessionBeadSnapshot())
 		if spErr != nil {
 			appendWarning(fmt.Sprintf("new session provider %q: %v (keeping old provider)", newProviderName, spErr))
 		} else {
@@ -2337,7 +2389,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
-	cr.poolDeathHandlers = computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp, cr.stderr)
+	cr.publishPoolDeathHandlers(computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp, cr.stderr))
 	cr.suspendedNames = computeSuspendedNames(nextCfg, cr.cityName, cr.cityPath)
 
 	// Rebuild crash tracker if config values changed, otherwise clear all
@@ -2837,6 +2889,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withOnDeathGate(cr.onDeathGate()),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
@@ -3672,6 +3725,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// The dispatcher's starts hit the same endpoints; without the guard
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withOnDeathGate(cr.onDeathGate()),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }
@@ -3815,6 +3869,7 @@ func (cr *CityRuntime) loadTickSessionBeadSnapshot(trigger string) *sessionBeadS
 	}
 	sessionBeads, err := loadSessionBeadSnapshotLive(store.Store, true)
 	if err == nil {
+		cr.seedACPRoutes(sessionBeads)
 		return sessionBeads
 	}
 	fmt.Fprintf(cr.stderr, "%s: loading session beads live for %s tick: %v (using cached snapshot)\n", cr.logPrefix, trigger, err) //nolint:errcheck
@@ -3833,7 +3888,34 @@ func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapsho
 		fmt.Fprintf(cr.stderr, "%s: loading session beads: %v\n", cr.logPrefix, err) //nolint:errcheck
 		return nil, true
 	}
+	cr.seedACPRoutes(sessionBeads)
 	return sessionBeads, false
+}
+
+// acpRouteSeedKey identifies the inputs of the last ACP route seed.
+// publishRuntimeConfig replaces cfg and sp together, so the config pointer
+// also stands for the provider.
+type acpRouteSeedKey struct {
+	cfg         *config.City
+	fingerprint string
+}
+
+// seedACPRoutes seeds the provider's ACP route table from a loaded session
+// snapshot, so the routes the session beads name are registered after a
+// restart, a provider swap, or an Unroute. Seeding only adds routes; it never
+// removes one the beads no longer name. A snapshot with the same fingerprint
+// under the same config already seeded the table, so a poke does not pay the
+// config walk again.
+func (cr *CityRuntime) seedACPRoutes(snapshot *sessionBeadSnapshot) {
+	cfg, sp := cr.serviceProviderSnapshot()
+	key := acpRouteSeedKey{cfg: cfg, fingerprint: sessionBeadSnapshotFingerprint(snapshot)}
+	cr.acpRouteSeedMu.Lock()
+	defer cr.acpRouteSeedMu.Unlock()
+	if key.fingerprint != "" && key == cr.acpRouteSeed {
+		return
+	}
+	seedACPRoutesFromSnapshot(sp, snapshot, cr.cityName, cfg)
+	cr.acpRouteSeed = key
 }
 
 // filterSessionInfosByName selects the open sessions matched on the RAW

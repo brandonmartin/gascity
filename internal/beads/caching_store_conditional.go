@@ -43,9 +43,10 @@ import (
 // wins. Afterwards Get, the dirty-row overlay, reconcile's merge, a Live list,
 // Prime's concurrent-mutation path and PrimeActive fence on the write's
 // writeSeq as well as its beadSeq, so none of them can install a row read
-// before the write. Events are not fenced on writeSeq: a conflicting event is
-// verified only while beadSeq is present or the local write is under five
-// seconds old (see CacheRevision for the remaining known limits).
+// before the write. An event with no cached row to merge onto is fenced on
+// writeSeq and deletedSeq, and a conflicting event is verified against the
+// backing while beadSeq is present or the local write is younger than
+// recentWriteVerifyWindow (see CacheRevision for the remaining known limits).
 // The refetched row feeds the change notification verbatim.
 var (
 	_ ConditionalWriter                = (*CachingStore)(nil)
@@ -165,6 +166,15 @@ func (c *CachingStore) probeConditionalWriteCapability() (bool, string) {
 		return true, ""
 	}
 	return false, "backing store does not implement conditional writes"
+}
+
+// conditionalWritesStoreOpen reports whether the backing store is still open:
+// cache and backing are one store instance for liveness, as for capability.
+func (c *CachingStore) conditionalWritesStoreOpen() error {
+	if liveness, ok := c.conditionalBacking().(conditionalWritesLiveness); ok {
+		return liveness.conditionalWritesStoreOpen()
+	}
+	return nil
 }
 
 // UpdateIfMatch forwards the fenced update to the backing store's conditional
@@ -447,7 +457,9 @@ func (c *CachingStore) installAfterConditionalWrite(id string, ev conditionalEvi
 	if (c.state != cacheLive && c.state != cachePartial) || c.refetchFencedLocked(id, ev.seq) {
 		return
 	}
-	opts := absorbOpts{depsMode: depsFromFields, seqMode: seqKeep, clearDirty: true}
+	// A row that omits its edges leaves the evicted, possibly pre-write, edge
+	// set standing, so it does not answer a raced write's mark.
+	opts := absorbOpts{depsMode: depsFromFields, seqMode: seqKeep, clearDirty: !ev.dirty || c.rowAnswersEdges(row)}
 	if ev.hadDeps && !beadCarriesDependencyFields(row) {
 		opts.depsMode = depsExplicit
 		opts.deps = ev.deps

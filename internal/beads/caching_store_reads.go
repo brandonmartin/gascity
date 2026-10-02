@@ -255,10 +255,10 @@ func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, 
 // writes made around the cache. A later local write to id raises it, and so do
 // failed conditional writes, including a CompareAndSetMetadataKey that lost
 // (false, nil). With no write to id on record — never written here, dropped
-// from the cache since, or a write that short-circuited because the clean
-// cached row already matched — it is the current mutation sequence, which no
-// clean census can precede. Epochs are process-local and restart at 1 in each
-// process.
+// from the cache more than recentWriteVerifyWindow ago, or a write that
+// short-circuited because the clean cached row already matched — it is the
+// current mutation sequence, which no clean census can precede. Epochs are
+// process-local and restart at 1 in each process.
 func (c *CachingStore) WriteRev(id string) CacheRevision {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -368,7 +368,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[item.ID] > startSeq {
 			continue
 		}
-		if c.beadSeq[item.ID] > startSeq || c.writeSeq[item.ID] > startSeq {
+		if c.refetchFencedLocked(item.ID, startSeq) {
 			current, ok := c.beads[item.ID]
 			if ok && query.Matches(current) {
 				refreshed = append(refreshed, cloneBead(current))
@@ -387,10 +387,12 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
+		// A list never reads DepList: a row that omits its edges leaves any
+		// mark on the cached ones, as do the refreshes below.
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			clearDirty: c.rowAnswersEdges(item),
 		})
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
@@ -406,7 +408,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			clearDirty: c.rowAnswersEdges(bead),
 		})
 	}
 	for id := range removedParents {
@@ -428,7 +430,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			clearDirty: c.rowAnswersEdges(bead),
 		})
 	}
 	for id := range removedLiveMissing {
@@ -535,6 +537,19 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			if err != nil {
 				return Bead{}, err
 			}
+			var freshDeps []Dep
+			depsFromBacking := false
+			if !c.rowAnswersEdges(fresh) {
+				deps, depErr := c.backing.DepList(id, "down")
+				if depErr != nil {
+					// The row carries no edges, so installing it would clear
+					// the mark on the cached (possibly pre-write) edge set.
+					// Answer with the backing row and leave the mark.
+					c.recordProblem("refresh deps on dirty get", fmt.Errorf("%s: %w", id, depErr))
+					return fresh, nil
+				}
+				freshDeps, depsFromBacking = deps, true
+			}
 			c.mu.Lock()
 			if c.state != cacheLive && c.state != cachePartial {
 				c.mu.Unlock()
@@ -553,14 +568,20 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 					c.mu.Unlock()
 					return cloneBead(current), nil
 				}
+				// Nothing newer is cached (a full Prime replace can drop the
+				// row): the backing read answers, uninstalled.
 				c.mu.Unlock()
-				return Bead{}, ErrNotFound
+				return fresh, nil
 			}
-			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-				depsMode:   depsFromFields,
+			opts := absorbOpts{
+				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqClearBeadSeqOnly,
 				clearDirty: true,
-			})
+			}
+			if depsFromBacking {
+				opts.depsMode, opts.deps = depsExplicit, freshDeps
+			}
+			c.absorbFreshLocked(id, fresh, time.Now(), opts)
 			c.markFreshLocked(time.Now())
 			c.updateStatsLocked()
 			c.mu.Unlock()
@@ -580,9 +601,10 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 // refetchFencedLocked reports whether a mutation or deletion newer than
 // startSeq touched id, so a backing read begun after startSeq may be older
 // than the cache and must not be installed. writeSeq covers a local write
-// whose beadSeq fence a later refetch already cleared. Caller must hold c.mu.
+// whose beadSeq fence a later refetch already cleared, and the fence floor a
+// full Prime replace that dropped the per-row fences. Caller must hold c.mu.
 func (c *CachingStore) refetchFencedLocked(id string, startSeq uint64) bool {
-	return c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq || c.writeSeq[id] > startSeq
+	return c.beadSeq[id] > startSeq || c.writeFencedLocked(id, startSeq)
 }
 
 // Ready returns open beads whose blocking deps are all closed.
@@ -805,6 +827,7 @@ func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, erro
 		ParentID:      parentID,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedAsc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 

@@ -67,9 +67,7 @@ func TestApplyInterruptsWhenInterruptNotIgnored(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	script := `trap 'echo INT > "$MARKER"; exit 130' INT; trap 'echo TERM > "$MARKER"; exit 143' TERM; sleep 30`
-	cmd := exec.CommandContext(ctx, "sh", "-c", script)
-	cmd.Env = append(os.Environ(), "MARKER="+marker)
+	cmd := rollbackTrapCommand(ctx, marker)
 	Apply(cmd, 5*time.Second)
 
 	if err := cmd.Run(); err == nil {
@@ -94,12 +92,9 @@ func runTrapWithInheritedIgnoredInterrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	// Real rollback traps (worktree-setup's restore_stage, gc-session-docker's
-	// failed-start cleanup) cover INT and TERM; with INT ignored on entry the
-	// shell silently drops the INT trap and only the TERM trap is live. The
-	// marker records which trap ran.
-	script := `trap 'echo INT > "$MARKER"; exit 130' INT; trap 'echo TERM > "$MARKER"; exit 143' TERM; sleep 30`
-	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	// With INT ignored on entry the shell silently drops the INT trap and only
+	// the TERM trap is live.
+	cmd := rollbackTrapCommand(ctx, os.Getenv("MARKER"))
 	result := Apply(cmd, 3*time.Second)
 
 	if err := cmd.Run(); err == nil {
@@ -111,6 +106,17 @@ func runTrapWithInheritedIgnoredInterrupt(t *testing.T) {
 	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
 		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
 	}
+}
+
+// rollbackTrapCommand returns a long-running shell whose rollback traps cover
+// INT and TERM, as real ones do (worktree-setup's restore_stage,
+// gc-session-docker's failed-start cleanup). Whichever trap runs records its
+// signal name in marker.
+func rollbackTrapCommand(ctx context.Context, marker string) *exec.Cmd {
+	script := `trap 'echo INT > "$MARKER"; exit 130' INT; trap 'echo TERM > "$MARKER"; exit 143' TERM; sleep 30`
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Env = append(os.Environ(), "MARKER="+marker)
+	return cmd
 }
 
 // helperBaseEnv returns the current environment without the Bazel sharding

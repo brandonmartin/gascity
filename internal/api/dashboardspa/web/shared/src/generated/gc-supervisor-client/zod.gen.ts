@@ -1444,6 +1444,7 @@ export const zRigCreateSucceededPayload = z.object({
 
 export const zRigPatch = z.object({
     DefaultBranch: z.string().nullable(),
+    DefaultMergeStrategy: z.string().nullable(),
     FormulaVars: z.record(z.string(), z.string()),
     Name: z.string(),
     Path: z.string().nullable(),
@@ -9548,6 +9549,20 @@ export const zPostV0CityByCityNameSessionByIdRenamePath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameSessionByIdRenameResponse = zSessionResponse;
+
+export const zPostV0CityByCityNameSessionByIdResetHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zPostV0CityByCityNameSessionByIdResetPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zPostV0CityByCityNameSessionByIdResetResponse = zOkWithIdResponseBody;
 
 export const zRespondSessionBody = zSessionRespondInputBody;
 

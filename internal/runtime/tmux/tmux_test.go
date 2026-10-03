@@ -56,11 +56,11 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
-// noServerPreflightExecutor makes only the first has-session preflight report
-// ErrNoServer, then delegates every other operation to real tmux. It models a
-// stale protocol observation while retaining the real socket boundary.
+// noServerPreflightExecutor makes the configured number of has-session probes
+// report ErrNoServer, then delegates to real tmux. This distinguishes an
+// unanswered re-probe from a stale first observation at the real socket boundary.
 type noServerPreflightExecutor struct {
-	used bool
+	remaining int
 }
 
 func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
@@ -68,8 +68,8 @@ func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
 }
 
 func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
-	if !e.used && firstArgsContainHasSession(args) {
-		e.used = true
+	if e.remaining > 0 && firstArgsContainHasSession(args) {
+		e.remaining--
 		return "", ErrNoServer
 	}
 	return realExecutor{}.executeCtx(ctx, args)
@@ -89,87 +89,110 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		return fmt.Sprintf("gctest-live-socket-%s-%d-%d", suffix, os.Getpid(), time.Now().UnixNano())
 	}
 
-	t.Run("live-server-refuses", func(t *testing.T) {
-		tm := newTmux(newSocketName("live"))
-		socketPath := namedSocketPath(tm.cfg.SocketName)
-		t.Cleanup(func() {
-			_ = tm.KillServer()
-			_ = os.Remove(socketPath)
-		})
+	for _, tc := range []struct {
+		name           string
+		noServerProbes int
+		wantErr        error
+	}{
+		{name: "live-server-refuses", noServerProbes: 2, wantErr: ErrServerDegraded},
+		// A responsive re-probe allows a sibling session on the same server.
+		{name: "live-server-reprobe-recovers", noServerProbes: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTmux(newSocketName("live"))
+			socketPath := namedSocketPath(tm.cfg.SocketName)
+			t.Cleanup(func() {
+				_ = tm.KillServer()
+				_ = os.Remove(socketPath)
+			})
 
-		const instanceToken = "live-server-instance-token"
-		original := fmt.Sprintf("gc-live-original-%d", time.Now().UnixNano())
-		if err := tm.NewSession(original, ""); err != nil {
-			t.Fatalf("create original session: %v", err)
-		}
-		if err := tm.SetEnvironment(original, "GC_INSTANCE_TOKEN", instanceToken); err != nil {
-			t.Fatalf("seed original instance token: %v", err)
-		}
-		serverPID, err := tm.run("display-message", "-p", "#{pid}")
-		if err != nil {
-			t.Fatalf("read server #{pid}: %v", err)
-		}
-		beforeSocket, err := os.Lstat(socketPath)
-		if err != nil {
-			t.Fatalf("lstat live socket %q: %v", socketPath, err)
-		}
-		beforeSessions, err := tm.ListSessions()
-		if err != nil {
-			t.Fatalf("list original sessions: %v", err)
-		}
-
-		guarded := NewProviderWithConfig(tm.cfg)
-		guarded.Tmux().exec = &noServerPreflightExecutor{}
-		err = guarded.Start(context.Background(), original, runtimepkg.Config{
-			Command: "sleep 600",
-			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
-		})
-		if !errors.Is(err, ErrServerDegraded) {
-			t.Fatalf("Provider.Start error = %v, want ErrServerDegraded", err)
-		}
-		if errors.Is(err, ErrNoServer) {
-			t.Fatalf("Provider.Start error = %v, must not wrap ErrNoServer", err)
-		}
-		for _, want := range []string{
-			"protocol=no-server",
-			"path=" + socketPath,
-			"inode=" + socketInode(beforeSocket),
-			"peer_pid=" + serverPID,
-		} {
-			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("Provider.Start error = %q, want %q", err, want)
+			const instanceToken = "live-server-instance-token"
+			original := fmt.Sprintf("gc-live-original-%d", time.Now().UnixNano())
+			if err := tm.NewSession(original, ""); err != nil {
+				t.Fatalf("create original session: %v", err)
 			}
-		}
+			if err := tm.SetEnvironment(original, "GC_INSTANCE_TOKEN", instanceToken); err != nil {
+				t.Fatalf("seed original instance token: %v", err)
+			}
+			serverPID, err := tm.run("display-message", "-p", "#{pid}")
+			if err != nil {
+				t.Fatalf("read server #{pid}: %v", err)
+			}
+			beforeSocket, err := os.Lstat(socketPath)
+			if err != nil {
+				t.Fatalf("lstat live socket %q: %v", socketPath, err)
+			}
+			wantSessions, err := tm.ListSessions()
+			if err != nil {
+				t.Fatalf("list original sessions: %v", err)
+			}
 
-		hasOriginal, err := tm.HasSession(original)
-		if err != nil {
-			t.Fatalf("check original session: %v", err)
-		}
-		if !hasOriginal {
-			t.Fatalf("original session %q was removed after guarded refusal", original)
-		}
-		afterSessions, err := tm.ListSessions()
-		if err != nil {
-			t.Fatalf("list sessions after guarded refusal: %v", err)
-		}
-		if !reflect.DeepEqual(afterSessions, beforeSessions) {
-			t.Fatalf("sessions after guarded refusal = %v, want %v", afterSessions, beforeSessions)
-		}
-		afterPID, err := tm.run("display-message", "-p", "#{pid}")
-		if err != nil {
-			t.Fatalf("read server #{pid} after guarded refusal: %v", err)
-		}
-		if afterPID != serverPID {
-			t.Fatalf("server pid after guarded refusal = %q, want %q", afterPID, serverPID)
-		}
-		afterSocket, err := os.Lstat(socketPath)
-		if err != nil {
-			t.Fatalf("lstat socket after guarded refusal: %v", err)
-		}
-		if !os.SameFile(beforeSocket, afterSocket) {
-			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
-		}
-	})
+			startName := original
+			if tc.wantErr == nil {
+				startName += "-sibling"
+				wantSessions = append(wantSessions, startName)
+				slices.Sort(wantSessions)
+			}
+
+			guarded := NewProviderWithConfig(tm.cfg)
+			guarded.Tmux().exec = &noServerPreflightExecutor{remaining: tc.noServerProbes}
+			err = guarded.Start(context.Background(), startName, runtimepkg.Config{
+				Command: "sleep 600",
+				Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
+			})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Provider.Start error = %v, want %v", err, tc.wantErr)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Fatalf("Provider.Start error = %v, must not wrap ErrNoServer", err)
+			}
+			if errors.Is(tc.wantErr, ErrServerDegraded) {
+				for _, want := range []string{
+					"protocol=no-server",
+					"path=" + socketPath,
+					"inode=" + socketInode(beforeSocket),
+					"peer_pid=" + serverPID,
+				} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("Provider.Start error = %q, want %q", err, want)
+					}
+				}
+			}
+
+			hasOriginal, err := tm.HasSession(original)
+			if err != nil {
+				t.Fatalf("check original session: %v", err)
+			}
+			if !hasOriginal {
+				t.Fatalf("original session %q was removed after guarded start", original)
+			}
+			afterToken, err := tm.GetEnvironment(original, "GC_INSTANCE_TOKEN")
+			if err != nil || afterToken != instanceToken {
+				t.Fatalf("original instance token = %q, err = %v, want %q", afterToken, err, instanceToken)
+			}
+			afterSessions, err := tm.ListSessions()
+			if err != nil {
+				t.Fatalf("list sessions after guarded start: %v", err)
+			}
+			if !reflect.DeepEqual(afterSessions, wantSessions) {
+				t.Fatalf("sessions after guarded start = %v, want %v", afterSessions, wantSessions)
+			}
+			afterPID, err := tm.run("display-message", "-p", "#{pid}")
+			if err != nil {
+				t.Fatalf("read server #{pid} after guarded start: %v", err)
+			}
+			if afterPID != serverPID {
+				t.Fatalf("server pid after guarded start = %q, want %q", afterPID, serverPID)
+			}
+			afterSocket, err := os.Lstat(socketPath)
+			if err != nil {
+				t.Fatalf("lstat socket after guarded start: %v", err)
+			}
+			if !os.SameFile(beforeSocket, afterSocket) {
+				t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+			}
+		})
+	}
 
 	t.Run("absent-allows-cold-creation", func(t *testing.T) {
 		tm := newTmux(newSocketName("absent"))

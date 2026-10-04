@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +82,57 @@ func TestLintAllowsParallelRunners(t *testing.T) {
 	if !config.Run.AllowParallelRunners {
 		t.Fatalf("run.allow-parallel-runners must be true: concurrent lint runs on a shared host otherwise fail with %q before analysis (ga-88dvlm)", "parallel golangci-lint is running")
 	}
+}
+
+// A shared golangci-lint result cache replays diagnostics from other
+// checkouts of this module and fails make lint-* on issues that are not in
+// this tree (ga-wcw5). The default cache must be per worktree, and a caller
+// that already set GOLANGCI_LINT_CACHE must keep that directory.
+func TestLintCacheIsScopedToTheWorktreeUnlessOverridden(t *testing.T) {
+	root := repoRoot(t)
+	home := t.TempDir()
+	sum := sha256.Sum256([]byte(root))
+	scope := hex.EncodeToString(sum[:])[:16]
+	wantDefault := filepath.Join(home, ".cache", "golangci-lint", "by-tree", scope)
+
+	gotDefault := printLintCache(t, root, home, "")
+	if gotDefault != wantDefault {
+		t.Fatalf("GOLANGCI_LINT_CACHE = %q, want per-worktree cache %q", gotDefault, wantDefault)
+	}
+
+	const preset = "/var/tmp/caller-lint-cache"
+	gotPreset := printLintCache(t, root, home, preset)
+	if gotPreset != preset {
+		t.Fatalf("GOLANGCI_LINT_CACHE = %q, want caller override %q", gotPreset, preset)
+	}
+}
+
+func printLintCache(t *testing.T, root, home, preset string) string {
+	t.Helper()
+	cmd := makeCommand(
+		"--no-print-directory",
+		"--eval", ".PHONY: print-lint-cache",
+		"--eval", "print-lint-cache:\n\t@printf '%s' \"$(GOLANGCI_LINT_CACHE)\"",
+		"print-lint-cache",
+	)
+	cmd.Dir = root
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GOLANGCI_LINT_CACHE=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "HOME="+home)
+	if preset != "" {
+		env = append(env, "GOLANGCI_LINT_CACHE="+preset)
+	}
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("print-lint-cache: %v\n%s", err, out)
+	}
+	return string(out)
 }
 
 func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {

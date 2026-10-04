@@ -768,10 +768,23 @@ func printStreamingCityAPIRequirement(mode string, stderr io.Writer) {
 	)
 }
 
+// watchDeadlineExceeded reports that a --watch wait budget expired. A timeout
+// with no matching event is a clean exit, including when the budget is spent
+// on the head probe before the stream starts.
+func watchDeadlineExceeded(ctx context.Context) bool {
+	return ctx.Err() == context.DeadlineExceeded
+}
+
 func requireStreamingCityAPI(ctx context.Context, client *genclient.ClientWithResponses, scope eventsAPIScope, mode string, stderr io.Writer) (string, bool) {
 	head, err := fetchCityHeadIndex(ctx, client, scope.cityName)
 	if err == nil {
 		return head, true
+	}
+	// --watch's context is the wait budget. Spending it on the head probe is
+	// "no matching event", not a failed request. Leave stderr empty so the
+	// caller can exit 0. --follow passes a context with no deadline.
+	if mode == "--watch" && watchDeadlineExceeded(ctx) {
+		return "", false
 	}
 	if shouldUseLocalCityEventsFallback(scope, err) {
 		printStreamingCityAPIRequirement(mode, stderr)
@@ -933,6 +946,9 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 		if cursor != "" {
 			items, err := fetchSupervisorEvents(ctx, client, "", "")
 			if err != nil {
+				if watchDeadlineExceeded(ctx) {
+					return 0
+				}
 				fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 				return 1
 			}
@@ -943,6 +959,9 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 		} else {
 			cursor, err = fetchSupervisorHeadCursor(ctx, client)
 			if err != nil {
+				if watchDeadlineExceeded(ctx) {
+					return 0
+				}
 				fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 				return 1
 			}
@@ -954,6 +973,9 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 	if resumeSeq > 0 {
 		items, err := fetchCityEventsAfterSeq(ctx, client, scope.cityName, resumeSeq)
 		if err != nil {
+			if watchDeadlineExceeded(ctx) {
+				return 0
+			}
 			if shouldUseLocalCityEventsFallback(scope, err) {
 				printStreamingCityAPIRequirement("--watch", stderr)
 				return 1
@@ -968,6 +990,9 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 	} else {
 		head, ok := requireStreamingCityAPI(ctx, client, scope, "--watch", stderr)
 		if !ok {
+			if watchDeadlineExceeded(ctx) {
+				return 0
+			}
 			return 1
 		}
 		resumeSeq, err = strconv.ParseUint(head, 10, 64)

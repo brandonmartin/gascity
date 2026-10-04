@@ -122,6 +122,39 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 	}
 }
 
+// TestStatusObservationSeesProbeInsideSnapshotBudget pins ga-3ek6: the
+// status pass used to give up at 750ms, before a runtime snapshot fetch
+// (up to 3s) could publish. A probe that takes longer than that old budget
+// and less than one fetch must still be observed.
+func TestStatusObservationSeesProbeInsideSnapshotBudget(t *testing.T) {
+	if statusObservationTimeout < statusRuntimeProbeBudget {
+		t.Fatalf("statusObservationTimeout = %s, want at least one snapshot fetch (%s)", statusObservationTimeout, statusRuntimeProbeBudget)
+	}
+	oldObserve := observeSessionTargetForStatus
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		time.Sleep(900 * time.Millisecond)
+		return worker.LiveObservation{Running: true}, nil
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	var stderr bytes.Buffer
+	obs := observeSessionTargetWithWarning(
+		"gc status",
+		"/city",
+		nil,
+		runtime.NewFake(),
+		&config.City{},
+		statusObservationTarget{runtimeSessionName: "slow-but-alive"},
+		&stderr,
+	)
+	if !obs.Running {
+		t.Fatalf("observation running = false, stderr=%q; probe finished inside one snapshot fetch", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "timed out") {
+		t.Fatalf("stderr = %q, want no timeout for a probe inside the snapshot budget", stderr.String())
+	}
+}
+
 func TestCityStatusObservationTimesOut(t *testing.T) {
 	oldTimeout := statusObservationTimeout
 	statusObservationTimeout = 20 * time.Millisecond

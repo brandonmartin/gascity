@@ -1002,6 +1002,32 @@ func TestDoEventsWatchTimesOutWithoutMatch(t *testing.T) {
 	}
 }
 
+// TestDoEventsWatchHeadProbeTimeoutIsClean pins the gate failure where the
+// watch budget expires on GET /v0/city/.../events?limit=1 before the stream
+// starts. That is still "no matching event", so the command exits 0 with no
+// request-failed line. A fast machine never trips the existing heartbeat
+// test on this path: the handler here answers only after the client cancels.
+func TestDoEventsWatchHeadProbeTimeoutIsClean(t *testing.T) {
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(_ http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "bead.closed", nil, 0, "", 30*time.Millisecond, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty timeout output", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "request failed") {
+		t.Fatalf("stderr = %q, want a clean watch timeout", stderr.String())
+	}
+}
+
 func TestMatchPayload(t *testing.T) {
 	t.Run("nil filter always matches", func(t *testing.T) {
 		if !matchPayload(nil, nil) {

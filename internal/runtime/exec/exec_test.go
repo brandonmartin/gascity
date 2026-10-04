@@ -1534,20 +1534,33 @@ esac
 // returned, so WaitDelay would force-kill the shell before its rollback trap
 // ran and the resource the adapter created would leak. Signaling the process
 // group unblocks the child so the trap runs inside the grace window.
+//
+// Readiness is the sleeper observed in interruptible sleep in the adapter's
+// process group. A marker written by the shell before fork is not that proof:
+// cancellation in the fork window signals a group that does not yet contain
+// sleep, the shell defers its trap, and WaitDelay kills the adapter with the
+// rollback marker absent (ga-nwx2). The trap covers INT and TERM because
+// execgrace sends SIGTERM when the test process inherited SIGINT ignored, as
+// a parallel runner does.
 func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("foreground sleep readiness reads /proc/<pid>/stat")
+	}
 	dir := t.TempDir()
-	readyFile := filepath.Join(dir, "ready")
+	childPidFile := filepath.Join(dir, "child.pid")
 	interruptFile := filepath.Join(dir, "interrupted")
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
-    trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT TERM
+    # The child publishes its own pid, then becomes sleep. $$ in a subshell
+    # is the parent shell, so this has to be a new shell whose exec keeps
+    # that pid for the sleeper the test observes.
+    sh -c 'printf "%%s\n" "$$" > "%s"; exec sleep 30'
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, interruptFile, childPidFile))
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1557,25 +1570,7 @@ esac
 		done <- p.Start(ctx, "test-sess", runtime.Config{})
 	}()
 
-	// Wait until the adapter is blocked in the foreground sleep.
-	readyDeadline := time.NewTimer(5 * time.Second)
-	defer readyDeadline.Stop()
-	readyPoll := time.NewTicker(10 * time.Millisecond)
-	defer readyPoll.Stop()
-	for {
-		if _, err := os.Stat(readyFile); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("stat readiness marker: %v", err)
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("Start returned before readiness marker: %v", err)
-		case <-readyPoll.C:
-		case <-readyDeadline.C:
-			t.Fatal("timed out waiting for readiness marker")
-		}
-	}
+	waitForForegroundSleep(t, done, childPidFile)
 
 	cancel()
 	select {
@@ -1593,6 +1588,113 @@ esac
 	}
 	if got := strings.TrimSpace(string(data)); got != "interrupted" {
 		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+	}
+}
+
+// waitForForegroundSleep blocks until the pid published by the adapter's
+// foreground child is interruptible sleep in its parent's process group.
+// Start returning first means the adapter exited before that child was
+// blocked, so the cancellation coverage would be false.
+func waitForForegroundSleep(t *testing.T, done <-chan error, childPidFile string) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
+	var last string
+	for {
+		if pid, ok := readPIDFile(childPidFile); ok {
+			var ready bool
+			ready, last = foregroundSleepReady(pid)
+			if ready {
+				return
+			}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Start returned before foreground sleep was ready: %v (last: %s)", err, last)
+		case <-poll.C:
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for foreground sleep in the adapter process group (last: %s)", last)
+		}
+	}
+}
+
+// readPIDFile reads a pid file written by the adapter child. A partial or
+// non-numeric write is not ready yet.
+func readPIDFile(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	pid := strings.TrimSpace(string(data))
+	if pid == "" {
+		return "", false
+	}
+	for _, r := range pid {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	return pid, true
+}
+
+// procStatAfterComm returns the fields that follow comm in a /proc/<pid>/stat
+// line. comm is wrapped in parentheses and may contain spaces or parentheses;
+// the last ')' closes it.
+func procStatAfterComm(stat string) []string {
+	end := strings.LastIndex(stat, ")")
+	if end < 0 || end+1 >= len(stat) {
+		return nil
+	}
+	return strings.Fields(stat[end+1:])
+}
+
+// foregroundSleepReady reports whether pid is the adapter's foreground
+// sleeper: process image sleep, interruptible sleep, and the same process
+// group as its parent. State S is required so the signal is deliverable;
+// uninterruptible sleep would defer the parent's rollback trap again.
+func foregroundSleepReady(pid string) (bool, string) {
+	commBytes, commErr := os.ReadFile("/proc/" + pid + "/comm")
+	statBytes, statErr := os.ReadFile("/proc/" + pid + "/stat")
+	comm := strings.TrimSpace(string(commBytes))
+	fields := procStatAfterComm(string(statBytes))
+	detail := fmt.Sprintf("pid=%s comm=%q commErr=%v statErr=%v fields=%q", pid, comm, commErr, statErr, fields)
+	if commErr != nil || statErr != nil || comm != "sleep" || len(fields) < 3 {
+		return false, detail
+	}
+	state, ppid, pgrp := fields[0], fields[1], fields[2]
+	detail = fmt.Sprintf("pid=%s comm=%q state=%s ppid=%s pgrp=%s", pid, comm, state, ppid, pgrp)
+	if state != "S" || ppid == "" || ppid == "0" || ppid == pid || pgrp == "" {
+		return false, detail
+	}
+	parentStat, err := os.ReadFile("/proc/" + ppid + "/stat")
+	if err != nil {
+		return false, detail + fmt.Sprintf(" parentErr=%v", err)
+	}
+	parentFields := procStatAfterComm(string(parentStat))
+	if len(parentFields) < 3 {
+		return false, detail + " parentFields=short"
+	}
+	parentPgrp := parentFields[2]
+	detail = fmt.Sprintf("%s parentPgrp=%s", detail, parentPgrp)
+	if pgrp != parentPgrp {
+		return false, detail
+	}
+	return true, detail
+}
+
+func TestProcStatAfterComm(t *testing.T) {
+	fields := procStatAfterComm("12 (sleep) S 9 8 7 0")
+	if len(fields) < 3 || fields[0] != "S" || fields[1] != "9" || fields[2] != "8" {
+		t.Fatalf("fields = %#v", fields)
+	}
+	fields = procStatAfterComm("12 (a (b) c) R 3 4 5")
+	if len(fields) < 3 || fields[0] != "R" || fields[1] != "3" || fields[2] != "4" {
+		t.Fatalf("fields = %#v", fields)
+	}
+	if procStatAfterComm("no-comm") != nil {
+		t.Fatal("expected nil fields when comm is absent")
 	}
 }
 

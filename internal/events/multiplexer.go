@@ -37,6 +37,11 @@ type Multiplexer struct {
 	mu              sync.RWMutex
 	providers       map[string]Provider // city name -> provider
 	providerTimeout time.Duration
+	// beforeAttach, when set, runs inside each watch-attach goroutine
+	// before that city's provider timeout starts and before Provider.Watch.
+	// Tests hold it to prove pre-call delay is not a slow provider.
+	// Production leaves it nil.
+	beforeAttach func()
 }
 
 // NewMultiplexer creates a Multiplexer with no providers.
@@ -286,7 +291,7 @@ func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*Mu
 
 	attached := 0
 	start := func(city string, _ Provider) (uint64, error) { return cursors[city], nil }
-	attachResults, timedOut := collectWatchAttachResults(childCtx, providers, start, w.timeout)
+	attachResults, timedOut := collectWatchAttachResults(childCtx, providers, start, w.timeout, m.beforeAttach)
 	for _, city := range timedOut {
 		log.Printf("events: mux watcher attach timed out for city %q after %s", city, w.timeout)
 	}
@@ -325,19 +330,27 @@ type watchAttachResult struct {
 
 // collectWatchAttachResults attaches a watcher to every provider in parallel,
 // each under its own child context of ctx so it can be detached on its own.
-// start picks the seq each watcher resumes after. Providers that do not answer
-// within timeout are reported by name; their late watchers are closed.
+// start picks the seq each watcher resumes after. Each provider's timeout
+// budget starts when its attach goroutine begins calling the provider, so time
+// spent waiting to be scheduled is not charged to it. Providers that do not
+// answer within timeout are reported by name; their late watchers are closed.
+// beforeAttach, when non-nil, runs in each goroutine ahead of that budget.
 func collectWatchAttachResults(
 	ctx context.Context,
 	providers map[string]Provider,
 	start func(city string, p Provider) (uint64, error),
 	timeout time.Duration,
+	beforeAttach func(),
 ) ([]watchAttachResult, []string) {
 	if len(providers) == 0 {
 		return nil, nil
 	}
 
 	ch := make(chan watchAttachResult)
+	// started is signaled once the goroutine is past beforeAttach and about
+	// to call the provider (start, then Provider.Watch). The budget starts
+	// then, so time spent waiting to be scheduled is not a provider timeout.
+	started := make(chan string)
 	abandoned := make(chan struct{})
 	defer close(abandoned)
 
@@ -345,6 +358,14 @@ func collectWatchAttachResults(
 	for city, p := range providers {
 		pending[city] = struct{}{}
 		go func(city string, p Provider) {
+			if beforeAttach != nil {
+				beforeAttach()
+			}
+			select {
+			case started <- city:
+			case <-abandoned:
+				return
+			}
 			cityCtx, cityCancel := context.WithCancel(ctx)
 			result := watchAttachResult{city: city, ctx: cityCtx, cancel: cityCancel}
 			seq, err := start(city, p)
@@ -377,23 +398,107 @@ func collectWatchAttachResults(
 		}(city, p)
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	deadlines := make(map[string]time.Time, len(providers))
+	timedOut := make(map[string]struct{})
+	// A goroutine that has not reached Provider.Watch is not a slow
+	// provider. Cap that wait so a wedged scheduler still returns, and
+	// never make the cap shorter than the call budget.
+	startBudget := timeout
+	if startBudget < defaultMultiplexerProviderTimeout {
+		startBudget = defaultMultiplexerProviderTimeout
+	}
+	notStartedDeadline := time.Now().Add(startBudget)
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		timer.Stop()
+		timer = nil
+		timerC = nil
+	}
+	defer stopTimer()
+	armTimer := func(now time.Time) {
+		stopTimer()
+		var soonest time.Time
+		for city := range pending {
+			dl, ok := deadlines[city]
+			if !ok {
+				dl = notStartedDeadline
+			}
+			if soonest.IsZero() || dl.Before(soonest) {
+				soonest = dl
+			}
+		}
+		if soonest.IsZero() {
+			return
+		}
+		wait := soonest.Sub(now)
+		if wait < 0 {
+			wait = 0
+		}
+		timer = time.NewTimer(wait)
+		timerC = timer.C
+	}
 
 	results := make([]watchAttachResult, 0, len(providers))
-	for len(pending) > 0 {
-		select {
-		case result := <-ch:
-			if _, ok := pending[result.city]; !ok {
-				continue
+	take := func(result watchAttachResult) {
+		if _, ok := pending[result.city]; !ok {
+			if result.watcher != nil {
+				_ = result.watcher.Close()
 			}
-			delete(pending, result.city)
-			results = append(results, result)
-		case <-timer.C:
-			return results, sortedProviderNames(pending)
+			return
+		}
+		delete(pending, result.city)
+		delete(deadlines, result.city)
+		results = append(results, result)
+	}
+	// A call that already finished must not lose to the deadline select.
+	drainReady := func() {
+		for len(pending) > 0 {
+			select {
+			case result := <-ch:
+				take(result)
+			default:
+				return
+			}
 		}
 	}
-	return results, nil
+
+	armTimer(time.Now())
+	for len(pending) > 0 {
+		select {
+		case city := <-started:
+			if _, ok := pending[city]; !ok {
+				continue
+			}
+			deadlines[city] = time.Now().Add(timeout)
+			armTimer(time.Now())
+		case result := <-ch:
+			take(result)
+			armTimer(time.Now())
+		case <-timerC:
+			drainReady()
+			now := time.Now()
+			for city := range pending {
+				dl, ok := deadlines[city]
+				if !ok {
+					dl = notStartedDeadline
+				}
+				if now.Before(dl) {
+					continue
+				}
+				delete(pending, city)
+				delete(deadlines, city)
+				timedOut[city] = struct{}{}
+			}
+			armTimer(time.Now())
+		case <-ctx.Done():
+			return results, sortedProviderNames(timedOut)
+		}
+	}
+	return results, sortedProviderNames(timedOut)
 }
 
 // MuxWatcher yields tagged events from multiple cities. It implements
@@ -577,7 +682,7 @@ func (w *MuxWatcher) Sync(providers map[string]Provider, start func(city string,
 	defer w.release()
 
 	var errs []error
-	results, timedOut := collectWatchAttachResults(w.ctx, missing, start, w.timeout)
+	results, timedOut := collectWatchAttachResults(w.ctx, missing, start, w.timeout, nil)
 	for _, city := range timedOut {
 		errs = append(errs, fmt.Errorf("%s: events watcher attach timed out after %s", city, w.timeout))
 	}

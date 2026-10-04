@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# with-short-tmpdir — run a command with sun_path-safe TMPDIR and GOTMPDIR.
+#
+# Makefile TEST_ENV is `env -i` with TMPDIR= and GOTMPDIR= already expanded
+# by the recipe shell. This wrapper rewrites those two arguments when they
+# exceed GC_TEST_TMPDIR_MAX and removes the replacement directory after the
+# command exits. Every other argument, including GOCACHE=, is passed through.
+set -euo pipefail
+
+here="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/short-test-tmpdir.sh
+source "$here/lib/short-test-tmpdir.sh"
+
+short=""
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    TMPDIR=*|GOTMPDIR=*)
+      name="${arg%%=*}"
+      value="${arg#*=}"
+      if gc_test_tmpdir_too_long "$value"; then
+        if [[ -z "$short" ]]; then
+          short="$(gc_make_short_test_tmpdir)"
+        fi
+        arg="${name}=${short}"
+      fi
+      ;;
+  esac
+  args+=("$arg")
+done
+
+set +e
+"${args[@]}"
+rc=$?
+set -e
+if [[ -n "$short" ]]; then
+  rm -rf "$short"
+fi
+exit "$rc"

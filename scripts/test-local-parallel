@@ -64,6 +64,8 @@ fi
 # outer drain window is deliberately wider than theirs.
 # shellcheck source=lib/harness-reap.sh
 source "$repo_root/scripts/lib/harness-reap.sh"
+# shellcheck source=lib/short-test-tmpdir.sh
+source "$repo_root/scripts/lib/short-test-tmpdir.sh"
 gc_local_parallel_drain_ticks=100
 gc_local_parallel_on_signal() {
   local sig="$1"
@@ -74,7 +76,7 @@ gc_local_parallel_on_signal() {
 # Ignore SIGPIPE during cleanup: a leftover writer hitting a closed stdout
 # must not convert a successful suite (already printed "All fast jobs passed")
 # into exit 141, which git then reports as a false-clean hook death (ga-34a).
-trap 'trap "" PIPE; gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
+trap 'trap "" PIPE; gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"; gc_cleanup_short_test_tmpdir; push_gate_release_slot "$gate_fd"' EXIT
 trap 'gc_local_parallel_on_signal INT' INT
 trap 'gc_local_parallel_on_signal TERM' TERM
 trap 'gc_local_parallel_on_signal HUP' HUP
@@ -266,6 +268,12 @@ export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+# Log dir stays on the caller's TMPDIR (created above) so a failure log
+# survives cleanup of the short test root. Gitconfig was resolved at startup
+# under that same caller TMPDIR. Only the temp roots inherited by `go test`
+# are shortened; TEST_LOCAL_GOCACHE is left alone.
+gc_pin_short_test_tmpdir
+export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 
 # Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
 # yields to interactive work and does not livelock constrained hosts during the

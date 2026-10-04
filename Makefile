@@ -315,6 +315,13 @@ LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
 LINT_GOMEMLIMIT ?= 6GiB
+# Scope the golangci-lint result cache to this worktree. A shared
+# ~/.cache/golangci-lint replays diagnostics recorded in other checkouts of
+# this module — deleted /var/tmp trees and sibling worktrees — and make lint-*
+# then fails on issues that are not in this tree (ga-wcw5). CI and any caller
+# that sets GOLANGCI_LINT_CACHE keeps its own directory.
+LINT_CACHE_SCOPE := $(shell printf '%s' '$(CURDIR)' | (sha256sum 2>/dev/null || shasum -a 256) | awk '{print substr($$1,1,16)}')
+export GOLANGCI_LINT_CACHE ?= $(HOME)/.cache/golangci-lint/by-tree/$(LINT_CACHE_SCOPE)
 LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select

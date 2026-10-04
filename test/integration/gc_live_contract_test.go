@@ -836,6 +836,10 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	if transcript.ID != id || transcript.Format != "raw" {
 		t.Fatalf("raw transcript = %+v, want id=%q format=raw", transcript, id)
 	}
+	// Wake returns 200 and starts the runtime in a background goroutine, so
+	// the bead can still be asleep when this GET lands. A stuck-agent has no
+	// transcript, and the raw stream then 404s with "no live output" (ga-i7rc).
+	waitForLiveContractSessionStreamable(t, baseURL, v, sessionPath, 30*time.Second)
 	assertLiveContractStreamOpens(t, baseURL, sessionPath+"/stream?format=raw")
 
 	agents := liveContractJSON[struct {
@@ -1104,6 +1108,42 @@ func liveContractHTTPRequest(baseURL, method, path string, body any) (*http.Requ
 		req.Header.Set("X-GC-Request", "live-contract")
 	}
 	return req, nil
+}
+
+// liveContractSessionStateHasLiveOutput reports whether a session bead state
+// projects to a worker phase that resolveSessionStream treats as live output.
+// It mirrors SessionHandle.State plus workerPhaseHasLiveOutput: start-pending
+// and creating are starting, active and awake are ready, draining is stopping,
+// and quarantined is blocked. Asleep, suspended, drained, and archived are not.
+func liveContractSessionStateHasLiveOutput(state string) bool {
+	switch state {
+	case "start-pending", "creating", "active", "awake", "draining", "quarantined":
+		return true
+	default:
+		return false
+	}
+}
+
+// waitForLiveContractSessionStreamable polls GET session until the projected
+// state can open a raw stream that has no transcript yet.
+func waitForLiveContractSessionStreamable(t *testing.T, baseURL string, v openapivalidator.Validator, sessionPath string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		detail := liveContractJSON[struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
+		last = detail.State
+		if liveContractSessionStateHasLiveOutput(last) {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("GET %s state = %q after %s; raw session stream needs a live phase (start-pending, creating, active, awake, draining, quarantined)", sessionPath, last, timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {

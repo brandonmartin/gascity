@@ -41,6 +41,21 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     continue
   fi
   any_non_deletion=1
+  # Tag whose target commit is already on this remote (ga-ao7z).
+  # `git diff` peels tag objects, so an annotated tag move looks like a
+  # Go change even when that commit already passed this suite on its way
+  # to the remote. Do not set go_changed and do not count the tag as a
+  # non-polecat ref. A peel failure, or a commit absent from
+  # refs/remotes/$1/, falls through and fail-closes into today's suite.
+  case "$_remote_ref" in
+    refs/tags/*)
+      if peeled=$(git rev-parse "${local_sha}^{commit}" 2>/dev/null); then
+        if [ -n "$(git for-each-ref --contains "$peeled" "refs/remotes/${1}/")" ]; then
+          continue
+        fi
+      fi
+      ;;
+  esac
   # Classify the source ref. `git push origin HEAD:refs/heads/polecat/<id>`
   # feeds local_ref=HEAD, so resolve HEAD against the current branch name.
   case "$_local_ref" in

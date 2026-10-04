@@ -17,11 +17,16 @@ import (
 const serializationConflictErr = "sql commit (regular): Error 1213 (40001): serialization failure: " +
 	"this transaction conflicts with a committed transaction from another client, try restarting transaction."
 
-// conflictThenOKStorage fails the first failures transactions with a
-// serialization conflict, then succeeds, counting every attempt.
+// conflictThenOKStorage fails the first failures checked metadata writes with a
+// serialization conflict, then succeeds, counting every attempt. A metadata
+// Update compare-and-swaps through UpdateIssueChecked rather than an unchecked
+// transaction, and that swap is what a serialization race refuses.
 func conflictThenOKStorage(failures int32, attempts *int32) *nativeDoltStorageSpy {
 	return &nativeDoltStorageSpy{
-		runInTransaction: func(context.Context, string, func(beadslib.Transaction) error) error {
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{ID: "gc-1", RowVersion: 1}, nil
+		},
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			if atomic.AddInt32(attempts, 1) <= failures {
 				return errors.New(serializationConflictErr)
 			}
@@ -38,7 +43,7 @@ func TestNativeDoltStoreUpdateRetriesSerializationConflict(t *testing.T) {
 		t.Fatalf("Update after one serialization conflict: got %v, want nil", err)
 	}
 	if got := atomic.LoadInt32(&attempts); got != 2 {
-		t.Fatalf("transaction attempts = %d, want 2 (one conflict, one retry)", got)
+		t.Fatalf("checked writes = %d, want 2 (one conflict, one retry)", got)
 	}
 }
 
@@ -54,7 +59,7 @@ func TestNativeDoltStoreUpdateStopsAtAttemptLimit(t *testing.T) {
 		t.Fatalf("returned error lost its serialization-conflict identity: %v", err)
 	}
 	if got := atomic.LoadInt32(&attempts); got != int32(nativeWriteAttempts) {
-		t.Fatalf("transaction attempts = %d, want %d", got, nativeWriteAttempts)
+		t.Fatalf("checked writes = %d, want %d", got, nativeWriteAttempts)
 	}
 }
 
@@ -63,7 +68,10 @@ func TestNativeDoltStoreUpdateDoesNotRetryNonConflictErrors(t *testing.T) {
 	// A constraint violation is a genuine fault: retrying it only multiplies
 	// the write load and hides the real error behind a slower failure.
 	store := newNativeDoltStoreForTest(&nativeDoltStorageSpy{
-		runInTransaction: func(context.Context, string, func(beadslib.Transaction) error) error {
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{ID: "gc-1", RowVersion: 1}, nil
+		},
+		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
 			atomic.AddInt32(&attempts, 1)
 			return errors.New("Error 1062 (23000): duplicate entry")
 		},
@@ -74,6 +82,6 @@ func TestNativeDoltStoreUpdateDoesNotRetryNonConflictErrors(t *testing.T) {
 		t.Fatalf("Update error = %v, want the duplicate-entry error", err)
 	}
 	if got := atomic.LoadInt32(&attempts); got != 1 {
-		t.Fatalf("transaction attempts = %d, want 1 (non-conflict errors must not retry)", got)
+		t.Fatalf("checked writes = %d, want 1 (non-conflict errors must not retry)", got)
 	}
 }

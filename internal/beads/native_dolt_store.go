@@ -1445,6 +1445,38 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	defer release()
+	// A metadata patch rewrites the whole JSON document. Merging that document
+	// from a stale read and writing it back without a version check drops keys
+	// a concurrent writer committed in between — a step bead's gc.outcome=pass
+	// was lost that way, and scope-check then failed the body. Session-affinity
+	// clears and controller closes send their patch through Update, so this
+	// path compare-and-swaps the same way SetMetadataBatch does.
+	//
+	// A patch that also adds or removes labels, or reparents, stays on the
+	// single transaction below so a later failure rolls the field write back
+	// with it. Store.Tx always uses that transaction too: the caller's other
+	// writes have to commit with this one, and the transaction has no
+	// checked-update verb. Those shapes do not retry a version mismatch.
+	if updateMetadataIsChecked(opts) {
+		var lastRead int64
+		err = retryOnNativeDoltMergeRace(func() error {
+			ctx, cancel := nativeDoltOperationContext(context.TODO())
+			defer cancel()
+			return s.updateCheckedMetadataOnce(ctx, storage, id, opts, &lastRead)
+		})
+		if errors.Is(err, beadslib.ErrVersionMismatch) {
+			err = fmt.Errorf("%w: %w", &CASRetriesExhaustedError{
+				ID:           id,
+				Key:          metadataBatchKeyList(opts.Metadata),
+				Attempts:     nativeWriteAttempts,
+				LastRevision: lastRead,
+			}, err)
+		}
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		return nil
+	}
 	// Retry a lost serialization race rather than surfacing it to the caller:
 	// a concurrent writer to the same bead store is normal (the supervisor,
 	// the reconciler and an operator request all write during city startup),
@@ -1461,6 +1493,35 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return nativeStoreError(id, err)
 	}
 	return nil
+}
+
+// updateMetadataIsChecked reports whether Update can compare-and-swap its
+// metadata merge. A patch that also adds or removes labels, or reparents,
+// shares one transaction with those operations so a later failure rolls the
+// field write back; that transaction has no checked-update verb.
+func updateMetadataIsChecked(opts UpdateOpts) bool {
+	return len(opts.Metadata) > 0 && opts.ParentID == nil && len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0
+}
+
+// updateCheckedMetadataOnce reads the bead, merges opts.Metadata into that
+// row, and writes the merged document back only while the row still carries
+// the version the read returned. A retry must call this whole operation again.
+//
+// It does not run afterMetadataMergeRead. That hook is how the SetMetadataBatch
+// proofs inject a competing Update into the merge window; firing it here would
+// recurse.
+func (s *NativeDoltStore) updateCheckedMetadataOnce(ctx context.Context, storage beadslib.Storage, id string, opts UpdateOpts, readVersion *int64) error {
+	updates, version, err := s.nativeMergedUpdates(ctx, storage, id, opts)
+	if err != nil {
+		return err
+	}
+	*readVersion = version
+	if len(updates) == 0 {
+		return nil
+	}
+	return storage.UpdateIssueChecked(ctx, id, updates, s.actor, beadslib.UpdateIssueOptions{
+		ExpectedVersion: &version,
+	})
 }
 
 // applyUpdateInTx applies an Update against an open beadslib transaction. It is
@@ -2632,6 +2693,15 @@ type nativeIssueGetter interface {
 }
 
 func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssueGetter, id string, opts UpdateOpts) (map[string]interface{}, error) {
+	updates, _, err := s.nativeMergedUpdates(ctx, storage, id, opts)
+	return updates, err
+}
+
+// nativeMergedUpdates builds the column map for an update. When opts carries
+// metadata, the returned version is the row version of the read the merge
+// used; a checked write must expect that version so a commit that landed
+// after the read refuses the swap instead of replacing the document.
+func (s *NativeDoltStore) nativeMergedUpdates(ctx context.Context, storage nativeIssueGetter, id string, opts UpdateOpts) (map[string]interface{}, int64, error) {
 	updates := make(map[string]interface{})
 	if opts.Title != nil {
 		updates["title"] = *opts.Title
@@ -2651,21 +2721,23 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 	if opts.Assignee != nil {
 		updates["assignee"] = *opts.Assignee
 	}
+	var readVersion int64
 	if len(opts.Metadata) > 0 {
 		issue, err := storage.GetIssue(ctx, id)
 		if err != nil {
-			return nil, nativeStoreError(id, err)
+			return nil, 0, nativeStoreError(id, err)
 		}
 		if issue == nil {
-			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			return nil, 0, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
 		raw, err := metadataRawWithOverrides(issue.Metadata, opts.Metadata)
 		if err != nil {
-			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+			return nil, 0, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
 		}
 		updates["metadata"] = raw
+		readVersion = issue.RowVersion
 	}
-	return updates, nil
+	return updates, readVersion, nil
 }
 
 // validateUpdateParent resolves a reparent target, for the ids this store could

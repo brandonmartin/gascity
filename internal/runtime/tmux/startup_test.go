@@ -1640,16 +1640,69 @@ func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *tes
 	})
 }
 
+// armedDeadline stays open until arm, then reports context.DeadlineExceeded.
+// Startup tests use it to expire the context at one phase. A timeout created
+// before doStartSession can fire during an earlier phase under load, and a
+// fixed sleep can return before that timer fires.
+type armedDeadline struct {
+	context.Context
+	mu    sync.Mutex
+	armed bool
+	done  chan struct{}
+}
+
+func newArmedDeadline() *armedDeadline {
+	return &armedDeadline{
+		Context: context.Background(),
+		done:    make(chan struct{}),
+	}
+}
+
+func (a *armedDeadline) arm() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.armed {
+		return
+	}
+	a.armed = true
+	close(a.done)
+}
+
+func (a *armedDeadline) Deadline() (time.Time, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.armed {
+		return time.Time{}, false
+	}
+	return time.Unix(0, 0), true
+}
+
+func (a *armedDeadline) Done() <-chan struct{} {
+	return a.done
+}
+
+func (a *armedDeadline) Err() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.armed {
+		return nil
+	}
+	return context.DeadlineExceeded
+}
+
 func TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
+	// Expire only inside the post-ready dialog pass, after waitForReady has
+	// already returned. Earlier ctx.Err checks must still see a live context
+	// so the second acceptStartupDialogs runs and the deadline is ignored
+	// because the session is alive.
+	ctx := newArmedDeadline()
 	postReadyCalls := 0
 	ops := &fakeStartOps{
 		hasSessionResult: true,
 		acceptStartupDialogsHook: func() {
 			postReadyCalls++
 			if postReadyCalls == 2 {
-				time.Sleep(5 * time.Millisecond)
+				ctx.arm()
 			}
 		},
 	}

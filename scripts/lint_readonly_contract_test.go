@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -110,7 +109,7 @@ func TestLintCacheIsScopedToTheWorktreeUnlessOverridden(t *testing.T) {
 
 func printLintCache(t *testing.T, root, home, preset string) string {
 	t.Helper()
-	cmd := exec.Command("make",
+	cmd := makeCommand(
 		"--no-print-directory",
 		"--eval", ".PHONY: print-lint-cache",
 		"--eval", "print-lint-cache:\n\t@printf '%s' \"$(GOLANGCI_LINT_CACHE)\"",

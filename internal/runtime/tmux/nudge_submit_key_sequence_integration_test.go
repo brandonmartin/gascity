@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -92,5 +93,80 @@ func TestNudgeSessionUsesDeclaredSequenceForProviderFamily(t *testing.T) {
 	}
 	if !strings.Contains(out, "^[") {
 		t.Fatalf("CapturePaneAll missing Escape for testfam's declared [Escape, Enter] submit sequence:\n%s", out)
+	}
+}
+
+// TestCodexBusyNudgeDoesNotSendEscape proves a running codex turn is queued
+// with Enter only. cat -v renders Escape as "^[". The fixture prints the
+// busy footer codex shows, then echoes keys, so an Escape-then-Enter submit
+// would leave that mark.
+func TestCodexBusyNudgeDoesNotSendEscape(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	cfg.NudgeReadyTimeout = 3 * time.Second
+	tm := NewTmuxWithConfig(cfg)
+	sessionName := fmt.Sprintf("gc-codex-busy-%d", time.Now().UnixNano()%100000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), `sh -c 'printf "esc to interrupt\n"; exec cat -v'`, map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	waitForPaneText(t, tm, sessionName, "esc to interrupt")
+
+	if err := tm.NudgeSession(sessionName, "queue-this-nudge"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	waitForPaneText(t, tm, sessionName, "queue-this-nudge")
+
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if strings.Contains(out, "^[") {
+		t.Fatalf("busy codex nudge sent Escape (that cancels the turn):\n%s", out)
+	}
+}
+
+// TestCodexIdleNudgeSendsEscapeThenEnter proves the idle path still sends the
+// #4706 sequence. The fixture has no busy footer, so the nudge must not take
+// the Enter-only queue path.
+func TestCodexIdleNudgeSendsEscapeThenEnter(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	cfg.NudgeReadyTimeout = 3 * time.Second
+	tm := NewTmuxWithConfig(cfg)
+	sessionName := fmt.Sprintf("gc-codex-idle-%d", time.Now().UnixNano()%100000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+		"GC_PROVIDER": "codex",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	err := tm.NudgeSession(sessionName, "idle-codex-nudge")
+	if err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	waitForPaneText(t, tm, sessionName, "idle-codex-nudge")
+
+	out, capErr := tm.CapturePaneAll(sessionName)
+	if capErr != nil {
+		t.Fatalf("CapturePaneAll: %v", capErr)
+	}
+	if !strings.Contains(out, "^[") {
+		t.Fatalf("idle codex nudge did not send Escape (paste-swallow sequence missing):\n%s", out)
 	}
 }

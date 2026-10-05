@@ -12,9 +12,41 @@ staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || t
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/dashboardspa/web/shared/src/' 'internal/api/dashboardspa/web/frontend/src/' 'internal/api/dashboardspa/web/frontend/index.html' 'internal/api/dashboardspa/web/frontend/public/' 'internal/api/dashboardspa/web/package.json' 'internal/api/dashboardspa/web/shared/package.json' 'internal/api/dashboardspa/web/frontend/package.json' 'internal/api/dashboardspa/web/frontend/vite.config.ts' 'internal/api/dashboardspa/web/frontend/tsconfig.json' 'internal/api/dashboardspa/web/shared/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
 staged_spec=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
+# Every path that can move the resource census: all Go source (sibling source
+# supplies declaration context), the ledger manifest, the TESTING.md ledger
+# block, and the census package. No --diff-filter and --no-renames on purpose:
+# deleting a call site (or renaming a Go file away) leaves a stale baseline
+# just as surely as adding one grows the census.
+staged_census=$(git diff --cached --name-only --no-renames -- '*.go' 'test/test-resources.toml' 'TESTING.md' 'internal/testpolicy/resourcecensus/' || true)
 
-if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ] && [ -z "$staged_spec" ]; then
+if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ] && [ -z "$staged_spec" ] && [ -z "$staged_census" ]; then
   exit 0
+fi
+
+# Resource census ratchet: a two-way debt ratchet, so adding a time.Sleep or
+# subprocess call site grows the census and removing one leaves a stale
+# baseline; both fail this test at the merge gate (and in the push-time suite
+# where that runs; polecat refs skip it). Run it here (~6s) so the drift
+# surfaces before the commit exists. It runs ahead of the codegen below so a
+# failure short-circuits the expensive steps.
+#
+# The census lists files from the index (`git ls-files`, which honors the
+# temporary index git hands the hook for `commit -a` and `commit <paths>`) but
+# reads their contents from the working tree. Under partial staging it can
+# therefore differ from what the commit will contain: unstaged edits to a
+# tracked file are counted, and a new file counts only once it is staged.
+if [ -n "$staged_census" ]; then
+  if ! census_output=$(go test ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation$' -count=1 2>&1); then
+    printf '%s\n' "$census_output" >&2
+    echo "error: the resource census drifted from its checked baseline (see the drift lines above)." >&2
+    echo "  grew:  drop the new call site (wait on the condition instead of sleeping, fake the dependency instead of spawning it)," >&2
+    echo "         or offset it by removing one." >&2
+    echo "  stale: lower the matching baseline in internal/testpolicy/resourcecensus/census.go and test/test-resources.toml," >&2
+    echo "         then regenerate the TESTING.md ledger block:" >&2
+    echo "           go test ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation\$' -update" >&2
+    echo "  Never raise a baseline to make room." >&2
+    exit 1
+  fi
 fi
 
 if [ -n "$staged_go_files" ]; then

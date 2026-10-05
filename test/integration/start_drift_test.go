@@ -44,6 +44,9 @@ const (
 	driftReadyTimeout         = 15 * time.Second
 	driftDirectRestartBudget  = 10 * time.Second
 	driftSystemdRestartBudget = 15 * time.Second
+	// driftRestartLoopWindow mirrors cmd/gc's driftRestartLoopWindow,
+	// the span in which at most three auto-restarts are allowed.
+	driftRestartLoopWindow = 60 * time.Second
 )
 
 // TestStartDrift_DirectLaunch_RestartsToNewBuildID exercises the direct
@@ -345,12 +348,31 @@ func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 // row must result in the fourth being refused with the loop-detected
 // error. Persistent tracking of restart attempts (driftRestartHistoryFile)
 // keeps the guard honest across `gc start` invocations.
+//
+// The guard window is wall-clock, so everything between cycle 1's
+// recorded attempt and cycle 4's check counts against it. Both binaries
+// are therefore built before the first cycle and swapped into place by
+// rename; a `go build` per cycle consumed roughly half the window on an
+// idle host and pushed cycle 4 past it on a loaded gate runner, where the
+// guard then correctly allowed the restart (ga-dwlu).
 func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
+	// setupDriftDirectScenario leaves the new-commit build at binaryPath;
+	// keep a copy of it and build the old commit once, both outside the
+	// guard window.
+	binaryDir := filepath.Dir(tc.binaryPath)
+	builds := map[string]string{
+		driftHappyNewCommit: filepath.Join(binaryDir, "gc-drift-"+driftHappyNewCommit),
+		driftHappyOldCommit: filepath.Join(binaryDir, "gc-drift-"+driftHappyOldCommit),
+	}
+	copyExecutable(t, tc.binaryPath, builds[driftHappyNewCommit])
+	buildGCBinaryWithCommit(t, builds[driftHappyOldCommit], driftHappyOldCommit)
+
 	// Drive four drift cycles back-to-back. Between cycles, alternate
 	// the on-disk commit so each invocation actually detects drift.
+	var firstCycleStart time.Time
 	for cycle := 1; cycle <= 4; cycle++ {
 		commit := driftHappyNewCommit
 		expectedPrev := driftHappyOldCommit
@@ -358,10 +380,13 @@ func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 			commit = driftHappyOldCommit
 			expectedPrev = driftHappyNewCommit
 		}
-		// Build the binary that gc start will run as (mimicking
-		// `go install` overwriting the on-disk gc).
-		buildGCBinaryWithCommit(t, tc.newBinary, commit)
+		// Mimic `go install` replacing the on-disk gc with the build
+		// gc start will run as.
+		copyExecutable(t, builds[commit], tc.newBinary)
 
+		if cycle == 1 {
+			firstCycleStart = time.Now()
+		}
 		out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir,
 			"start", tc.cityDir)
 		if cycle <= 3 {
@@ -379,7 +404,14 @@ func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 			}
 			continue
 		}
-		// Fourth cycle: must be refused.
+		// Fourth cycle: must be refused. Cycle 1's attempt was recorded
+		// no earlier than firstCycleStart and cycle 4's check ran no later
+		// than now, so a refusal is guaranteed only when that span fits
+		// inside the window. Past it, the guard may correctly have let
+		// cycle 1 age out, and the expectation cannot be asserted.
+		if span := time.Since(firstCycleStart); exitCode == 0 && span >= driftRestartLoopWindow {
+			t.Skipf("cycles 1-4 spanned %s, beyond the %s loop-guard window; host too slow to assert the refusal", span.Round(time.Millisecond), driftRestartLoopWindow)
+		}
 		if exitCode != 1 {
 			t.Errorf("cycle 4: exit = %d, want 1 (loop guard should refuse)\noutput:\n%s",
 				exitCode, out)
@@ -699,6 +731,13 @@ func installDriftBinary(t *testing.T, src, dst string) {
 		_ = os.Remove(tmp.Name())
 		t.Fatalf("installing gc at %s: %v", dst, err)
 	}
+}
+
+// copyExecutable is the loop-guard swap: install src over dst by rename so a
+// supervisor still executing dst keeps its inode (ga-dwlu).
+func copyExecutable(t *testing.T, src, dst string) {
+	t.Helper()
+	installDriftBinary(t, src, dst)
 }
 
 // launchDirectSupervisor spawns `binary supervisor run` in the

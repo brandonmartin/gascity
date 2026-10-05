@@ -508,6 +508,15 @@ Run the focused check with:
 go test -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation$'
 ```
 
+`.githooks/pre-commit` runs this same check (about 6 seconds) whenever the
+staged set touches a Go file, `test/test-resources.toml`, `TESTING.md`, or
+`internal/testpolicy/resourcecensus/`, so drift fails before the commit exists
+instead of at the merge gate. The census lists files from the git index but
+reads their contents from the working tree, so under partial staging
+(`git add -p`, `git commit <paths>`) the hook can disagree with what the commit
+will contain: unstaged edits to tracked files are counted, and a new file counts
+only once it is staged.
+
 The historical regex totals remain visible as point-in-time audit evidence.
 They can be higher because comments and strings matched, or because the needle
 counted testing-receiver helpers such as `t.Setenv` and `t.Chdir` that the AST

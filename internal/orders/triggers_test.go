@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
@@ -521,13 +523,28 @@ func TestDeadlineSignalCancelsDerivedTimeout(t *testing.T) {
 	}
 }
 
-// waitForHeartbeatBeforeDeadline waits until path is non-empty. It does not
-// use processgrouptest.WaitForFileSize: that helper's failure text is the
-// load flake this test is fixing, and its 2s budget is shorter than a
-// stalled scheduler on a full gate.
+// waitForHeartbeatBeforeDeadline waits until path is non-empty. The wake is
+// an fsnotify event on the parent directory; the budget is only the give-up
+// deadline. It does not use processgrouptest.WaitForFileSize: that helper's
+// failure text is the load flake this test is fixing, and its 2s budget is
+// shorter than a stalled scheduler on a full gate.
 func waitForHeartbeatBeforeDeadline(t *testing.T, path string, budget time.Duration) int64 {
 	t.Helper()
-	deadline := time.Now().Add(budget)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("watch heartbeat directory for %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+	dir := filepath.Dir(path)
+	if err := watcher.Add(dir); err != nil {
+		t.Fatalf("watch heartbeat directory %s: %v", dir, err)
+	}
+
+	// Stat before blocking, then again after every event. A write that lands
+	// between Add and the first receive, or an event whose path does not
+	// match byte-for-byte, still becomes visible on the next stat.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 	for {
 		info, err := os.Stat(path)
 		if err == nil && info.Size() > 0 {
@@ -536,10 +553,19 @@ func waitForHeartbeatBeforeDeadline(t *testing.T, path string, budget time.Durat
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("stat heartbeat file %s: %v", path, err)
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ctx.Done():
 			t.Fatalf("heartbeat file %s was still empty after %s; the deadline was not armed", path, budget)
+		case _, ok := <-watcher.Events:
+			if !ok {
+				t.Fatalf("heartbeat watch for %s closed before the file grew", path)
+			}
+		case watchErr, ok := <-watcher.Errors:
+			if !ok {
+				t.Fatalf("heartbeat watch for %s closed before the file grew", path)
+			}
+			t.Fatalf("watch heartbeat file %s: %v", path, watchErr)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 

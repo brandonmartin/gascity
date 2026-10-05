@@ -1425,7 +1425,7 @@ func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 			// Peer setup under the barrier can stretch under make test -p=N CPU
 			// contention; keep the quiescence budget above GoroutineRaceTimeout.
 			service.deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
-			call := startDisableAndPurge(t, service)
+			call := startDisableAndPurgeAtUploaderBarrier(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1750,7 +1750,7 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 			}
 			deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
-			call := startDisableAndPurge(t, service)
+			call := startDisableAndPurgeAtUploaderBarrier(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1827,7 +1827,7 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		return nil
 	}
 	service := mustOpenTestService(t, deps)
-	call := startDisableAndPurge(t, service)
+	call := startDisableAndPurgeAtUploaderBarrier(t, service)
 	owner := waitForMetricsState(t, home, func(state persistedState) bool {
 		return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 	})
@@ -2282,6 +2282,22 @@ func startDisableAndPurge(t *testing.T, service *Service) <-chan purgeCallResult
 		result <- purgeCallResult{result: purge, err: err}
 	}()
 	return result
+}
+
+// startDisableAndPurgeAtUploaderBarrier starts DisableAndPurge and returns once
+// its durable disable transition has committed and released the state lock,
+// i.e. when the call reaches the uploader barrier. Tests that plant a peer
+// state record without taking the state lock must wait for this point: an
+// earlier write lands inside persistStateMutation's rename→read-back window,
+// which the service correctly reports as ErrStateChangedConcurrently. A real
+// peer cannot write there because it holds the state lock.
+func startDisableAndPurgeAtUploaderBarrier(t *testing.T, service *Service) <-chan purgeCallResult {
+	t.Helper()
+	attempts := make(chan struct{}, 1)
+	service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
+	call := startDisableAndPurge(t, service)
+	receiveUploaderAttempt(t, attempts)
+	return call
 }
 
 // waitForTestArm blocks until armed is closed, or until hangBudget, so a

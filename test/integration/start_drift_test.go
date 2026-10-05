@@ -42,6 +42,9 @@ const (
 	driftReadyTimeout         = 15 * time.Second
 	driftDirectRestartBudget  = 10 * time.Second
 	driftSystemdRestartBudget = 15 * time.Second
+	// driftRestartLoopWindow mirrors cmd/gc's driftRestartLoopWindow,
+	// the span in which at most three auto-restarts are allowed.
+	driftRestartLoopWindow = 60 * time.Second
 )
 
 // TestStartDrift_DirectLaunch_RestartsToNewBuildID exercises the direct
@@ -333,12 +336,31 @@ func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 // row must result in the fourth being refused with the loop-detected
 // error. Persistent tracking of restart attempts (driftRestartHistoryFile)
 // keeps the guard honest across `gc start` invocations.
+//
+// The guard window is wall-clock, so everything between cycle 1's
+// recorded attempt and cycle 4's check counts against it. Both binaries
+// are therefore built before the first cycle and swapped into place by
+// rename; a `go build` per cycle consumed roughly half the window on an
+// idle host and pushed cycle 4 past it on a loaded gate runner, where the
+// guard then correctly allowed the restart (ga-dwlu).
 func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 	requireLinuxProcExe(t)
 	tc := setupDriftDirectScenario(t)
 
+	// setupDriftDirectScenario leaves the new-commit build at binaryPath;
+	// keep a copy of it and build the old commit once, both outside the
+	// guard window.
+	binaryDir := filepath.Dir(tc.binaryPath)
+	builds := map[string]string{
+		driftHappyNewCommit: filepath.Join(binaryDir, "gc-drift-"+driftHappyNewCommit),
+		driftHappyOldCommit: filepath.Join(binaryDir, "gc-drift-"+driftHappyOldCommit),
+	}
+	copyExecutable(t, tc.binaryPath, builds[driftHappyNewCommit])
+	buildGCBinaryWithCommit(t, builds[driftHappyOldCommit], driftHappyOldCommit)
+
 	// Drive four drift cycles back-to-back. Between cycles, alternate
 	// the on-disk commit so each invocation actually detects drift.
+	var firstCycleStart time.Time
 	for cycle := 1; cycle <= 4; cycle++ {
 		commit := driftHappyNewCommit
 		expectedPrev := driftHappyOldCommit
@@ -346,10 +368,13 @@ func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 			commit = driftHappyOldCommit
 			expectedPrev = driftHappyNewCommit
 		}
-		// Build the binary that gc start will run as (mimicking
-		// `go install` overwriting the on-disk gc).
-		buildGCBinaryWithCommit(t, tc.newBinary, commit)
+		// Mimic `go install` replacing the on-disk gc with the build
+		// gc start will run as.
+		copyExecutable(t, builds[commit], tc.newBinary)
 
+		if cycle == 1 {
+			firstCycleStart = time.Now()
+		}
 		out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir,
 			"start", tc.cityDir)
 		if cycle <= 3 {
@@ -367,7 +392,14 @@ func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 			}
 			continue
 		}
-		// Fourth cycle: must be refused.
+		// Fourth cycle: must be refused. Cycle 1's attempt was recorded
+		// no earlier than firstCycleStart and cycle 4's check ran no later
+		// than now, so a refusal is guaranteed only when that span fits
+		// inside the window. Past it, the guard may correctly have let
+		// cycle 1 age out, and the expectation cannot be asserted.
+		if span := time.Since(firstCycleStart); exitCode == 0 && span >= driftRestartLoopWindow {
+			t.Skipf("cycles 1-4 spanned %s, beyond the %s loop-guard window; host too slow to assert the refusal", span.Round(time.Millisecond), driftRestartLoopWindow)
+		}
 		if exitCode != 1 {
 			t.Errorf("cycle 4: exit = %d, want 1 (loop guard should refuse)\noutput:\n%s",
 				exitCode, out)
@@ -625,6 +657,27 @@ func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building gc with commit=%s: %v\n%s", commitID, err, string(out))
+	}
+}
+
+// copyExecutable installs a copy of src at dst by writing a sibling
+// temp file and renaming it over dst. Renaming rather than rewriting in
+// place leaves a supervisor running from dst on its old inode (writing a
+// running executable fails with ETXTBSY), matching how `go build -o`
+// replaces the binary.
+func copyExecutable(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("reading %s: %v", src, err)
+	}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+		t.Fatalf("writing %s: %v", tmp, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		t.Fatalf("installing %s: %v", dst, err)
 	}
 }
 

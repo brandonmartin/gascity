@@ -551,6 +551,7 @@ type contractEventList struct {
 }
 
 type contractEvent struct {
+	Seq     uint64          `json:"seq"`
 	Type    string          `json:"type"`
 	Subject string          `json:"subject"`
 	City    string          `json:"city"`
@@ -799,6 +800,10 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v *apico
 	if suspended.ID != id || suspended.State != "suspended" {
 		t.Fatalf("session after synchronous suspend = %+v, want id=%q state=suspended", suspended, id)
 	}
+	// Wake returns before its background Start commits a live state. Capture
+	// the city event head now so the later stream wait replays that start
+	// instead of matching the session's earlier create.
+	startCursor := liveContractCityEventHead(t, baseURL, v, cityBase+"/events?limit=1")
 
 	wake := liveContractJSON[struct {
 		ID string `json:"id"`
@@ -835,11 +840,11 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v *apico
 	if transcript.ID != id || transcript.Format != "raw" {
 		t.Fatalf("raw transcript = %+v, want id=%q format=raw", transcript, id)
 	}
-	// /wake starts the session in the background and /messages completes
-	// before the session row is confirmed live, so the raw stream (404 "has
-	// no live output" for a stopped session with no transcript, by contract)
-	// is asserted once the session reads live, not on the next request.
-	waitLiveContractSessionLive(t, baseURL, v, sessionPath, 30*time.Second)
+	// Wake returns 200 and starts the runtime in a background goroutine. Until
+	// that Start commits, the bead is still asleep, a stuck-agent has no
+	// transcript, and the raw stream 404s with "no live output" (ga-i7rc).
+	// worker.operation start is recorded only after that commit.
+	waitForLiveContractWorkerStart(t, baseURL, cityBase+"/events", id, 30*time.Second, startCursor)
 	assertLiveContractStreamOpens(t, baseURL, sessionPath+"/stream?format=raw")
 
 	agents := liveContractJSON[struct {
@@ -1141,6 +1146,113 @@ func liveContractHTTPRequest(baseURL, method, path string, body any) (*http.Requ
 	return req, nil
 }
 
+// liveContractCityEventHead returns the newest city event sequence. The list
+// is seq DESC, so the first item is the head to pass as after_seq.
+func liveContractCityEventHead(t *testing.T, baseURL string, v *apicontract.Spec, path string) string {
+	t.Helper()
+	listed, err := liveContractEventList(baseURL, v, path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	if len(listed.Items) == 0 || listed.Items[0].Seq == 0 {
+		t.Fatalf("GET %s returned no event head to resume from", path)
+	}
+	return strconv.FormatUint(listed.Items[0].Seq, 10)
+}
+
+// waitForLiveContractWorkerStart blocks on the city event stream until the
+// session's background wake Start finishes. That worker.operation is recorded
+// only after the live state commit, which is what the raw stream precheck reads.
+func waitForLiveContractWorkerStart(t *testing.T, baseURL, eventsPath, sessionID string, timeout time.Duration, afterSeq string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	streamPath := eventsPath + "/stream?after_seq=" + url.QueryEscape(afterSeq)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+streamPath, nil)
+	if err != nil {
+		t.Fatalf("build SSE request %s: %v", streamPath, err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("X-GC-Request", "live-contract")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s SSE: %v", streamPath, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		t.Fatalf("GET %s SSE status = %d, want 200; body: %s", streamPath, resp.StatusCode, string(raw))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var data strings.Builder
+	observed := 0
+	var recent []string
+	remember := func(event contractEvent) {
+		observed++
+		desc := event.Type
+		if event.Subject != "" {
+			desc += " subject=" + event.Subject
+		}
+		recent = append(recent, desc)
+		if len(recent) > 8 {
+			recent = recent[1:]
+		}
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "data:"):
+			value := strings.TrimPrefix(line, "data:")
+			value = strings.TrimPrefix(value, " ")
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(value)
+		case line == "":
+			if data.Len() == 0 {
+				continue
+			}
+			var event contractEvent
+			if err := json.Unmarshal([]byte(data.String()), &event); err != nil {
+				t.Fatalf("decode SSE event from %s: %v; data=%s", streamPath, err, data.String())
+			}
+			data.Reset()
+			remember(event)
+			if event.Type != "worker.operation" {
+				continue
+			}
+			var payload struct {
+				Operation string `json:"operation"`
+				Result    string `json:"result"`
+				SessionID string `json:"session_id"`
+				Error     string `json:"error"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode worker.operation payload from %s: %v; payload=%s", streamPath, err, string(event.Payload))
+			}
+			if payload.SessionID != sessionID && event.Subject != sessionID {
+				continue
+			}
+			if payload.Operation != "start" {
+				continue
+			}
+			switch payload.Result {
+			case "succeeded":
+				return
+			case "failed":
+				t.Fatalf("worker.operation start failed for session %s: %s", sessionID, payload.Error)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		t.Fatalf("scan SSE %s: %v", streamPath, err)
+	}
+	t.Fatalf("timed out waiting for worker.operation start succeeded for session %s on %s after_seq=%s after observing %d SSE data frames; recent=%v", sessionID, streamPath, afterSeq, observed, recent)
+}
+
 func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1161,32 +1273,6 @@ func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {
 	}
 	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
 		t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, contentType)
-	}
-}
-
-// waitLiveContractSessionLive polls a session until its state is one whose
-// runtime has live output (active or awake), failing with the states seen.
-// The stream endpoint derives "live" from the same state. A wait that was
-// needed is logged with the state sequence, so a CI run that hit the window
-// records which transition lagged.
-func waitLiveContractSessionLive(t *testing.T, baseURL string, v *apicontract.Spec, sessionPath string, timeout time.Duration) {
-	t.Helper()
-	start := time.Now()
-	var seen []string
-	live := pollUntil(timeout, 200*time.Millisecond, func() bool {
-		detail := liveContractJSON[struct {
-			State string `json:"state"`
-		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
-		if len(seen) == 0 || seen[len(seen)-1] != detail.State {
-			seen = append(seen, detail.State)
-		}
-		return detail.State == "active" || detail.State == "awake"
-	})
-	if !live {
-		t.Fatalf("session %s not live after %s (states %v); its raw stream would answer 404 \"has no live output\"", sessionPath, timeout, seen)
-	}
-	if len(seen) > 1 {
-		t.Logf("session %s became live after %s (states %v)", sessionPath, time.Since(start).Round(time.Millisecond), seen)
 	}
 }
 

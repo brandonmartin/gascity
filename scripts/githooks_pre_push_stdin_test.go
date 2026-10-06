@@ -219,3 +219,154 @@ exit 9
 		t.Fatalf("push-time suite ran after a beads rejection: %q", got)
 	}
 }
+
+// pointRemoteTracking records sha at refs/remotes/origin/develop. run()
+// invokes the hook with remote name "origin", which is the namespace the
+// tag-skip check queries with for-each-ref --contains.
+func (f *prePushFixture) pointRemoteTracking(t *testing.T, sha string) {
+	t.Helper()
+	f.git(t, "update-ref", "refs/remotes/origin/develop", sha)
+}
+
+// recordGuard replaces the fixture's ownership-guard stub with one that
+// appends a line per assert_bead_still_claimed call. Tag skips must not
+// bypass that guard.
+func (f *prePushFixture) recordGuard(t *testing.T) string {
+	t.Helper()
+	record := filepath.Join(t.TempDir(), "guard-calls")
+	f.env = append(f.env, "GUARD_RECORD="+record)
+	writeExecutable(t, filepath.Join(f.repo, "scripts", "push-ownership-guard.sh"), `#!/usr/bin/env bash
+assert_bead_still_claimed() { printf 'called\n' >> "$GUARD_RECORD"; return 0; }
+`)
+	return record
+}
+
+// tagSHA creates gasburger-green at commit and returns the object id the
+// hook sees as local_sha: the tag object when annotated, the commit when
+// lightweight.
+func (f *prePushFixture) tagSHA(t *testing.T, annotated bool, commit string) string {
+	t.Helper()
+	const name = "gasburger-green"
+	if annotated {
+		f.git(t, "tag", "-a", "-m", "green", name, commit)
+	} else {
+		f.git(t, "tag", name, commit)
+	}
+	return f.gitOut(t, "rev-parse", "refs/tags/"+name)
+}
+
+// TestPrePushSkipsSuiteForAnnotatedTagOnPushedCommit pins an annotated
+// tag whose commit is already on the push remote: that push adds no
+// untested Go, so the suite must not run. Beads still sees the ref line,
+// and the tag object (not the peeled commit) is what git puts on stdin.
+func TestPrePushSkipsSuiteForAnnotatedTagOnPushedCommit(t *testing.T) {
+	f := newPrePushFixture(t)
+	guardLog := f.recordGuard(t)
+	f.pointRemoteTracking(t, f.commitNew)
+	tagSHA := f.tagSHA(t, true, f.commitNew)
+	if tagSHA == f.commitNew {
+		t.Fatal("annotated tag SHA equals the commit; peel would not be exercised")
+	}
+	zero := strings.Repeat("0", 40)
+	refLine := "refs/tags/gasburger-green " + tagSHA + " refs/tags/gasburger-green " + zero + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.bdStdin); got != refLine {
+		t.Fatalf("beads received stdin %q, want %q", got, refLine)
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("push-time suite ran for an annotated tag of a commit already on the remote: %q", got)
+	}
+	if got := f.read(t, guardLog); got != "called\n" {
+		t.Fatalf("ownership guard calls = %q, want one call", got)
+	}
+}
+
+// TestPrePushRunsSuiteForAnnotatedTagOnUnpushedCommit fail-closes: a tag
+// whose commit is absent from every remote-tracking ref of the push remote
+// still runs the suite.
+func TestPrePushRunsSuiteForAnnotatedTagOnUnpushedCommit(t *testing.T) {
+	f := newPrePushFixture(t)
+	guardLog := f.recordGuard(t)
+	f.pointRemoteTracking(t, f.commitOld)
+	tagSHA := f.tagSHA(t, true, f.commitNew)
+	if tagSHA == f.commitNew {
+		t.Fatal("annotated tag SHA equals the commit; peel would not be exercised")
+	}
+	zero := strings.Repeat("0", 40)
+	refLine := "refs/tags/gasburger-green " + tagSHA + " refs/tags/gasburger-green " + zero + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.bdStdin); got != refLine {
+		t.Fatalf("beads received stdin %q, want %q", got, refLine)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("push-time suite did not run for an annotated tag of an unpushed commit (make invocations = %q)", got)
+	}
+	if got := f.read(t, guardLog); got != "called\n" {
+		t.Fatalf("ownership guard calls = %q, want one call", got)
+	}
+}
+
+// TestPrePushRunsSuiteForMixedTagAndBranchPush keeps a skipped tag from
+// suppressing the suite when the same push also updates a non-polecat
+// branch that contains Go changes.
+func TestPrePushRunsSuiteForMixedTagAndBranchPush(t *testing.T) {
+	f := newPrePushFixture(t)
+	guardLog := f.recordGuard(t)
+	f.pointRemoteTracking(t, f.commitNew)
+	tagSHA := f.tagSHA(t, true, f.commitNew)
+	zero := strings.Repeat("0", 40)
+	tagLine := "refs/tags/gasburger-green " + tagSHA + " refs/tags/gasburger-green " + zero + "\n"
+	branchLine := "refs/heads/feature " + f.commitNew + " refs/heads/feature " + f.commitOld + "\n"
+	refLines := tagLine + branchLine
+
+	code, out := f.run(t, refLines)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.bdStdin); got != refLines {
+		t.Fatalf("beads received stdin %q, want %q", got, refLines)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("push-time suite did not run for a mixed tag+branch push (make invocations = %q)", got)
+	}
+	if got := f.read(t, guardLog); got != "called\n" {
+		t.Fatalf("ownership guard calls = %q, want one call", got)
+	}
+}
+
+// TestPrePushSkipsSuiteForLightweightTagOnPushedCommit covers the peel
+// no-op: a lightweight tag's local_sha is already the commit, and a tag of
+// a commit already on the remote skips the suite the same way.
+func TestPrePushSkipsSuiteForLightweightTagOnPushedCommit(t *testing.T) {
+	f := newPrePushFixture(t)
+	guardLog := f.recordGuard(t)
+	f.pointRemoteTracking(t, f.commitNew)
+	tagSHA := f.tagSHA(t, false, f.commitNew)
+	if tagSHA != f.commitNew {
+		t.Fatalf("lightweight tag SHA = %s, want commit %s", tagSHA, f.commitNew)
+	}
+	zero := strings.Repeat("0", 40)
+	refLine := "refs/tags/gasburger-green " + tagSHA + " refs/tags/gasburger-green " + zero + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.bdStdin); got != refLine {
+		t.Fatalf("beads received stdin %q, want %q", got, refLine)
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("push-time suite ran for a lightweight tag of a commit already on the remote: %q", got)
+	}
+	if got := f.read(t, guardLog); got != "called\n" {
+		t.Fatalf("ownership guard calls = %q, want one call", got)
+	}
+}

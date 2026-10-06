@@ -482,11 +482,11 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 		t.Fatalf("create parent for %s: %v", formatStagedGoPath, err)
 	}
 	// The hook pipes the staged file list into this script under
-	// `set -o pipefail`. Like the real script, the stub must read its stdin
-	// to EOF: one that exits without reading races the hook's printf, which
-	// dies of SIGPIPE whenever the stub exits first, and bash exits 141
-	// without printing anything (the silent CI flake on loaded runners).
-	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
+	// `set -o pipefail`. A stub that exits without reading stdin races the
+	// hook's printf: when the stub wins, printf takes SIGPIPE and the hook
+	// dies with 141 and no output (ga-6kqu). Drain stdin like the real
+	// script does, using a builtin because cat is not on the restricted PATH.
+	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\nwhile IFS= read -r _; do :; done\nexit 0\n")
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 

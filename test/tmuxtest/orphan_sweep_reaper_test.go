@@ -148,8 +148,12 @@ func TestReapServerAtSocketEscalation(t *testing.T) {
 			wantDiagnostics: fmt.Sprintf("tmuxtest: socket %s reported this process (pid %d) as its tmux server; not signaling\n", socket, self),
 		},
 		{
-			name: "nothing answering at the socket",
-			host: fakeReapHost{identityErr: errNoTmuxServerAtSocket},
+			// Skipping the reap is correct for a stale socket, but the skip
+			// must be named: the same classification applied to a live server
+			// whose query failed would leave it orphaned with no record.
+			name:            "nothing answering at the socket",
+			host:            fakeReapHost{identityErr: errNoTmuxServerAtSocket},
+			wantDiagnostics: fmt.Sprintf("tmuxtest: treating socket %s as stale: %v\n", socket, errNoTmuxServerAtSocket),
 		},
 		{
 			name: "pid query timed out",

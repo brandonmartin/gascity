@@ -1,7 +1,9 @@
 package tmuxtest
 
 import (
-	"io"
+	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,12 +91,85 @@ func TestSweepOrphanPIDPrefixedDirsKillsLiveTmuxServerBeforeRemoval(t *testing.T
 	// uses relative to HoldAliveSentinel).
 	backdatePastSweepAge(t, dir)
 
-	SweepOrphanPIDPrefixedDirs(root, "pfx-", io.Discard)
+	// Recorded before the sweep so a failure can show which process owned the
+	// server (and would reap it) while it was known to be alive.
+	preSweep := procSnapshot(serverPID)
+	var diagnostics bytes.Buffer
+	SweepOrphanPIDPrefixedDirs(root, "pfx-", &diagnostics)
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("socket parent dir survived sweep, fixture invalid: %s", dir)
+		t.Fatalf("socket parent dir survived sweep, fixture invalid: %s\nsweep diagnostics:\n%s", dir, diagnostics.String())
 	}
 	if pidutil.AliveWithStartTime(serverPID, serverStart) {
-		t.Errorf("tmux server pid %d at %s is still alive after its socket parent dir was swept -- orphaned, matches ga-t33q83", serverPID, socket)
+		// Snapshot before anything else runs: the evidence that separates a
+		// skipped reap from a liveness probe that misread a dying server is
+		// only on the host for as long as the PID's state takes to change.
+		postSweep := procSnapshot(serverPID)
+		t.Errorf("tmux server pid %d at %s is still alive after its socket parent dir was swept -- orphaned, matches ga-t33q83\n"+
+			"captured start token: %q\nsweep diagnostics:\n%s\nbefore sweep:\n%s\nat assertion:\n%s",
+			serverPID, socket, serverStart, diagnostics.String(), preSweep, postSweep)
 	}
+}
+
+// TestTmuxServerIdentityAtSocketNamesWhyNothingAnswered pins the
+// classification the sweep skips a reap on: a query nothing answers is
+// errNoTmuxServerAtSocket, and it carries tmux's own reason so the sweep's
+// diagnostics can tell a stale socket from a live server whose query failed.
+func TestTmuxServerIdentityAtSocketNamesWhyNothingAnswered(t *testing.T) {
+	RequireTmux(t)
+
+	// Short root for the same sun_path reason as the sweep test above.
+	root, err := os.MkdirTemp("/tmp", "tmuxtest-ident-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "sock")
+
+	_, _, err = tmuxServerIdentityAtSocket(socket)
+	if !errors.Is(err, errNoTmuxServerAtSocket) {
+		t.Fatalf("tmuxServerIdentityAtSocket(%s) error = %v, want errNoTmuxServerAtSocket", socket, err)
+	}
+	if !strings.Contains(err.Error(), socket) || !strings.Contains(err.Error(), "exit status") {
+		t.Errorf("tmuxServerIdentityAtSocket(%s) error = %q, want the socket path and the client's exit status", socket, err)
+	}
+}
+
+// procSnapshot renders what the kernel reports about pid right now: the
+// signal-0 probe pidutil.Alive starts from, the raw stat row its state and
+// start-token reads parse, and the status fields naming state and parent.
+// StartTime reaches ps exactly where /proc cannot answer, so its line also
+// records what pidutil's ps fallback would have said. While the PID exists on
+// Linux the snapshot reads /proc only, so taking it before the sweep does not
+// perturb the timing it records.
+func procSnapshot(pid int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  kill(%d, 0): %s\n", pid, probeOutcome(syscall.Kill(pid, 0)))
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		fmt.Fprintf(&b, "  /proc/%d/stat: %v\n", pid, err)
+	} else {
+		fmt.Fprintf(&b, "  /proc/%d/stat: %s\n", pid, strings.TrimSpace(string(stat)))
+	}
+	status, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		fmt.Fprintf(&b, "  /proc/%d/status: %v\n", pid, err)
+	} else {
+		for _, line := range strings.Split(string(status), "\n") {
+			if strings.HasPrefix(line, "State:") || strings.HasPrefix(line, "PPid:") {
+				fmt.Fprintf(&b, "  /proc/%d/status %s\n", pid, line)
+			}
+		}
+	}
+	start, err := pidutil.StartTime(pid)
+	fmt.Fprintf(&b, "  pidutil.StartTime: %q (%s)\n", start, probeOutcome(err))
+	return b.String()
+}
+
+// probeOutcome renders a probe's error, or "ok" when it succeeded.
+func probeOutcome(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	return err.Error()
 }

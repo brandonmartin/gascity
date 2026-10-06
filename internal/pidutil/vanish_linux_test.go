@@ -43,14 +43,29 @@ func failingPS(t *testing.T) {
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 }
 
+// reapSignalAfterFirst makes probeSignal answer ESRCH for pid after the first
+// probe, modeling a parent that reaps the PID once Alive has already observed it.
+func reapSignalAfterFirst(t *testing.T, pid int) {
+	t.Helper()
+	orig := probeSignal
+	var calls atomic.Int32
+	probeSignal = func(p int, sig syscall.Signal) error {
+		if p == pid && int(calls.Add(1)) > 1 {
+			return syscall.ESRCH
+		}
+		return orig(p, sig)
+	}
+	t.Cleanup(func() { probeSignal = orig })
+}
+
 // A PID reaped between Alive's kill(0) probe and its /proc read used to fall
 // through to the ps zombie check, which finds nothing for a vanished PID and so
-// reported it alive. With /proc mounted, a missing entry means the process is
-// gone.
+// reported it alive. The follow-up probe sees the PID gone.
 func TestAliveReportsDeadWhenProcessVanishesAfterSignalProbe(t *testing.T) {
 	failingPS(t)
 	self := os.Getpid()
 	vanishAfter(t, self, 0)
+	reapSignalAfterFirst(t, self)
 	if Alive(self) {
 		t.Fatal("Alive = true for a PID whose /proc entry vanished after kill(0); a reaped process must read as dead")
 	}
@@ -68,6 +83,7 @@ func TestAliveWithStartTimeReportsDeadWhenProcessVanishesDuringIdentityRead(t *t
 	}
 	failingPS(t)
 	vanishAfter(t, self, 1)
+	reapSignalAfterFirst(t, self)
 	if AliveWithStartTime(self, token) {
 		t.Fatal("AliveWithStartTime = true for a PID that vanished before its start time could be read")
 	}

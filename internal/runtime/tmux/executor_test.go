@@ -3,6 +3,8 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -689,5 +691,80 @@ func TestNewSessionWithCommandAndEnvMarksUnsetKeysRemovedFromSessionEnv(t *testi
 	}
 	if !marked {
 		t.Errorf("new-session never marked GC_CONTROLLER_TOKEN removed from the session env; the first respawn would leak it: %v", exec.calls)
+	}
+}
+
+func TestIsSessionAttachedTreatsAnyPositiveClientCount(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		want bool
+	}{
+		{out: "0", want: false},
+		{out: "1", want: true},
+		{out: "2", want: true},
+		{out: "", want: false},
+		{out: "nope", want: false},
+	} {
+		exec := &fakeExecutor{out: tc.out}
+		tm := NewTmux()
+		tm.exec = exec
+		if got := tm.IsSessionAttached("sess"); got != tc.want {
+			t.Errorf("IsSessionAttached(%q) = %v, want %v", tc.out, got, tc.want)
+		}
+	}
+}
+
+// A stored wait-for notification is not attachment. The shared test server
+// keeps an unconsumed wait-for -S, and the next hidden attach used to treat
+// that wake as ready while #{session_attached} was still 0.
+func TestWaitForHiddenAttachReadyIgnoresStaleSignalUntilAttached(t *testing.T) {
+	exec := &fakeExecutor{outs: []string{
+		"0", // fast path: not attached
+		"",  // wait-for returns on a stored signal
+		"0", // signal was not this session
+		"0", // first poll still detached
+		"1", // client has now attached
+	}}
+	tm := NewTmux()
+	tm.exec = exec
+	client := &hiddenAttachClient{done: make(chan error), channel: "gc-hidden-attach-stale"}
+
+	start := time.Now()
+	if err := tm.waitForHiddenAttachReady("sess", client); err != nil {
+		t.Fatalf("waitForHiddenAttachReady: %v", err)
+	}
+	if time.Since(start) < hiddenAttachPollInterval {
+		t.Fatal("returned on the bare wait-for signal before the session was attached")
+	}
+}
+
+func TestWaitForHiddenAttachReadyAcceptsSignalOnceAttached(t *testing.T) {
+	exec := &fakeExecutor{outs: []string{
+		"0", // fast path: not yet
+		"",  // wait-for
+		"1", // this session is attached
+	}}
+	tm := NewTmux()
+	tm.exec = exec
+	client := &hiddenAttachClient{done: make(chan error), channel: "gc-hidden-attach-live"}
+
+	start := time.Now()
+	if err := tm.waitForHiddenAttachReady("sess", client); err != nil {
+		t.Fatalf("waitForHiddenAttachReady: %v", err)
+	}
+	if time.Since(start) >= hiddenAttachPollInterval {
+		t.Fatal("polled after the session was already attached")
+	}
+}
+
+func TestHiddenAttachChannelNamesDoNotRepeat(t *testing.T) {
+	first := newHiddenAttachChannel()
+	second := newHiddenAttachChannel()
+	if first == second {
+		t.Fatalf("channel names repeated: %q", first)
+	}
+	prefix := fmt.Sprintf("gc-hidden-attach-%d-", os.Getpid())
+	if !strings.HasPrefix(first, prefix) || !strings.HasPrefix(second, prefix) {
+		t.Fatalf("channels = %q, %q, want prefix %q", first, second, prefix)
 	}
 }

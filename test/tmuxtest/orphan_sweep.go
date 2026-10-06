@@ -217,9 +217,11 @@ const killTmuxServerWait = 2 * time.Second
 const killTmuxServerPollInterval = 20 * time.Millisecond
 
 // errNoTmuxServerAtSocket reports that nothing answered the PID query at a
-// socket -- a stale socket file left by an already-dead server, which is the
-// common case and worth no diagnostics. It is distinct from a query that
-// timed out, which means a peer is holding the socket and did not answer.
+// socket -- normally a stale socket file left by an already-dead server. It is
+// distinct from a query that timed out, which means a peer is holding the
+// socket and did not answer. The sweep still names it on diagnostics, with
+// tmux's own error: a live server whose query failed for another reason would
+// otherwise be left running with no record of why it was skipped.
 var errNoTmuxServerAtSocket = errors.New("no tmux server answering at socket")
 
 // isTmuxArgv reports whether argv belongs to a tmux process, matching on the
@@ -242,7 +244,7 @@ func tmuxServerIdentityAtSocket(socketPath string) (pid int, startTime string, e
 		return 0, "", fmt.Errorf("querying tmux server pid at %s: %w", socketPath, ctxErr)
 	}
 	if runErr != nil {
-		return 0, "", errNoTmuxServerAtSocket
+		return 0, "", fmt.Errorf("%w %s: %w%s", errNoTmuxServerAtSocket, socketPath, runErr, execStderrSuffix(runErr))
 	}
 	pid, convErr := strconv.Atoi(strings.TrimSpace(string(out)))
 	if convErr != nil || pid <= 0 {
@@ -250,6 +252,20 @@ func tmuxServerIdentityAtSocket(socketPath string) (pid int, startTime string, e
 	}
 	startTime, _ = pidutil.StartTime(pid)
 	return pid, startTime, nil
+}
+
+// execStderrSuffix renders the stderr a failed exec.Cmd.Output captured, so a
+// failed client query names tmux's own reason instead of a bare exit status.
+func execStderrSuffix(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return ""
+	}
+	stderr := strings.TrimSpace(string(exitErr.Stderr))
+	if stderr == "" {
+		return ""
+	}
+	return " (" + stderr + ")"
 }
 
 // tmuxServerReaper holds the process-touching operations the sweep performs
@@ -346,7 +362,9 @@ func (r tmuxServerReaper) killServersUnder(dir string, diagnostics io.Writer) {
 func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.Writer) {
 	pid, startTime, err := r.serverIdentity(socketPath)
 	if err != nil {
-		if !errors.Is(err, errNoTmuxServerAtSocket) {
+		if errors.Is(err, errNoTmuxServerAtSocket) {
+			_, _ = fmt.Fprintf(diagnostics, "tmuxtest: treating socket %s as stale: %v\n", socketPath, err)
+		} else {
 			_, _ = fmt.Fprintf(diagnostics, "tmuxtest: leaving socket %s unreaped: %v\n", socketPath, err)
 		}
 		return

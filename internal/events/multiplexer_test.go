@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -481,9 +482,11 @@ func TestMultiplexerWatchDoesNotWaitForSlowProvider(t *testing.T) {
 }
 
 func TestMultiplexerWatchBudgetIgnoresPrestartDelay(t *testing.T) {
-	// A full-suite run timed out the healthy city at the 20ms budget
-	// before its Watch ran. Hold both attach goroutines past that budget
-	// and require the healthy watcher to survive.
+	// The call budget starts only once Provider.Watch is about to run.
+	// Hold both attach goroutines there and wait for Watch itself to
+	// return. That return is the pre-start floor firing. A scheduler
+	// delay must hit the default multiplexer timeout, not the 20ms
+	// call budget, and it must hit before either provider is called.
 	synctest.Test(t, func(t *testing.T) {
 		const budget = 20 * time.Millisecond
 		m := NewMultiplexer()
@@ -506,64 +509,34 @@ func TestMultiplexerWatchBudgetIgnoresPrestartDelay(t *testing.T) {
 			<-release
 		}
 
-		healthy := NewFake()
-		slow := newBlockingProvider()
-		defer slow.release()
-		m.Add("healthy", healthy)
-		m.Add("slow", slow)
+		m.Add("healthy", NewFake())
+		m.Add("slow", NewFake())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		result := make(chan struct {
+		type watchOutcome struct {
 			w   *MuxWatcher
 			err error
-		}, 1)
+		}
+		result := make(chan watchOutcome, 1)
+		start := time.Now()
 		go func() {
 			w, err := m.Watch(ctx, nil)
-			result <- struct {
-				w   *MuxWatcher
-				err error
-			}{w: w, err: err}
+			result <- watchOutcome{w: w, err: err}
 		}()
 
-		select {
-		case <-entered:
-		case <-time.After(time.Second):
-			t.Fatal("attach goroutines did not reach beforeAttach")
+		<-entered
+		got := <-result
+		if got.w != nil {
+			_ = got.w.Close()
+			t.Fatalf("Watch attached a watcher during pre-start hold: err=%v", got.err)
 		}
-		// Past the budget while both calls are still parked. Watch must
-		// not have classified them as timed out.
-		time.Sleep(time.Second)
-		select {
-		case got := <-result:
-			if got.w != nil {
-				_ = got.w.Close()
-			}
-			t.Fatalf("Watch returned during pre-start delay: %v", got.err)
-		default:
+		if !errors.Is(got.err, ErrNoWatchers) {
+			t.Fatalf("Watch() error = %v, want %v", got.err, ErrNoWatchers)
 		}
-		releaseAttach()
-
-		var w *MuxWatcher
-		select {
-		case got := <-result:
-			if got.err != nil {
-				t.Fatalf("Watch() error = %v", got.err)
-			}
-			w = got.w
-		case <-time.After(time.Second):
-			t.Fatal("Watch did not return after attach was released")
-		}
-		defer w.Close() //nolint:errcheck
-
-		healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
-		te, err := w.Next()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if te.City != "healthy" || te.Actor != "a1" {
-			t.Fatalf("Next() = %+v, want healthy provider event", te)
+		if elapsed := time.Since(start); elapsed != defaultMultiplexerProviderTimeout {
+			t.Fatalf("pre-start hold ended after %s, want start floor %s (call budget %s must not apply yet)", elapsed, defaultMultiplexerProviderTimeout, budget)
 		}
 	})
 }

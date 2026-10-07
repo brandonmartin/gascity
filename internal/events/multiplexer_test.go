@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -440,53 +441,131 @@ func TestMultiplexerWatch(t *testing.T) {
 }
 
 func TestMultiplexerWatchDoesNotWaitForSlowProvider(t *testing.T) {
-	m := NewMultiplexer()
-	m.providerTimeout = 20 * time.Millisecond
+	// The 20ms budget is the behavior under test. synctest advances it
+	// only once every attach goroutine is blocked, so scheduler delay
+	// cannot spend the budget and drop the healthy city.
+	synctest.Test(t, func(t *testing.T) {
+		const budget = 20 * time.Millisecond
+		m := NewMultiplexer()
+		m.providerTimeout = budget
 
-	healthy := NewFake()
-	slow := newBlockingProvider()
-	defer slow.release()
+		healthy := NewFake()
+		slow := newBlockingProvider()
+		defer slow.release()
 
-	m.Add("healthy", healthy)
-	m.Add("slow", slow)
+		m.Add("healthy", healthy)
+		m.Add("slow", slow)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 
-	result := make(chan struct {
-		w   *MuxWatcher
-		err error
-	}, 1)
-	go func() {
+		start := time.Now()
 		w, err := m.Watch(ctx, nil)
-		result <- struct {
+		if err != nil {
+			t.Fatalf("Watch() error = %v", err)
+		}
+		defer w.Close() //nolint:errcheck
+		if got := time.Since(start); got != budget {
+			t.Fatalf("Watch() returned after %s, want provider budget %s", got, budget)
+		}
+
+		healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
+		te, err := w.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if te.City != "healthy" || te.Actor != "a1" {
+			t.Fatalf("Next() = %+v, want healthy provider event", te)
+		}
+	})
+}
+
+func TestMultiplexerWatchBudgetIgnoresPrestartDelay(t *testing.T) {
+	// A full-suite run timed out the healthy city at the 20ms budget
+	// before its Watch ran. Hold both attach goroutines past that budget
+	// and require the healthy watcher to survive.
+	synctest.Test(t, func(t *testing.T) {
+		const budget = 20 * time.Millisecond
+		m := NewMultiplexer()
+		m.providerTimeout = budget
+
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseAttach := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseAttach()
+		entered := make(chan struct{})
+		var mu sync.Mutex
+		seen := 0
+		m.beforeAttach = func() {
+			mu.Lock()
+			seen++
+			if seen == 2 {
+				close(entered)
+			}
+			mu.Unlock()
+			<-release
+		}
+
+		healthy := NewFake()
+		slow := newBlockingProvider()
+		defer slow.release()
+		m.Add("healthy", healthy)
+		m.Add("slow", slow)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		result := make(chan struct {
 			w   *MuxWatcher
 			err error
-		}{w: w, err: err}
-	}()
+		}, 1)
+		go func() {
+			w, err := m.Watch(ctx, nil)
+			result <- struct {
+				w   *MuxWatcher
+				err error
+			}{w: w, err: err}
+		}()
 
-	var w *MuxWatcher
-	select {
-	case got := <-result:
-		if got.err != nil {
-			t.Fatalf("Watch() error = %v", got.err)
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("attach goroutines did not reach beforeAttach")
 		}
-		w = got.w
-	case <-time.After(200 * time.Millisecond):
-		slow.release()
-		cancel()
-		t.Fatal("Watch() waited for the slow provider")
-	}
-	defer w.Close() //nolint:errcheck
+		// Past the budget while both calls are still parked. Watch must
+		// not have classified them as timed out.
+		time.Sleep(time.Second)
+		select {
+		case got := <-result:
+			if got.w != nil {
+				_ = got.w.Close()
+			}
+			t.Fatalf("Watch returned during pre-start delay: %v", got.err)
+		default:
+		}
+		releaseAttach()
 
-	healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
-	te, err := w.Next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if te.City != "healthy" || te.Actor != "a1" {
-		t.Fatalf("Next() = %+v, want healthy provider event", te)
-	}
+		var w *MuxWatcher
+		select {
+		case got := <-result:
+			if got.err != nil {
+				t.Fatalf("Watch() error = %v", got.err)
+			}
+			w = got.w
+		case <-time.After(time.Second):
+			t.Fatal("Watch did not return after attach was released")
+		}
+		defer w.Close() //nolint:errcheck
+
+		healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
+		te, err := w.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if te.City != "healthy" || te.Actor != "a1" {
+			t.Fatalf("Next() = %+v, want healthy provider event", te)
+		}
+	})
 }
 
 func TestMultiplexerWatchWithCursors(t *testing.T) {

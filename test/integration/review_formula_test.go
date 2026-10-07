@@ -166,7 +166,9 @@ func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 		}
 	}
 
-	// Verify the input convoy is clean.
+	// Verify the input convoy is clean. Cleanup is a post-settlement teardown,
+	// so the closed root is not a barrier for it.
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Errorf("input convoy work_dir not cleaned up: %q", got)
@@ -207,6 +209,7 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 		}
 	}
 
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Errorf("input convoy work_dir not cleaned up: %q", got)

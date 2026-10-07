@@ -271,6 +271,27 @@ func memGraphReady(t *testing.T, store beads.Store) []beads.Bead {
 	return ready
 }
 
+// claimNextGraphWorkerBead mirrors a worker's `gc hook --claim`: fixed agents
+// claim routed work just like pools, one bead at a time, so steps the worker
+// will not execute stay unassigned. The claimed bead is refreshed in ready.
+func claimNextGraphWorkerBead(t *testing.T, store beads.Store, ready []beads.Bead, workerSession string) {
+	t.Helper()
+
+	i, ok := firstClaimableGraphWorkerBead(ready, workerSession)
+	if !ok {
+		return
+	}
+	candidate := ready[i]
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("memory workflow store does not support conditional claims")
+	}
+	if err := writer.UpdateIfMatch(candidate.ID, candidate.Revision, beads.UpdateOpts{Assignee: &workerSession}); err != nil {
+		t.Fatalf("claim routed worker bead %s: %v", candidate.ID, err)
+	}
+	ready[i] = mustGetMemBead(t, store, candidate.ID)
+}
+
 func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID, targetID, workerSession, cityPath, mode string) {
 	t.Helper()
 
@@ -296,21 +317,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 
 		ready = memGraphReady(t, store)
 		for {
-			// Fixed agents now claim routed work just like pools. Mirror that
-			// transition before selecting the worker's assigned queue — one
-			// bead at a time, as a real worker does through `gc hook --claim`,
-			// so steps the worker will not execute stay unassigned.
-			if i, ok := firstClaimableGraphWorkerBead(ready, workerSession); ok {
-				candidate := ready[i]
-				writer, ok := beads.ConditionalWriterFor(store)
-				if !ok {
-					t.Fatal("memory workflow store does not support conditional claims")
-				}
-				if err := writer.UpdateIfMatch(candidate.ID, candidate.Revision, beads.UpdateOpts{Assignee: &workerSession}); err != nil {
-					t.Fatalf("claim routed worker bead %s: %v", candidate.ID, err)
-				}
-				ready[i] = mustGetMemBead(t, store, candidate.ID)
-			}
+			claimNextGraphWorkerBead(t, store, ready, workerSession)
 			bead, ok, err := selectExecutableGraphWorkerBead(ready, workerSession)
 			if err != nil {
 				t.Fatal(err)
@@ -545,6 +552,7 @@ func TestGraphWorkflowRootClosesWithoutTeardown(t *testing.T) {
 		}
 		ready := memGraphReady(t, store)
 		for {
+			claimNextGraphWorkerBead(t, store, ready, "worker")
 			bead, ok, err := selectExecutableGraphWorkerBead(ready, "worker")
 			if err != nil {
 				t.Fatal(err)

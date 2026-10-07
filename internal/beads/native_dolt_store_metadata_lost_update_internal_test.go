@@ -71,6 +71,49 @@ func (s *lostUpdateStorage) UpdateIssueChecked(_ context.Context, _ string, upda
 	return s.replaceMetadata(updates)
 }
 
+// RunInTransaction is the unchecked path Update takes today: the callback
+// reads, merges, and UpdateIssue replaces the row with no version check.
+// A metadata Update that compare-and-swaps must not land here.
+func (s *lostUpdateStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+	return fn(nativeDoltTransactionForTest{storage: s})
+}
+
+func (s *lostUpdateStorage) CreateIssue(context.Context, *beadslib.Issue, string) error {
+	return errors.New("lostUpdateStorage: unexpected CreateIssue")
+}
+
+func (s *lostUpdateStorage) CreateIssues(context.Context, []*beadslib.Issue, string) error {
+	return errors.New("lostUpdateStorage: unexpected CreateIssues")
+}
+
+func (s *lostUpdateStorage) CloseIssue(context.Context, string, string, string, string) error {
+	return errors.New("lostUpdateStorage: unexpected CloseIssue")
+}
+
+func (s *lostUpdateStorage) DeleteIssue(context.Context, string) error {
+	return errors.New("lostUpdateStorage: unexpected DeleteIssue")
+}
+
+func (s *lostUpdateStorage) AddLabel(context.Context, string, string, string) error {
+	return errors.New("lostUpdateStorage: unexpected AddLabel")
+}
+
+func (s *lostUpdateStorage) RemoveLabel(context.Context, string, string, string) error {
+	return errors.New("lostUpdateStorage: unexpected RemoveLabel")
+}
+
+func (s *lostUpdateStorage) AddDependency(context.Context, *beadslib.Dependency, string) error {
+	return errors.New("lostUpdateStorage: unexpected AddDependency")
+}
+
+func (s *lostUpdateStorage) RemoveDependency(context.Context, string, string, string) error {
+	return errors.New("lostUpdateStorage: unexpected RemoveDependency")
+}
+
+func (s *lostUpdateStorage) GetDependencyRecords(context.Context, string) ([]*beadslib.Dependency, error) {
+	return nil, errors.New("lostUpdateStorage: unexpected GetDependencyRecords")
+}
+
 func mergeNativeMetadataForTest(raw json.RawMessage, kvs map[string]string) json.RawMessage {
 	metadata := map[string]string{}
 	if len(raw) > 0 {
@@ -169,6 +212,27 @@ func TestNativeDoltStoreMetadataWriteKeepsAConcurrentUpdate(t *testing.T) {
 		assertKept(t, storage, "gc.instantiating", "")
 		assertKept(t, storage, "gc.routed_to", "rig/pool")
 		assertKept(t, storage, "gc.heartbeat", "now")
+		assertRetriedFromAFreshRead(t, storage)
+	})
+
+	// Update is the path session-affinity clears and controller closes use.
+	// A step bead's gc.outcome=pass can commit between that read and the
+	// write-back; an unchecked full-document replace drops the key and
+	// scope-check then fails the body.
+	t.Run("Update", func(t *testing.T) {
+		storage := newStorage()
+		storage.concurrent = map[string]string{"gc.outcome": "pass"}
+		store := newNativeDoltStoreForTest(storage)
+		closed := "closed"
+		if err := store.Update(id, UpdateOpts{
+			Status:   &closed,
+			Metadata: map[string]string{"gc.session_name": "polecat-2-pool"},
+		}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		assertKept(t, storage, "gc.outcome", "pass")
+		assertKept(t, storage, "gc.session_name", "polecat-2-pool")
+		assertKept(t, storage, "gc.run_target", "pool")
 		assertRetriedFromAFreshRead(t, storage)
 	})
 }

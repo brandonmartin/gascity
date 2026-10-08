@@ -159,16 +159,21 @@ jobs:
               GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-2-of-2.txt
               ./scripts/test-integration-shard review-formulas-basic-2-of-2
             coverprofile: coverage.integration-review-formulas-basic-2-of-2.txt
-          - label: retries-1-of-2
+          - label: retries-1-of-3
             command: >-
-              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt
-              ./scripts/test-integration-shard review-formulas-retries-1-of-2
-            coverprofile: coverage.integration-review-formulas-retries-1-of-2.txt
-          - label: retries-2-of-2
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-3.txt
+              ./scripts/test-integration-shard review-formulas-retries-1-of-3
+            coverprofile: coverage.integration-review-formulas-retries-1-of-3.txt
+          - label: retries-2-of-3
             command: >-
-              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-2-of-2.txt
-              ./scripts/test-integration-shard review-formulas-retries-2-of-2
-            coverprofile: coverage.integration-review-formulas-retries-2-of-2.txt
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-2-of-3.txt
+              ./scripts/test-integration-shard review-formulas-retries-2-of-3
+            coverprofile: coverage.integration-review-formulas-retries-2-of-3.txt
+          - label: retries-3-of-3
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-3-of-3.txt
+              ./scripts/test-integration-shard review-formulas-retries-3-of-3
+            coverprofile: coverage.integration-review-formulas-retries-3-of-3.txt
           - label: recovery
             command: make test-integration-review-formulas-recovery-cover
             coverprofile: coverage.integration-review-formulas-recovery.txt

@@ -11,8 +11,21 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// statusRuntimeProbeBudget is how long one status observation may take once
+// its goroutine is scheduled. It is one tmux StateCache fetch
+// (internal/runtime/tmux fetchTimeout). A refresh still inside that contract
+// is an observation, not an unobserved fleet. The old 50ms per-call timer
+// fired first — including before the probe was scheduled under load — and
+// gc rig status painted live agents unknown (ga-3ek6).
+const statusRuntimeProbeBudget = 3 * time.Second
+
 var (
-	statusProviderCallTimeout    = 50 * time.Millisecond
+	// statusProviderCallTimeout bounds one provider call when positive.
+	// Production leaves it at zero so the call runs on the observation
+	// goroutine: that goroutine is already scheduled, and
+	// statusObservationTimeout is the single budget of one snapshot fetch.
+	// A second timer here raced the fetch and substituted not-running.
+	statusProviderCallTimeout    = time.Duration(0)
 	statusProviderTimeoutWarning = func() {
 		fmt.Fprintln(os.Stderr, "gc status: runtime status probe timed out; using partial status")
 	}

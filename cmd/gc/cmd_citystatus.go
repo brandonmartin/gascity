@@ -126,7 +126,7 @@ var (
 
 var (
 	controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
-	statusObservationTimeout                  = 750 * time.Millisecond
+	statusObservationTimeout                  = statusRuntimeProbeBudget
 	statusSessionSnapshotTimeout              = 3 * time.Second
 )
 
@@ -425,10 +425,28 @@ func observeSessionTargetWithWarning(
 		err         error
 	}
 	done := make(chan observeResult, 1)
+	started := make(chan struct{})
 	go func() {
+		close(started)
 		obs, err := observeSessionTargetForStatus(cityPath, nil, sp, cfg, target.runtimeSessionName)
 		done <- observeResult{observation: obs, err: err}
 	}()
+
+	// Scheduler delay is not a failed observation. The budget starts once the
+	// probe is running and covers one snapshot fetch; charging the run queue
+	// against a shorter timer is what marked a live fleet unknown (ga-3ek6).
+	timedOut := func() worker.LiveObservation {
+		markStatusProviderPartial(sp)
+		if stderr != nil {
+			fmt.Fprintf(stderr, "%s: observing %q timed out after %s\n", cmdName, target.runtimeSessionName, statusObservationTimeout) //nolint:errcheck // best-effort stderr
+		}
+		return worker.LiveObservation{}
+	}
+	select {
+	case <-started:
+	case <-time.After(statusObservationTimeout):
+		return timedOut()
+	}
 
 	select {
 	case result := <-done:
@@ -440,11 +458,7 @@ func observeSessionTargetWithWarning(
 		}
 		return result.observation
 	case <-time.After(statusObservationTimeout):
-		markStatusProviderPartial(sp)
-		if stderr != nil {
-			fmt.Fprintf(stderr, "%s: observing %q timed out after %s\n", cmdName, target.runtimeSessionName, statusObservationTimeout) //nolint:errcheck // best-effort stderr
-		}
-		return worker.LiveObservation{}
+		return timedOut()
 	}
 }
 

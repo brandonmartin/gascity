@@ -64,6 +64,7 @@ go_test(
         "caching_store_count_test.go",
         "caching_store_graph_ready_test.go",
         "caching_store_internal_test.go",
+        "caching_store_metadata_deletion_internal_test.go",
         "caching_store_observation_test.go",
         "caching_store_overlay_test.go",
         "caching_store_partial_list_internal_test.go",

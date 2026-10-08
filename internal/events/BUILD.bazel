@@ -45,6 +45,7 @@ go_test(
         "reader_archive_filter_test.go",
         "reader_beforeseq_test.go",
         "reader_context_test.go",
+        "reader_types_test.go",
         "recorder_batch_test.go",
         "recorder_shortwrite_unix_test.go",
         "rotation_archive_test.go",

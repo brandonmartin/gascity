@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "beacon.go",
         "carrier.go",
+        "claude_trust.go",
         "dialog.go",
         "dialog_midsession.go",
         "envsecret.go",
@@ -40,6 +41,7 @@ go_test(
     srcs = [
         "beacon_test.go",
         "carrier_test.go",
+        "claude_trust_test.go",
         "dialog_midsession_test.go",
         "dialog_model_switch_test.go",
         "dialog_test.go",

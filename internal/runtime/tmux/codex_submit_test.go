@@ -1,10 +1,12 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // nudgeKeystrokesForFamily composes the keys a nudge actually puts into a pane,
@@ -139,6 +141,134 @@ func nudgeSessionSource(t *testing.T) string {
 	start := strings.Index(body, "func (t *Tmux) NudgeSession(")
 	if start < 0 {
 		t.Fatal("NudgeSession not found in tmux.go")
+	}
+	rest := body[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
+// TestCodexSubmitSequenceQueuesEnterOnlyWhileBusy pins the ga-biss redesign
+// on top of #4706. An idle codex pane still submits with Escape then Enter —
+// a lone Enter is swallowed as a paste newline. A pane that is already
+// working queues with Enter only. Escape in that state cancels the turn.
+func TestCodexSubmitSequenceQueuesEnterOnlyWhileBusy(t *testing.T) {
+	declared := nudgeSubmitKeySequenceForFamily("codex")
+	if got, want := codexSubmitSequence(false, declared), []string{"Escape", "Enter"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("idle codex submit = %v, want %v", got, want)
+	}
+	got := codexSubmitSequence(true, declared)
+	if !reflect.DeepEqual(got, []string{"Enter"}) {
+		t.Fatalf("busy codex submit = %v, want [Enter]", got)
+	}
+	for _, key := range got {
+		if key == "Escape" {
+			t.Fatalf("busy codex submit contains Escape: %v", got)
+		}
+	}
+}
+
+func TestCodexComposerDraftIsTheBottomGlyphLine(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"empty composer", []string{"│ ›"}, false},
+		{"empty composer with space", []string{"│ › "}, false},
+		{"idle placeholder", []string{"› Ask Codex to do anything"}, false},
+		{"drafted nudge", []string{"│ › Run gc prime to check worker status"}, true},
+		{"ascii prompt draft", []string{"> Run gc prime"}, true},
+		{
+			"scrollback user line above an empty composer",
+			[]string{"› earlier submitted turn", "│ ›"},
+			false,
+		},
+		{"no composer line", []string{"hello from cat"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexComposerHasDraft(tc.lines); got != tc.want {
+				t.Fatalf("codexComposerHasDraft() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexComposerLivenessFailureRequiresDraftAndNoActivity(t *testing.T) {
+	draft := []string{"│ › Run gc prime to check worker status"}
+	if !codexComposerLivenessFailure(draft) {
+		t.Fatal("draft with no busy indicator must be a liveness failure")
+	}
+	busy := append(append([]string{}, draft...), "◦ Working (2m 48s • esc to interrupt)")
+	if codexComposerLivenessFailure(busy) {
+		t.Fatal("a working turn is activity, even with text still in the composer")
+	}
+	if codexComposerLivenessFailure([]string{"│ ›"}) {
+		t.Fatal("an empty composer is idle, not a liveness failure")
+	}
+}
+
+func TestConfirmCodexQueuedFollowUpAcceptsClearedComposer(t *testing.T) {
+	var sends int
+	err := confirmCodexQueuedFollowUp(
+		func() error { sends++; return nil },
+		func() (bool, error) { return false, nil },
+		func(time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if sends != 1 {
+		t.Fatalf("sends = %d, want 1 (queued follow-up is a single Enter)", sends)
+	}
+}
+
+func TestConfirmCodexQueuedFollowUpDoesNotResendWhenDraftRemains(t *testing.T) {
+	var sends int
+	err := confirmCodexQueuedFollowUp(
+		func() error { sends++; return nil },
+		func() (bool, error) { return true, nil },
+		func(time.Duration) {},
+	)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	if sends != 1 {
+		t.Fatalf("sends = %d, want 1 (no Enter retry; staged-paste recovery is recoverStagedDraft)", sends)
+	}
+}
+
+// TestNudgeSessionQueuesBusyCodexBeforeIdleConfirm pins the call order. The
+// idle path's busy indicator false-succeeds when the turn was already
+// running, and its Escape would cancel that turn.
+func TestNudgeSessionQueuesBusyCodexBeforeIdleConfirm(t *testing.T) {
+	body := functionBody(t, "func (t *Tmux) nudgeSession(")
+	queueAt := strings.Index(body, "confirmCodexQueuedFollowUp(")
+	keysAt := strings.Index(body, "codexQueuedFollowUpKeys")
+	idleAt := strings.Index(body, "submitEnterAndConfirm(")
+	switch {
+	case queueAt < 0 || keysAt < 0:
+		t.Fatal("nudgeSession no longer queues a busy codex turn through confirmCodexQueuedFollowUp")
+	case idleAt < 0:
+		t.Fatal("nudgeSession no longer confirms an idle submit with submitEnterAndConfirm")
+	case queueAt > idleAt:
+		t.Fatal("busy codex follow-up must be decided before the idle Escape+Enter confirm")
+	}
+}
+
+func functionBody(t *testing.T, signature string) string {
+	t.Helper()
+	src, err := os.ReadFile("tmux.go")
+	if err != nil {
+		t.Fatalf("reading tmux.go: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, signature)
+	if start < 0 {
+		t.Fatalf("%s not found in tmux.go", signature)
 	}
 	rest := body[start:]
 	end := strings.Index(rest, "\nfunc ")

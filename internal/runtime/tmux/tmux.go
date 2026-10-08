@@ -68,15 +68,22 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // is swallowed as a composer newline rather than treated as submit — codex's
 // actual submit sequence is Escape then Enter, which is the codex entry below.
 //
-// Exactly ONE Escape reaches a codex pane, and that is load-bearing. codex stays
-// in providersSkippingEscapeBeforeEnter, so the pre-submit Escape at step 3 of
+// Idle codex submit is exactly one Escape, then Enter. codex stays in
+// providersSkippingEscapeBeforeEnter, so the pre-submit Escape at step 3 of
 // NudgeSession is skipped and this entry supplies the only one; sending both
 // would put Escape-Escape into the pane, which codex binds to
-// backtrack/edit-previous rather than to submit. Declaring it here (instead of
-// dropping codex from the skip list, which would produce the same two keystrokes
-// today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
-// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
-// bare Enter would be swallowed exactly like the first one.
+// backtrack/edit-previous rather than to submit. Declaring the pair here
+// (instead of dropping codex from the skip list) keeps it RETRYABLE as a unit:
+// submitEnterAndConfirm and recoverStagedDraft (#6739) re-send this entry, and
+// only while the pane is still idle. A bare Enter re-send would be swallowed
+// the same way the first one was.
+//
+// A turn that is already running must not receive that Escape. Escape cancels
+// the turn ("Conversation interrupted") and the nudge sits in the composer
+// (ga-biss). confirmCodexQueuedFollowUp sends codexQueuedFollowUpKeys — Enter
+// only, codex's queued follow-up — and does not retry. Dropping Escape from
+// this table would undo #4706 on the idle path; a second in-line Enter retry
+// would duplicate recoverStagedDraft.
 //
 // This table does NOT yet contain an entry for the claude-specific stall
 // this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
@@ -95,6 +102,20 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // NudgeSession.
 var nudgeSubmitKeySequences = map[string][]string{
 	"codex": {"Escape", "Enter"},
+}
+
+// codexQueuedFollowUpKeys is the submit sequence for a codex pane that is
+// already working. Enter queues the draft behind the current turn. Escape
+// would cancel it, so this sequence must not contain Escape.
+var codexQueuedFollowUpKeys = []string{"Enter"}
+
+// codexSubmitSequence selects the codex submit keys. alreadyBusy queues with
+// Enter only; otherwise declared is the idle Escape-then-Enter sequence.
+func codexSubmitSequence(alreadyBusy bool, declared []string) []string {
+	if alreadyBusy {
+		return codexQueuedFollowUpKeys
+	}
+	return declared
 }
 
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
@@ -2489,6 +2510,103 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 	return nil
 }
 
+// codexComposerScanLines is the footer window inspected for the live composer.
+// Submitted turns echo the same › glyph higher in the scrollback; only the
+// bottom-most glyph line is the composer.
+const codexComposerScanLines = 16
+
+// isCodexTarget reports whether target is a codex-family pane. The pane's
+// GC_PROVIDER wins; a missing env falls back to the process name so ad-hoc
+// codex sessions still take the no-interrupt path.
+func (t *Tmux) isCodexTarget(target string) bool {
+	if provider := t.providerEnv(target); provider != "" {
+		return sessionlog.ProviderFamily(provider) == "codex"
+	}
+	return t.targetLooksLikeProvider(target, "codex")
+}
+
+// codexComposerRemainder returns the text after the composer prompt glyph.
+// ok is false when line is not a composer line. An empty rest is an empty
+// composer (idle prompt, or a follow-up that already queued).
+func codexComposerRemainder(line string) (string, bool) {
+	s := strings.TrimSpace(line)
+	s = strings.TrimLeft(s, "│┃ ")
+	s = strings.TrimSpace(s)
+	s = strings.TrimRight(s, "│┃ ")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	for _, glyph := range []string{"› ", "›", "> ", ">"} {
+		if strings.HasPrefix(s, glyph) {
+			return strings.TrimSpace(strings.TrimPrefix(s, glyph)), true
+		}
+	}
+	return "", false
+}
+
+// codexComposerPlaceholder reports the empty-composer hint codex paints in
+// place of a draft. codex 0.159.1 shows "Ask Codex to do anything" after the
+// › glyph while idle; that hint is not a nudge waiting to be submitted.
+func codexComposerPlaceholder(rest string) bool {
+	switch strings.TrimSpace(rest) {
+	case "", "Ask Codex to do anything":
+		return true
+	default:
+		return false
+	}
+}
+
+// codexComposerHasDraft reports whether the live composer (the bottom-most
+// prompt-glyph line in the footer window) still holds a nudge. The idle
+// placeholder is not a draft.
+func codexComposerHasDraft(lines []string) bool {
+	window := lines
+	if len(window) > codexComposerScanLines {
+		window = window[len(window)-codexComposerScanLines:]
+	}
+	for i := len(window) - 1; i >= 0; i-- {
+		rest, ok := codexComposerRemainder(window[i])
+		if !ok {
+			continue
+		}
+		return !codexComposerPlaceholder(rest)
+	}
+	return false
+}
+
+// codexComposerLivenessFailure reports a pane whose composer still holds a
+// draft and that is not working. The process can be up while the agent never
+// sees the nudge — the stalled case in ga-biss.
+func codexComposerLivenessFailure(lines []string) bool {
+	return codexComposerHasDraft(lines) && !paneContainsBusyIndicator(lines)
+}
+
+// confirmCodexQueuedFollowUp submits a follow-up onto a turn that is already
+// running. The caller sends Enter once (codexQueuedFollowUpKeys), never
+// Escape. Success is a composer that no longer holds a draft: the nudge
+// queued behind the running turn. A draft that remains is unconfirmed so the
+// queue retries later, when the pane may be idle and the Escape-then-Enter
+// path (#4706) plus recoverStagedDraft (#6739) can run. This function does
+// not re-send. A second Enter would duplicate that recovery, and an Escape
+// would cancel the turn.
+func confirmCodexQueuedFollowUp(send func() error, drafted func() (bool, error), sleep func(time.Duration)) error {
+	if err := send(); err != nil {
+		return err
+	}
+	for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
+		stillDrafted, err := drafted()
+		if err != nil {
+			return err
+		}
+		if !stillDrafted {
+			return nil
+		}
+		sleep(submitConfirmPollInterval)
+	}
+	return fmt.Errorf("%w: codex composer still holds the nudge", ErrNudgeSubmitUnconfirmed)
+}
+
 // NudgeSession sends a message to a Claude Code session reliably.
 // This is the canonical way to send messages to Claude sessions.
 // Uses: literal mode + 500ms debounce + separate Enter.
@@ -2662,6 +2780,41 @@ func (t *Tmux) nudgeSession(
 	// not submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
+	// Already-busy codex: queue with Enter only. The idle path below sends
+	// Escape then Enter, and its busy check would treat the running turn as
+	// proof the new nudge submitted (ga-biss).
+	if t.isCodexTarget(target) {
+		busyNow, busyErr := t.paneBusy(target)
+		if busyErr != nil {
+			return fmt.Errorf("codex follow-up: %w", busyErr)
+		}
+		if busyNow {
+			err := confirmCodexQueuedFollowUp(func() error {
+				if err := t.sendNudgeSubmitSequence(target, codexQueuedFollowUpKeys); err != nil {
+					return err
+				}
+				wake()
+				return nil
+			}, func() (bool, error) {
+				lines, err := t.CapturePaneLines(target, promptObservationLines)
+				if err != nil {
+					return false, err
+				}
+				return codexComposerHasDraft(lines), nil
+			}, time.Sleep)
+			if err != nil {
+				if errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+					// Enter reached tmux. Stamp the poke so the keystroke
+					// echo is not later read as the agent responding, and
+					// leave the nudge unacked so the queue retries.
+					delivered = true
+				}
+				return fmt.Errorf("codex queued follow-up: %w", err)
+			}
+			delivered = true
+			return nil
+		}
+	}
 	if t.submitVerifyEligible(target) {
 		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
 		if err != nil {

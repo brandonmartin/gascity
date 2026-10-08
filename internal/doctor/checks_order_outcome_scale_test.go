@@ -107,6 +107,22 @@ func TestReadOrderEventsAbortsWhenCheckAbandoned(t *testing.T) {
 	}
 }
 
+// TestCheckGoContextCanceledWhenAlreadyAbandoned pins the ga-taro fix: a Done
+// channel closed before the read starts must cancel synchronously. Leaving it
+// to the watcher goroutine let a reader that never yields (GOMAXPROCS=1, or a
+// loaded host) finish the whole log before the cancel was scheduled.
+func TestCheckGoContextCanceledWhenAlreadyAbandoned(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+
+	goCtx, cancel := checkGoContext(&CheckContext{Done: done})
+	defer cancel()
+
+	if goCtx.Err() == nil {
+		t.Fatal("checkGoContext with an already-closed Done returned a live context, want canceled")
+	}
+}
+
 // TestOrderOutcomeHealthyScalesToLargeEventLog pins the ga-wu18 fix: the check
 // took ~90s on a 151MB events.jsonl because it decoded the whole log three
 // times. The fixture is a fraction of that size; the budget is ~100x the

@@ -434,8 +434,14 @@ func (s *session) closeAndWait() (string, int) {
 
 func (s *session) wait() (string, int) {
 	s.t.Helper()
+	return s.finish(s.cmd.Wait())
+}
+
+// finish turns the adapter's reaped status into its stdout and exit code.
+func (s *session) finish(err error) (string, int) {
+	s.t.Helper()
 	code := 0
-	if err := s.cmd.Wait(); err != nil {
+	if err != nil {
 		var exitErr *exec.ExitError
 		if !asExitError(err, &exitErr) {
 			s.t.Fatalf("wait adapter: %v", err)
@@ -448,6 +454,45 @@ func (s *session) wait() (string, int) {
 		s.t.Logf("adapter exited %d: %s", code, strings.TrimSpace(s.errOut.String()))
 	}
 	return s.output(), code
+}
+
+// termResendInterval is how long terminate lets one SIGTERM work before it
+// sends another. The adapter's TERM path takes milliseconds when it runs at all.
+const termResendInterval = time.Second
+
+// terminate ends the session with SIGTERM and returns its exit code.
+//
+// A single TERM is not enough: bash cannot run a trap for a signal that lands
+// between its last pending-trap check and the read(2) it then blocks in. The
+// trap stays pending until input arrives, and an idle session's stdin never
+// sends any; a bare `trap 'exit 0' TERM` read loop loses a few TERMs in a
+// thousand. A repeat TERM reaches the read while it is blocked and interrupts
+// it, so terminate re-sends until the adapter exits. A TERM path that never
+// exits still fails, at adapterWaitBudget.
+func (s *session) terminate() int {
+	s.t.Helper()
+	// Signal before reaping starts: an unreaped adapter that already died is
+	// still a signalable zombie, so the first TERM cannot miss it.
+	s.signal(syscall.SIGTERM)
+	reaped := make(chan error, 1)
+	go func() { reaped <- s.cmd.Wait() }()
+	deadline := time.After(adapterWaitBudget)
+	resend := time.NewTicker(termResendInterval)
+	defer resend.Stop()
+	for {
+		select {
+		case err := <-reaped:
+			_, code := s.finish(err)
+			return code
+		case <-resend.C:
+			// The adapter may exit between ticks; the reap reports that.
+			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGTERM)
+		case <-deadline:
+			_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+			<-reaped
+			s.t.Fatalf("adapter still running %s after SIGTERM:\n%s", adapterWaitBudget, s.output())
+		}
+	}
 }
 
 func (h *harness) control(values map[string]string) {
@@ -975,8 +1020,7 @@ func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
 		})
 	}
 
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 }
@@ -1010,8 +1054,7 @@ func TestTurnHeartbeatIsSuppressedOffATTY(t *testing.T) {
 		t.Fatalf("busy line printed %d times off a tty, want exactly one:\n%q", n, out)
 	}
 
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 }
@@ -1033,8 +1076,7 @@ func TestTurnHeartbeatExpiresBeforeTheChildCompletes(t *testing.T) {
 	if n := strings.Count(s.output(), "zcode-repl turn in flight"); n != 1 {
 		t.Fatalf("busy announcement appeared %d times, want only the initial announcement after heartbeat expiry:\n%q", n, s.output())
 	}
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 }
@@ -1156,8 +1198,7 @@ func TestInterruptKillsASigintIgnoringTurn(t *testing.T) {
 		t.Fatalf("the interrupt was not announced in the pane:\n%s", s.output())
 	}
 
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	// Still absent after the adapter is gone: nothing survived to finish.
@@ -1195,8 +1236,31 @@ func TestTerminateExitsCleanly(t *testing.T) {
 	h := newHarness(t, nil)
 	s := h.start()
 	s.waitForOutput("zcode-repl ready", 20*time.Second)
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// terminate must survive the TERM bash loses: one that lands between the
+// shell's last pending-trap check and the read(2) it then blocks in stays
+// pending until input arrives, and an idle session's stdin never sends any
+// (a wait on that hung the unit gate for its full 20 minutes, ga-vi4s). The
+// stand-in drops its first TERM the way that race does.
+//
+// Not parallel: the stand-in is written and then exec'd at once, and a sibling
+// test forking in between would hold its write fd and fail the exec ETXTBSY
+// (see installedAdapter).
+func TestTerminateResendsALostSIGTERM(t *testing.T) {
+	h := newHarness(t, nil)
+	h.adapter = filepath.Join(t.TempDir(), "drops-first-term")
+	standIn := "#!/usr/bin/env bash\n" +
+		"lost=0; trap '((lost++)) && exit 0' TERM; echo armed; while :; do sleep 0.05; done\n"
+	if err := os.WriteFile(h.adapter, []byte(standIn), 0o755); err != nil {
+		t.Fatalf("write stand-in: %v", err)
+	}
+	s := h.start()
+	s.waitForOutput("armed", adapterWaitBudget)
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 }
@@ -1417,8 +1481,7 @@ func TestExportMirrorPublishesTheUserTurnBeforeTheReply(t *testing.T) {
 	// interrupted turn looks like for every other family.
 	s.signal(syscall.SIGINT)
 	s.waitForOutput("zcode-repl error rc=", 15*time.Second)
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	// The interrupted turn is closed out, not left dangling: a trailing user
@@ -1545,8 +1608,7 @@ func TestCancelledFirstTurnStaysVisibleAndIsAdopted(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
@@ -1610,8 +1672,7 @@ func TestInterruptedTurnClosesTheMirrorEntry(t *testing.T) {
 	s.waitForOutput("zcode-repl turn in flight", 20*time.Second)
 	s.signal(syscall.SIGINT)
 	s.waitForOutput("zcode-repl error rc=", 15*time.Second)
-	s.signal(syscall.SIGTERM)
-	if _, code := s.wait(); code != 0 {
+	if code := s.terminate(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 

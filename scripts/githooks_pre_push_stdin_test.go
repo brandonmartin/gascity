@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -371,5 +372,80 @@ func TestPrePushSkipsSuiteForLightweightTagOnPushedCommit(t *testing.T) {
 	}
 	if got := f.read(t, guardLog); got != "called\n" {
 		t.Fatalf("ownership guard calls = %q, want one call", got)
+	}
+}
+
+// commitManyFiles commits count files named with ext under a nested directory
+// and returns the new HEAD. The name list `git diff --name-only` prints for
+// such a commit must exceed the kernel pipe buffer (64 KiB on Linux) so the
+// hook's Go-change scan cannot hide behind a single read.
+func (f *prePushFixture) commitManyFiles(t *testing.T, count int, ext string) string {
+	t.Helper()
+	dir := filepath.Join(f.repo, "internal", "generated", "large_diff_fixture")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("zz_pre_push_large_diff_fixture_file_%05d%s", i, ext)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("package fixture\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	f.git(t, "add", "-A")
+	f.git(t, "commit", "-q", "--no-verify", "-m", "add "+ext+" files")
+	return f.gitOut(t, "rev-parse", "HEAD")
+}
+
+// TestPrePushRunsSuiteForLargeGoDiff pins the fail-open the Go-change scan
+// used to have (ga-vpht): `git diff --name-only | grep -q .` under pipefail
+// lets grep exit on the first name, git take SIGPIPE on its next write, and
+// the pipeline report 141, so a diff whose name list outgrew the pipe buffer
+// read as "no Go changes" and skipped the push-time suite for exactly the
+// biggest Go changes.
+func TestPrePushRunsSuiteForLargeGoDiff(t *testing.T) {
+	f := newPrePushFixture(t)
+	big := f.commitManyFiles(t, 4000, ".go")
+	refLine := "refs/heads/feature " + big + " refs/heads/feature " + f.commitOld + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("push-time suite skipped for a large Go diff (make invocations = %q); the Go-change scan failed open", got)
+	}
+}
+
+// TestPrePushSkipsSuiteForLargeNonGoDiff keeps the large-diff fix from
+// over-correcting: thousands of changed files with no *.go among them still
+// skip the suite.
+func TestPrePushSkipsSuiteForLargeNonGoDiff(t *testing.T) {
+	f := newPrePushFixture(t)
+	big := f.commitManyFiles(t, 4000, ".txt")
+	refLine := "refs/heads/feature " + big + " refs/heads/feature " + f.commitNew + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("push-time suite ran for a diff with no Go files: %q", got)
+	}
+}
+
+// TestPrePushRunsSuiteWhenGoDiffCannotBeComputed fail-closes the scan: a remote
+// sha this checkout has no object for leaves nothing to diff against, which
+// must run the suite like a new branch rather than read as "no Go changes".
+func TestPrePushRunsSuiteWhenGoDiffCannotBeComputed(t *testing.T) {
+	f := newPrePushFixture(t)
+	unknown := strings.Repeat("ab", 20)
+	refLine := "refs/heads/feature " + f.commitNew + " refs/heads/feature " + unknown + "\n"
+
+	code, out := f.run(t, refLine)
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("push-time suite skipped though the Go diff could not be computed (make invocations = %q)", got)
 	}
 }

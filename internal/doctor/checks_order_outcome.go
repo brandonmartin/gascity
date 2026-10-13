@@ -310,10 +310,21 @@ func compareEventSeq(a, b events.Event) int { return cmp.Compare(a.Seq, b.Seq) }
 // checkGoContext adapts the runner's Done channel to a context.Context so the
 // events reader can stop when the check is abandoned. The returned cancel must
 // always be called to release the watcher goroutine.
+//
+// A check already abandoned on entry gets an already-cancelled context rather
+// than waiting for the watcher goroutine to be scheduled: a loaded or
+// single-P scheduler can otherwise run a whole read before the cancellation
+// lands.
 func checkGoContext(ctx *CheckContext) (context.Context, context.CancelFunc) {
 	goCtx, cancel := context.WithCancel(context.Background())
 	if ctx == nil || ctx.Done == nil {
 		return goCtx, cancel
+	}
+	select {
+	case <-ctx.Done:
+		cancel()
+		return goCtx, cancel
+	default:
 	}
 	go func() {
 		select {

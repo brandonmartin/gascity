@@ -841,6 +841,12 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 func readReloadSocketReply(t *testing.T, conn net.Conn) reloadControlReply {
 	t.Helper()
+	// The handler's pipe write gives up at its own conn deadline and returns
+	// without closing its end, so an unbounded read would hang to the package
+	// timeout when the test goroutine wakes that late.
+	if err := conn.SetReadDeadline(time.Now().Add(hangBudget)); err != nil {
+		t.Fatalf("set reply read deadline: %v", err)
+	}
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	if !scanner.Scan() {

@@ -59,7 +59,13 @@ exit 0
 	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
 		t.Fatalf("create scripts dir: %v", err)
 	}
-	writeExecutable(t, filepath.Join(repo, "scripts", "precommit-format-staged-go"), "#!/usr/bin/env bash\nexit 0\n")
+	// The hook pipes the staged file list into this script under
+	// `set -o pipefail`. A stub that exits without reading stdin races the
+	// hook's printf: when the stub wins, printf takes SIGPIPE and the hook
+	// dies with 141 (ga-fgq2, same class as ga-6kqu). Drain stdin like the
+	// real script does, using a builtin because cat is not on the restricted
+	// PATH.
+	writeExecutable(t, filepath.Join(repo, "scripts", "precommit-format-staged-go"), "#!/usr/bin/env bash\nwhile IFS= read -r _; do :; done\nexit 0\n")
 	// The hook's Go block unconditionally `git add`s every generated artifact,
 	// so each one must exist for it to reach the steps this test cares about.
 	for _, name := range []string{

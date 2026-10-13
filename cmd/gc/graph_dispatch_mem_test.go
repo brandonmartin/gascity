@@ -273,11 +273,21 @@ func memGraphReady(t *testing.T, store beads.Store) []beads.Bead {
 
 func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID, targetID, workerSession, cityPath, mode string) {
 	t.Helper()
+	runMemGraphWorkflow(t, store, workflowID, targetID, workerSession, cityPath, mode, nil)
+}
+
+// runMemGraphWorkflow drives a workflow until its root closes. A non-nil
+// withhold models a slow worker: a bead it returns true for is claimed but
+// never executed, and the worker takes nothing further. The workflow must
+// settle without that bead, so the root closing while it is withheld is the
+// point. It reports whether any bead was withheld.
+func runMemGraphWorkflow(t *testing.T, store beads.Store, workflowID, targetID, workerSession, cityPath, mode string, withhold func(beads.Bead) bool) (withheld bool) {
+	t.Helper()
 
 	for step := 0; step < 200; step++ {
 		root := mustGetMemBead(t, store, workflowID)
 		if root.Status == "closed" {
-			return
+			return withheld
 		}
 
 		ready := memGraphReady(t, store)
@@ -318,6 +328,10 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			if !ok {
 				break
 			}
+			if withhold != nil && withhold(bead) {
+				withheld = true
+				break
+			}
 			executeMemGraphWorkerBead(t, store, bead, targetID, cityPath, mode)
 			progressed = true
 			ready = memGraphReady(t, store)
@@ -337,6 +351,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 	}
 
 	t.Fatalf("workflow %s did not finish within step budget", workflowID)
+	return withheld
 }
 
 func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
@@ -500,6 +515,70 @@ func TestGraphWorkflowInMemorySuccessPath(t *testing.T) {
 	}
 	if got := convoy.Metadata["work_dir"]; got != "" {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
+	}
+}
+
+// TestGraphWorkflowInMemoryRootClosesWithoutTeardown pins the post-settlement
+// teardown contract at the dispatch layer: a workflow root closes on its own
+// sinks, and the teardown tail is not one of them. The unit tests in
+// internal/dispatch pin each half of that contract on hand-built beads; this
+// one runs the compiled mol-scoped-work graph.
+//
+// The contract has two halves, and this test fails if either is reverted.
+// graphSinkStepIDs omits gc.scope_role=teardown from workflow-finalize's sinks
+// (re-adding them deadlocks settlement: the teardown's pass condition can wait
+// on the root outcome only finalize produces), and processWorkflowFinalize's
+// terminal sweep exempts the teardown tail so it stays open and executable
+// rather than being skip-closed, which would leak the worktree.
+//
+// The consequence is what this test makes explicit: a closed workflow root is
+// NOT a barrier for cleanup having run. The integration tests in
+// test/integration wait on the cleanup-worktree retry control for that reason
+// (waitForWorkflowTeardown) before asserting cleanup's effects.
+func TestGraphWorkflowInMemoryRootClosesWithoutTeardown(t *testing.T) {
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
+	cityPath := t.TempDir()
+
+	withheld := runMemGraphWorkflow(t, store, workflowID, convoyID, "worker", cityPath, "success",
+		func(bead beads.Bead) bool { return strings.Contains(beadRef(bead), ".cleanup-worktree") })
+	if !withheld {
+		t.Fatal("teardown was never offered to the worker; the test no longer models a slow worker")
+	}
+
+	root := mustGetMemBead(t, store, workflowID)
+	if root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed: the root must settle on its own sinks, "+
+			"not wait on the teardown tail (gating finalize on teardown deadlocks settlement)", root.Status)
+	}
+	if got := root.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("root outcome = %q, want pass", got)
+	}
+
+	all, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": workflowID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatalf("List(gc.root_bead_id=%q): %v", workflowID, err)
+	}
+	var teardownOpen bool
+	for _, bead := range all {
+		if strings.HasSuffix(beadRef(bead), ".cleanup-worktree") && bead.Status == "open" {
+			teardownOpen = true
+		}
+	}
+	if !teardownOpen {
+		t.Fatal("teardown tail is not open after the root closed; the terminal sweep must exempt it " +
+			"so cleanup stays executable, otherwise settlement skip-closes it and leaks the worktree")
+	}
+
+	// Why the root cannot be a cleanup barrier: at this instant the convoy
+	// still carries the work_dir that cleanup clears.
+	convoy := mustGetMemBead(t, store, convoyID)
+	if got := convoy.Metadata["work_dir"]; got == "" {
+		t.Fatal("convoy work_dir is already clear with the teardown withheld; " +
+			"this test no longer demonstrates why a closed root is not a cleanup barrier")
 	}
 }
 

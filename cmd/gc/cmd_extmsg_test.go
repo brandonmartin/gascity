@@ -3,73 +3,43 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
-func TestCmdExtMsgBindUsesSupervisorForSupervisorManagedCity(t *testing.T) {
-	t.Setenv("GC_CITY", writeCityStatusTestCity(t))
+// TestExtMsgClientUsesSupervisorForSupervisorManagedCity pins the routing
+// choice without opening a loopback listener: conversation bindings have no
+// local fallback, so a supervisor-managed city without a standalone [api]
+// port must resolve to the supervisor client.
+func TestExtMsgClientUsesSupervisorForSupervisorManagedCity(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_URL", "")
 	t.Setenv("GC_CITY_CONTEXT", "")
 	t.Setenv("GC_NO_API", "")
 
-	requestSeen := make(chan struct{}, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/test-city/extmsg/bind" {
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		requestSeen <- struct{}{}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(extmsg.SessionBindingRecord{
-			ID:                "binding-1",
-			Conversation:      extmsg.ConversationRef{ScopeID: "test-city", Provider: "telegram", AccountID: "default", ConversationID: "42", Kind: extmsg.ConversationDM},
-			AgentName:         "gascity/worker",
-			Status:            extmsg.BindingActive,
-			BoundAt:           time.Now().UTC(),
-			BindingGeneration: 1,
-		})
-	}))
-	defer srv.Close()
-
+	sentinel := api.NewCityScopedClient("http://supervisor.sentinel:1", "test-city")
 	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
 	t.Cleanup(func() {
 		apiRouteControllerAliveHook = origAlive
 		apiRouteSupervisorClientHook = origSup
 	})
 	apiRouteControllerAliveHook = func(string) int { return 4242 }
-	apiRouteSupervisorClientHook = func(string) *api.Client {
-		return api.NewCityScopedClient(srv.URL, "test-city")
-	}
+	apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
 
-	var stdout, stderr bytes.Buffer
-	code := cmdExtMsgBind(extMsgConversationFlags{
-		scopeID:        "test-city",
-		provider:       "telegram",
-		conversationID: "42",
-		kind:           "dm",
-	}, "gascity/worker", "", false, true, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdExtMsgBind exit = %d, want 0; stderr=%s", code, stderr.String())
+	var stderr bytes.Buffer
+	c, gotCity, ok := extMsgClient("bind", &stderr)
+	if !ok {
+		t.Fatalf("extMsgClient ok = false, want true; stderr=%s", stderr.String())
 	}
-	select {
-	case <-requestSeen:
-	default:
-		t.Fatal("extmsg bind did not use the supervisor API")
+	if c != sentinel {
+		t.Fatalf("extMsgClient client = %p, want supervisor sentinel %p", c, sentinel)
 	}
-	var got extmsg.SessionBindingRecord
-	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal stdout: %v; stdout=%s", err, stdout.String())
-	}
-	if got.ID != "binding-1" || got.AgentName != "gascity/worker" {
-		t.Fatalf("binding = %+v, want supervisor response", got)
+	if gotCity == "" {
+		t.Fatal("extMsgClient city path is empty")
 	}
 }
 

@@ -792,6 +792,194 @@ func TestALineSplitAcrossTheDrainWindowStaysOnePrompt(t *testing.T) {
 	}
 }
 
+// A signal that lands after bash last checked for pending traps but before a
+// blocking read(2) starts stays pending until that read returns. An untimed
+// read of the rest of a line therefore cannot be woken while the line is
+// partial: a TERM that arrives right behind the first byte of a keystroke or
+// paste is skipped, and tmux's SIGKILL escalation leaves the cleanup trap's
+// work (stty restore, workdir removal) undone. The race is microseconds wide,
+// so this pins the invariant structurally: every read of the prompt stream
+// carries a timer, which is what lets bash run a pending trap (ga-8azq). The
+// shim reports any untimed read into the variables that hold prompt bytes, and
+// the body has two lines so both rest-of-line sites run.
+func TestEveryReadOfThePromptStreamIsTimed(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "untimed-read.bash")
+	const untimedRead = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    case "${!#}" in
+        line|peek|rest|tail_byte)
+            if (( ! timed )); then printf 'shim untimed read of %s\n' "${!#}"; fi
+            ;;
+    esac
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(untimedRead), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	out, code := h.run("first line\nsecond line\n")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if strings.Contains(out, "shim untimed read") {
+		t.Fatalf("the adapter blocks on an untimed read of the prompt stream, so a pending TERM cannot run:\n%s", out)
+	}
+	if got := h.prompts(); !equalStrings(got, []string{"first line\nsecond line"}) {
+		t.Fatalf("prompts = %q, want [\"first line\\nsecond line\"]", got)
+	}
+}
+
+// A line that stalls partway, longer than the wake that lets a pending trap run,
+// must still run as one prompt. The rest of a line is read on that wake, and a
+// wake that hands the fragment back as a finished line, or drops it, executes a
+// prompt with bytes missing.
+func TestALineStalledMidwayRunsWholeAcrossTheWake(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.sendRaw("a prompt that stalls, ")
+	// Several wakes with the line partial: the first byte is already in hand,
+	// so these are timeouts of the rest-of-line read.
+	time.Sleep(3500 * time.Millisecond)
+	s.sendRaw("then finishes\n")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	want := "a prompt that stalls, then finishes"
+	if got := h.prompts(); !equalStrings(got, []string{want}) {
+		t.Fatalf("prompts = %q, want [%q]", got, want)
+	}
+}
+
+// The rest-of-line read takes the same timeout shapes as the idle wait and the
+// drain's peek. bash 5.2 hands a byte that lands as the timer expires back with
+// status 142, newline included; bash 3.2 (stock macOS /bin/bash) reports a
+// timeout as status 1 with the variable unassigned, the same status as end of
+// input, and what tells them apart is that a timeout takes the whole timer.
+// Both shims replay their shape on the byte read of the rest of the line, so
+// the test runs on any bash.
+func TestTheRestOfALineSurvivesEveryTimeoutShape(t *testing.T) {
+	t.Parallel()
+
+	const lateTimer = `read() {
+    local arg timed=0 skip=0
+    local -a untimed=()
+    for arg in "$@"; do
+        if (( skip )); then skip=0; continue; fi
+        if [[ "$arg" == -t ]]; then timed=1; skip=1; continue; fi
+        untimed+=("$arg")
+    done
+    if (( timed )) && [[ "${!#}" == tail_byte ]]; then
+        builtin read "${untimed[@]}"
+        local rc=$?
+        if (( rc == 0 )); then return 142; fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	const bash32Timeout = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == tail_byte ]]; then
+        builtin read "$@"
+        local rc=$?
+        if [[ -z "${tail_byte-}" ]] && (( rc > 128 )); then
+            printf 'shim rest timeout\n'
+            unset tail_byte
+            return 1
+        fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	for _, tc := range []struct {
+		name string
+		shim string
+		send func(*session)
+		want string
+	}{
+		{
+			name: "a byte handed back with the timeout status",
+			shim: lateTimer,
+			send: func(s *session) { s.sendRaw("keeps every byte\nand both lines\n") },
+			want: "keeps every byte\nand both lines",
+		},
+		{
+			name: "bash 3.2's timeout is not end of input",
+			shim: bash32Timeout,
+			send: func(s *session) {
+				s.sendRaw("stalls, ")
+				time.Sleep(2500 * time.Millisecond)
+				s.sendRaw("then finishes\n")
+			},
+			want: "stalls, then finishes",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			shim := filepath.Join(t.TempDir(), "timeout-shape.bash")
+			if err := os.WriteFile(shim, []byte(tc.shim), 0o644); err != nil {
+				t.Fatalf("write shim: %v", err)
+			}
+			h := newHarness(t, map[string]string{"BASH_ENV": shim})
+			s := h.start()
+			tc.send(s)
+			s.waitForTurns(1)
+			if _, code := s.closeAndWait(); code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if got := h.prompts(); !equalStrings(got, []string{tc.want}) {
+				t.Fatalf("prompts = %q, want [%q]", got, tc.want)
+			}
+		})
+	}
+}
+
+// A rest-of-line read that fails outright is end of input, not a timeout: it
+// returns status 1 with the variable unassigned on every bash — bash 3.2's
+// timeout shape — but at once, without waiting out the timer. Retrying it
+// would spin hot; the adapter must run what it has and carry on. The shim
+// fails the byte read the way bash fails a read from a bad descriptor.
+func TestARestOfLineReadErrorIsNotRetried(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "rest-read-error.bash")
+	const readError = `read() {
+    if [[ "${!#}" == tail_byte ]]; then
+        printf 'shim rest read error\n'
+        return 1
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(readError), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	s.send("hello")
+	// wait fails the test if the adapter is still retrying after
+	// adapterWaitBudget; the turn is the lifecycle signal that it was not.
+	s.waitForTurns(1)
+	if !strings.Contains(s.output(), "shim rest read error") {
+		t.Fatalf("the rest-of-line read never failed through the shim:\n%s", s.output())
+	}
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
 // An interrupt that lands with a half-delivered line in the adapter's hands
 // must DROP it, not run it. The signal here is followed by a stdin close, and
 // that end-of-input is what ends the read: it returns rc=1 with the partial

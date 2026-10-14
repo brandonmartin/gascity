@@ -11,10 +11,11 @@
 # Wire protocol, matching how gc actually delivers a prompt (tmux.go
 # NudgeSession): one literal send-keys of the whole message (embedded newlines
 # included), a short debounce, an Escape, then Enter. So a multi-line prompt
-# lands as N lines with a trailing ESC byte on the last one. We read the first
-# line blocking, drain the rest of the burst on a 1s idle timeout — timed one
-# byte at a time, so the timer can never cut a line in half — strip control
-# bytes, and run ONE turn on the join. The cap is MAX_LINE_BYTES per LINE, not
+# lands as N lines with a trailing ESC byte on the last one. We wait for the
+# first byte on a 1s wake-up timer, take the rest of its line one timed byte at
+# a time, drain the rest of the burst on a 1s idle timeout — likewise one byte
+# at a time, so no timer can cut a line in half — strip control bytes, and run
+# ONE turn on the join. The cap is MAX_LINE_BYTES per LINE, not
 # per prompt: a prompt of any size is fine as long as its lines are, but one
 # unbroken line longer than the cap comes back rejoined with a newline the
 # sender never sent, changing that prompt's content and not just its framing.
@@ -770,15 +771,79 @@ note_failure_and_maybe_bail() {
     fi
 }
 
+# read_rest_of_line reads the remainder of the current line from stdin into
+# $rest and returns the status of the read that ended it: 0 for a newline or the
+# MAX_LINE_BYTES ceiling, 1 for end of input or a read error (with whatever
+# arrived in $rest).
+#
+# The read must be timed, but not as one read of the line. A TERM that lands
+# after bash last checked for traps and before a blocking read(2) starts stays
+# pending until that read returns, and while a line is partial that is never:
+# the trap's cleanup (stty restore, workdir removal) is skipped and tmux's
+# SIGKILL escalation is all that ends the pane. Waking every IDLE_WAKE_SECS lets
+# bash run it, as the idle wait does for the first byte. A timer on a read of
+# the whole line is the defect the drain comment describes, though: it hands
+# back, or drops, a fragment, and a prompt runs with bytes missing. So the line
+# is taken one byte at a time, each byte on its own timer. A one-byte read has
+# consumed nothing when its timer fires, there is nothing to lose, and the loop
+# only ever retries it.
+#
+# Every timeout shape the idle wait and the drain's peek handle is handled here
+# the same way: the delimiter is NUL, so a newline is a byte the variable
+# carries and a newline that lands as the timer expires is not mistaken for a
+# timeout that took nothing; a byte handed back with the timeout status is
+# input; bash 3.2 reports a timeout as status 1 with the variable unassigned,
+# told apart from end of input and a read error by the variable and the elapsed
+# time. A byte 3.2 takes off the fd as its timer fires is gone before the
+# script regains control; no script can recover it.
+#
+# A trapped INT does not end this read: the line is completed, and the caller's
+# interrupted checks decide what an end of input after it means. Dropping a
+# fragment here would leave the rest of the line to arrive as a prompt of its
+# own, without its head.
+#
+# The line costs one read per byte, which is what makes the timer safe. That is
+# roughly 15-30 microseconds a byte, so a 20 KB line takes about half a second
+# and a 100 KB one a few seconds, against a turn that runs for minutes. Counting
+# reads, not ${#rest}, keeps it linear: ${#rest} walks the string.
+read_rest_of_line() {
+    rest=
+    local tail_byte tail_rc tail_started tail_count=0
+    # shellcheck disable=SC2031
+    while (( tail_count < MAX_LINE_BYTES )); do
+        unset tail_byte
+        tail_started=$SECONDS
+        IFS= read -r -n 1 -d '' -t "$IDLE_WAKE_SECS" tail_byte
+        tail_rc=$?
+        if (( tail_rc == 1 && SECONDS - tail_started >= IDLE_WAKE_SECS )) && [[ -z "${tail_byte+set}" ]]; then
+            tail_rc=$READ_TIMEOUT_RC
+        fi
+        tail_byte="${tail_byte-}"
+        if (( tail_rc > 128 )); then
+            # A timeout that took nothing, or a signal that ended the read:
+            # wait again, which is also where a pending trap runs.
+            if [[ -z "$tail_byte" ]]; then continue; fi
+            tail_rc=0
+        fi
+        if (( tail_rc != 0 )); then return "$tail_rc"; fi
+        # A NUL byte: no shell variable can hold one, so it is dropped.
+        if [[ -z "$tail_byte" ]]; then continue; fi
+        if [[ "$tail_byte" == $'\n' ]]; then return 0; fi
+        rest+="$tail_byte"
+        tail_count=$(( tail_count + 1 ))
+    done
+    return 0
+}
+
 consecutive_failures=0
 printf 'zcode-repl: ZCode headless harness (serial, resume-threaded)\n'
 printf '%s\n' "$MARKER"
 
 while :; do
     interrupted=0
-    # Wait for the first byte on a timer, then read the rest of the line
-    # blocking. bash runs a trap only between commands or when a blocking read
-    # returns. A signal that lands after bash last checked for traps, but
+    # Wait for the first byte on a timer, then read the rest of the line one
+    # timed byte at a time (read_rest_of_line). bash runs a trap only between
+    # commands or when a blocking read returns. A signal that lands after bash last checked for traps, but
     # before read() blocks, leaves its trap pending until input arrives, and
     # for an idle pane that is never: TERM would not end the session (seen in
     # TestInterruptedTurnClosesTheMirrorEntry under load). Waking every
@@ -820,8 +885,7 @@ while :; do
         break
     done
     if (( read_rc == 0 )) && [[ -n "$line" ]]; then
-        rest=
-        IFS= read -r -n "$MAX_LINE_BYTES" rest
+        read_rest_of_line
         read_rc=$?
         line+="$rest"
     fi
@@ -835,11 +899,12 @@ while :; do
         # is the same defect this loop exists to prevent, a prompt with bytes
         # missing.
         #
-        # What no check here can do is recall bytes already taken. On bash 5.2
-        # a trapped INT does not end the read at all: if the rest of the line
-        # still arrives, the read resumes and completes with rc=0 and the whole
-        # line, never reaching this branch. So a live-pane C-c only cancels the
-        # partial line when an end of input follows it.
+        # What no check here can do is recall bytes already taken. A trapped
+        # INT does not end the rest-of-line read (read_rest_of_line waits
+        # again): if the rest of the line still arrives, the read completes
+        # with rc=0 and the whole line, never reaching this branch. So a
+        # live-pane C-c only cancels the partial line when an end of input
+        # follows it.
         if (( interrupted )) || (( read_rc > 128 )); then continue; fi
         # Nothing in hand and no interrupt: end of input.
         if [[ -z "$line" ]]; then break; fi
@@ -863,8 +928,9 @@ while :; do
     # So the timer only ever guards a ONE-BYTE read. A one-byte read has
     # consumed nothing when it times out, so there is nothing to lose; and
     # once that byte is in hand the burst is known to be continuing, so the
-    # rest of its line comes from a blocking read that cannot end early. A
-    # prompt is therefore only ever run on whole lines.
+    # rest of its line comes from read_rest_of_line, whose own timer only
+    # wakes it to run a pending trap and never ends the line early. A prompt
+    # is therefore only ever run on whole lines.
     #
     # The one-byte read can still hand back a byte with its timeout status, as
     # the idle wait's can: bash 5.2 checks the timer again after taking a byte,
@@ -898,8 +964,7 @@ while :; do
             line+=$'\n'
             continue
         fi
-        rest=
-        IFS= read -r -n "$MAX_LINE_BYTES" rest
+        read_rest_of_line
         line+=$'\n'"$peek$rest"
     done
 

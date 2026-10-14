@@ -222,7 +222,7 @@ esac
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", true)
+	report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root")
 	if err != nil {
 		t.Fatalf("managedDoltHealthCheck() error = %v", err)
 	}
@@ -373,7 +373,7 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 		return "7", nil
 	}
 
-	report, err := managedDoltHealthCheck("0.0.0.0", "3311", "root", true)
+	report, err := managedDoltHealthCheck("0.0.0.0", "3311", "root")
 	if err != nil {
 		t.Fatalf("managedDoltHealthCheck() error = %v", err)
 	}
@@ -411,7 +411,7 @@ func TestManagedDoltHealthCheckWithPasswordPropagatesReadOnlyProbeErrors(t *test
 		return "", nil
 	}
 
-	_, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", true)
+	_, err := managedDoltHealthCheck("127.0.0.1", "3311", "root")
 	if err == nil {
 		t.Fatal("managedDoltHealthCheck() error = nil, want read-only probe failure")
 	}

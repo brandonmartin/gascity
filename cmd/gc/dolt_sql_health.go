@@ -280,8 +280,11 @@ func managedDoltConnectionCount(host, port, user string) (string, error) {
 	return "", fmt.Errorf("parse connection count from %q", strings.TrimSpace(out))
 }
 
-func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (managedDoltSQLHealthReport, error) {
-	return managedDoltHealthCheckFor(host, port, user, checkReadOnly, managedDoltHealthTarget{})
+// managedDoltHealthCheck probes the server SQL layer with the read-only
+// check and no scope database. Callers that need to skip the read-only probe
+// or prove a database use managedDoltHealthCheckFor.
+func managedDoltHealthCheck(host, port, user string) (managedDoltSQLHealthReport, error) {
+	return managedDoltHealthCheckFor(host, port, user, true, managedDoltHealthTarget{})
 }
 
 // managedDoltHealthCheckFor is managedDoltHealthCheck with a scope database

@@ -251,6 +251,9 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		if invocationBdReadMemoEligible(target) {
 			defer installInvocationBdReadMemo()()
 		}
+		if invocationConfigMemoEligible(target) {
+			defer beginInvocationConfigMemo()()
+		}
 	}
 	executedCommand, executeErr := root.ExecuteC()
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))

@@ -119,6 +119,7 @@ go_test(
         "gh_expr_test.go",
         "git_test_env_test.go",
         "githooks_beads_chain_test.go",
+        "githooks_pre_push_skip_ref_test.go",
         "githooks_pre_push_stdin_test.go",
         "githooks_pre_push_suite_test.go",
         "githooks_pre_push_worker_env_test.go",

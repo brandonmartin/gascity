@@ -123,7 +123,7 @@ func TestCheckGoContextCancelsSynchronouslyWhenAlreadyAbandoned(t *testing.T) {
 	}
 }
 
-// TestOrderOutcomeHealthyScalesToLargeEventLog pins the ga-wu18 fix: the check
+// TestOrderOutcomeHealthyScalesToLargeEventLog pins the read-once fix: the check
 // took ~90s on a 151MB events.jsonl because it decoded the whole log three
 // times. The fixture is a fraction of that size; the budget is ~100x the
 // expected runtime, so only a return to decoding every line trips it.

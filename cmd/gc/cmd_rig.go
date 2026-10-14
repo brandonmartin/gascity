@@ -1386,6 +1386,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig remove: retiring provider scope ownership: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	invalidateInvocationConfigMemo()
 	if err := writeRigRemoval(tomlPath, cfg, rigName, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

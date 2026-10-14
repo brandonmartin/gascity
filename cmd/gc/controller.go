@@ -1483,6 +1483,9 @@ func runController(
 	stdout, stderr io.Writer,
 ) int {
 	markProgramShadowLongLived()
+	// A long-running host reloads city config on purpose; the per-invocation
+	// config memo (config_invocation_memo.go) would freeze it at boot.
+	leaveInvocationConfigMemo()
 	if heldLock == nil {
 		lock, err := acquireControllerLock(cityPath)
 		if err != nil {

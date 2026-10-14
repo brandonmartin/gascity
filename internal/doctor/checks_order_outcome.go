@@ -311,7 +311,7 @@ func compareEventSeq(a, b events.Event) int { return cmp.Compare(a.Seq, b.Seq) }
 // events reader can stop when the check is abandoned. The returned cancel must
 // always be called to release the watcher goroutine.
 //
-// A check already abandoned on entry gets an already-cancelled context rather
+// A check already abandoned on entry gets an already-canceled context rather
 // than waiting for the watcher goroutine to be scheduled: a loaded or
 // single-P scheduler can otherwise run a whole read before the cancellation
 // lands.

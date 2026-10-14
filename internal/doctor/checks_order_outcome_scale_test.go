@@ -108,7 +108,7 @@ func TestReadOrderEventsAbortsWhenCheckAbandoned(t *testing.T) {
 }
 
 // TestCheckGoContextCancelsSynchronouslyWhenAlreadyAbandoned pins that a Done
-// channel closed before the read starts yields an already-cancelled context.
+// channel closed before the read starts yields an already-canceled context.
 // Relying on the watcher goroutine alone lets a loaded or single-P scheduler
 // run the whole read before the cancellation lands.
 func TestCheckGoContextCancelsSynchronouslyWhenAlreadyAbandoned(t *testing.T) {
@@ -119,7 +119,7 @@ func TestCheckGoContextCancelsSynchronouslyWhenAlreadyAbandoned(t *testing.T) {
 	defer cancel()
 
 	if err := goCtx.Err(); err == nil {
-		t.Fatal("context from an already-closed Done is not cancelled, want cancelled before checkGoContext returns")
+		t.Fatal("context from an already-closed Done is not canceled, want canceled before checkGoContext returns")
 	}
 }
 

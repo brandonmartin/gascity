@@ -364,7 +364,7 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 		}
 		return nil
 	}
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
 		calledReadOnly = true
 		return "false", nil
 	}
@@ -403,7 +403,7 @@ func TestManagedDoltHealthCheckWithPasswordPropagatesReadOnlyProbeErrors(t *test
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error {
 		return nil
 	}
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
 		return "unknown", errors.New("read-only probe failed")
 	}
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) {

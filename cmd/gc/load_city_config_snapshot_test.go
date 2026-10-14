@@ -63,7 +63,9 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	const sharedBodyParam = "opts"
 
 	// Calls that must be handed a declining options value.
-	loadCalls := []string{"config.LoadWithIncludesOptions(", "loadPrematerializedCityConfig("}
+	// loadCityConfigMemoized is config.LoadWithIncludesOptions behind the
+	// per-invocation memo; it passes the options through unchanged.
+	loadCalls := []string{"config.LoadWithIncludesOptions(", "loadCityConfigMemoized(", "loadPrematerializedCityConfig("}
 
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {

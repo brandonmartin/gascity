@@ -102,7 +102,9 @@ func TestHostedCredentialProbeDeclinesTheRevisionSnapshot(t *testing.T) {
 	// Second half: every load call must be handed one of those values. Without
 	// this, the first half passes while the call site is switched to an inline
 	// config.LoadOptions{} or to a non-declining value declared elsewhere.
-	loadCalls := []string{"config.LoadWithIncludesOptions("}
+	// loadCityConfigMemoized is config.LoadWithIncludesOptions behind the
+	// per-invocation memo; it passes the options through unchanged.
+	loadCalls := []string{"config.LoadWithIncludesOptions(", "loadCityConfigMemoized("}
 	callsFound := 0
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)

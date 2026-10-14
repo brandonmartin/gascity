@@ -153,7 +153,7 @@ var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
-	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
+	cfg, _, err := loadCityConfigMemoized(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
 	if err != nil {
 		return nil
 	}

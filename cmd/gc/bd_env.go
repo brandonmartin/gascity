@@ -860,7 +860,7 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 		}
 		hostedCredentialProbeCache.Delete(key)
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
+	cfg, prov, err := loadCityConfigMemoized(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
 	hostedCredentialProbeLoads.Add(1)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)

@@ -56,7 +56,10 @@ func TestCLIStorageRoutesDeclineTheRevisionSnapshot(t *testing.T) {
 	}
 	loadsWithOptions := false
 	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "config.LoadWithIncludesOptions(") && strings.Contains(line, optionsName+")") {
+		// loadCityConfigMemoized is config.LoadWithIncludesOptions behind the
+		// per-invocation memo; it passes the options through unchanged.
+		loadCall := strings.Contains(line, "config.LoadWithIncludesOptions(") || strings.Contains(line, "loadCityConfigMemoized(")
+		if loadCall && strings.Contains(line, optionsName+")") {
 			loadsWithOptions = true
 		}
 	}

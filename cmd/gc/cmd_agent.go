@@ -63,7 +63,8 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
+	noteBuiltinPackRefresh(tomlPath)
+	cfg, prov, err := loadCityConfigMemoized(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +95,7 @@ func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...i
 // only in skipping the refresh; opts is what separates a blocking load from an
 // advisory one.
 func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
+	cfg, prov, err := loadCityConfigMemoized(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -260,6 +261,7 @@ func loadCityConfigForEditFS(fs fsys.FS, tomlPath string) (*config.City, error) 
 // when on-disk content already matches the desired content, preserving
 // idempotency for repeated config-edit commands.
 func writeCityConfigForEditFS(fs fsys.FS, tomlPath string, cfg *config.City) error {
+	defer invalidateInvocationConfigMemo()
 	return config.WriteCityAndRigSiteBindingsForEdit(fs, tomlPath, cfg)
 }
 
@@ -987,6 +989,7 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 	// Try to find agent in raw config.
 	if resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg)); ok {
 		resolvedQN := resolved.QualifiedName()
+		invalidateInvocationConfigMemo()
 		if err := config.WriteCityAgentSuspendedForEdit(fs, tomlPath, cfg, resolvedQN, suspended); err != nil {
 			fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 			return 1

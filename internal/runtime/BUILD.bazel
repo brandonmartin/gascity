@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "beacon.go",
         "carrier.go",
+        "claude_trust.go",
         "composite_forward.go",
         "control_socket.go",
         "dialog.go",
@@ -51,6 +52,7 @@ go_test(
         "beacon_test.go",
         "capacity_test.go",
         "carrier_test.go",
+        "claude_trust_test.go",
         "composite_forwarding_test.go",
         "dialog_codex_late_test.go",
         "dialog_midsession_test.go",

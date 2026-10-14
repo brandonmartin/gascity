@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -444,53 +445,103 @@ func TestMultiplexerWatch(t *testing.T) {
 }
 
 func TestMultiplexerWatchDoesNotWaitForSlowProvider(t *testing.T) {
-	m := NewMultiplexer()
-	m.providerTimeout = 20 * time.Millisecond
+	// The 20ms budget is the behavior under test. synctest advances it
+	// only once every attach goroutine is blocked, so scheduler delay
+	// cannot spend the budget and drop the healthy city.
+	synctest.Test(t, func(t *testing.T) {
+		const budget = 20 * time.Millisecond
+		m := NewMultiplexer()
+		m.providerTimeout = budget
 
-	healthy := NewFake()
-	slow := newBlockingProvider()
-	defer slow.release()
+		healthy := NewFake()
+		slow := newBlockingProvider()
+		defer slow.release()
 
-	m.Add("healthy", healthy)
-	m.Add("slow", slow)
+		m.Add("healthy", healthy)
+		m.Add("slow", slow)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 
-	result := make(chan struct {
-		w   *MuxWatcher
-		err error
-	}, 1)
-	go func() {
+		start := time.Now()
 		w, err := m.Watch(ctx, nil)
-		result <- struct {
+		if err != nil {
+			t.Fatalf("Watch() error = %v", err)
+		}
+		defer w.Close() //nolint:errcheck
+		if got := time.Since(start); got != budget {
+			t.Fatalf("Watch() returned after %s, want provider budget %s", got, budget)
+		}
+
+		healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
+		te, err := w.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if te.City != "healthy" || te.Actor != "a1" {
+			t.Fatalf("Next() = %+v, want healthy provider event", te)
+		}
+	})
+}
+
+func TestMultiplexerWatchBudgetIgnoresPrestartDelay(t *testing.T) {
+	// The call budget starts only once Provider.Watch is about to run.
+	// Hold both attach goroutines there and wait for Watch itself to
+	// return. That return is the pre-start floor firing. A scheduler
+	// delay must hit the default multiplexer timeout, not the 20ms
+	// call budget, and it must hit before either provider is called.
+	synctest.Test(t, func(t *testing.T) {
+		const budget = 20 * time.Millisecond
+		m := NewMultiplexer()
+		m.providerTimeout = budget
+
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseAttach := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseAttach()
+		entered := make(chan struct{})
+		var mu sync.Mutex
+		seen := 0
+		m.beforeAttach = func() {
+			mu.Lock()
+			seen++
+			if seen == 2 {
+				close(entered)
+			}
+			mu.Unlock()
+			<-release
+		}
+
+		m.Add("healthy", NewFake())
+		m.Add("slow", NewFake())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		type watchOutcome struct {
 			w   *MuxWatcher
 			err error
-		}{w: w, err: err}
-	}()
-
-	var w *MuxWatcher
-	select {
-	case got := <-result:
-		if got.err != nil {
-			t.Fatalf("Watch() error = %v", got.err)
 		}
-		w = got.w
-	case <-time.After(200 * time.Millisecond):
-		slow.release()
-		cancel()
-		t.Fatal("Watch() waited for the slow provider")
-	}
-	defer w.Close() //nolint:errcheck
+		result := make(chan watchOutcome, 1)
+		start := time.Now()
+		go func() {
+			w, err := m.Watch(ctx, nil)
+			result <- watchOutcome{w: w, err: err}
+		}()
 
-	healthy.Record(Event{Type: SessionWoke, Actor: "a1"})
-	te, err := w.Next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if te.City != "healthy" || te.Actor != "a1" {
-		t.Fatalf("Next() = %+v, want healthy provider event", te)
-	}
+		<-entered
+		got := <-result
+		if got.w != nil {
+			_ = got.w.Close()
+			t.Fatalf("Watch attached a watcher during pre-start hold: err=%v", got.err)
+		}
+		if !errors.Is(got.err, ErrNoWatchers) {
+			t.Fatalf("Watch() error = %v, want %v", got.err, ErrNoWatchers)
+		}
+		if elapsed := time.Since(start); elapsed != defaultMultiplexerProviderTimeout {
+			t.Fatalf("pre-start hold ended after %s, want start floor %s (call budget %s must not apply yet)", elapsed, defaultMultiplexerProviderTimeout, budget)
+		}
+	})
 }
 
 func TestMultiplexerWatchWithCursors(t *testing.T) {

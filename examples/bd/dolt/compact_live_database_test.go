@@ -34,30 +34,6 @@ func compactDoltLogLinesFor(log, db, substr string) []string {
 	return lines
 }
 
-// assertCompactQueryBefore fails unless the first fake dolt log line containing
-// earlier comes before the first line containing later.
-func assertCompactQueryBefore(t *testing.T, log, earlier, later string) {
-	t.Helper()
-	ei, li := -1, -1
-	for i, line := range strings.Split(log, "\n") {
-		if ei < 0 && strings.Contains(line, earlier) {
-			ei = i
-		}
-		if li < 0 && strings.Contains(line, later) {
-			li = i
-		}
-	}
-	if ei < 0 {
-		t.Fatalf("dolt log missing %q:\n%s", earlier, log)
-	}
-	if li < 0 {
-		t.Fatalf("dolt log missing %q:\n%s", later, log)
-	}
-	if ei > li {
-		t.Fatalf("want %q before %q (lines %d > %d)\n%s", earlier, later, ei, li, log)
-	}
-}
-
 // addCompactFixtureZedDatabase adds a second database, discovered after beads,
 // so a test can prove an aborted run never reaches it.
 func addCompactFixtureZedDatabase(t *testing.T, fixture compactScriptFixture) {

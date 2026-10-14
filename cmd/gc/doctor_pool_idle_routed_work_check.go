@@ -231,15 +231,18 @@ func (c *poolIdleRoutedWorkCheck) collectIdleInstances(store beads.Store, pools 
 }
 
 // unclaimedRoutedWork returns the sorted IDs of open, unassigned beads in store
-// routed to template — a targeted gc.routed_to metadata lookup, never a
-// full-store scan.
+// routed to template and not waiting on an unsatisfied blocking dependency —
+// a targeted gc.routed_to metadata lookup, never a full-store scan.
 func unclaimedRoutedWork(store beads.Store, template string) ([]string, error) {
-	// Live so bd's raw --status=open filter drops blocked/deferred rows
-	// before mapBdStatus collapses them into "open" and the check reports
-	// work the instance is correct to leave alone (same tradeoff as
-	// listOpenForControllerDemandLive). FederatedReadTier because a
-	// relocated class leg answers at exactly the tier asked.
-	items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	// Live so bd's raw --status=open filter drops rows in an explicit
+	// blocked/deferred status before mapBdStatus collapses them into "open"
+	// (same tradeoff as listOpenForControllerDemandLive). That filter does
+	// not see dependencies: a row waiting on an unclosed blocking
+	// dependency stays status=open, so the loop below checks those itself.
+	// FederatedReadTier because a relocated class leg answers at exactly the
+	// tier asked.
+	live := beads.HandlesFor(store).Live
+	items, err := live.List(beads.ListQuery{
 		Status:   "open",
 		TierMode: beads.FederatedReadTier,
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
@@ -252,8 +255,41 @@ func unclaimedRoutedWork(store beads.Store, template string) ([]string, error) {
 		if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
 			continue
 		}
+		blocked, err := waitsOnBlockingDependency(live, b.ID)
+		if err != nil {
+			return nil, fmt.Errorf("checking routed work %s: %w", b.ID, err)
+		}
+		if blocked {
+			continue
+		}
 		beadIDs = append(beadIDs, b.ID)
 	}
 	sort.Strings(beadIDs)
 	return beadIDs, nil
+}
+
+// waitsOnBlockingDependency reports whether the bead still has a blocking
+// dependency (blocks, waits-for, conditional-blocks) whose target does not
+// satisfy it, which is the condition bd ready uses to withhold the bead from
+// every claimant. A failed dependency or blocker read is returned rather than
+// read as "not blocked": counting the bead would report work no instance can
+// claim.
+func waitsOnBlockingDependency(live beads.LiveReader, id string) (bool, error) {
+	deps, err := live.DepList(id, "down")
+	if err != nil {
+		return false, fmt.Errorf("listing dependencies: %w", err)
+	}
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		blocker, err := live.Get(dep.DependsOnID)
+		if err != nil {
+			return false, fmt.Errorf("resolving blocker %s: %w", dep.DependsOnID, err)
+		}
+		if !beads.DependencySatisfied(blocker.Status, beads.ReadinessWorkOutcome(blocker.Metadata)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

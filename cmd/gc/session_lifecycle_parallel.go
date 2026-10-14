@@ -2459,7 +2459,10 @@ func releaseUncommittedPendingCreateRollback(expected sessionpkg.Info, sessFront
 	if sessFront == nil || strings.TrimSpace(expected.ID) == "" {
 		return
 	}
-	anchor := now.Add(-pendingCreateNeverStartedTimeout - time.Second).UTC().Format(time.RFC3339)
+	patch := sessionpkg.MetadataPatch{
+		"last_woke_at":              "",
+		"pending_create_started_at": now.Add(-pendingCreateNeverStartedTimeout - time.Second).UTC().Format(time.RFC3339),
+	}
 	if err := sessionpkg.WithSessionMutationLock(expected.ID, func() error {
 		current, err := sessFront.Get(expected.ID)
 		if err != nil {
@@ -2468,10 +2471,18 @@ func releaseUncommittedPendingCreateRollback(expected sessionpkg.Info, sessFront
 		if !samePendingCreateAttempt(expected, current) {
 			return nil
 		}
-		return sessFront.ApplyPatch(expected.ID, sessionpkg.MetadataPatch{
-			"last_woke_at":              "",
-			"pending_create_started_at": anchor,
-		})
+		// Fence the write on the row just read, on the keys a close rests on.
+		// A wake, a wake request or a new incarnation that lands after it owns
+		// the next decision, and a refused write leaves the lease for the next
+		// tick to judge.
+		res, err := sessFront.Commit(sessionpkg.Decide(current, sessionpkg.FactsLegacyClose), patch)
+		if err != nil {
+			return err
+		}
+		if res == sessionpkg.CommitContended {
+			return fmt.Errorf("session commit %s", res)
+		}
+		return nil
 	}); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: releasing in-flight lease for %s after failed pending-create rollback: %v\n", expected.ID, err) //nolint:errcheck
 	}

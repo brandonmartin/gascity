@@ -53,3 +53,6 @@ the only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
 `.githooks/lib/push-suite.sh` runs `bazel test //...` at push time. Its
 `make test-fast-parallel` fallback prints a banner with the reason, because
 that suite is not what CI enforces; `GC_PREPUSH_SUITE=go` opts in explicitly.
+Both engines run through `run_suite`, never `exec`: a 141 (SIGPIPE) fails
+the push with a named error, because it says a writer hit a closed pipe, not
+whether the tests passed (`TestPrePushSuiteFailsClosedOnSIGPIPE`).

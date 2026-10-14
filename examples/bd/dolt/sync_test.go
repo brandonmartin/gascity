@@ -1804,24 +1804,17 @@ exit 0
 	return cityPath, binDir, bdLog, port
 }
 
+// runSyncGC runs the sync script for the "app" database against the reachable
+// SQL listener on port, so --gc takes the bd purge path. It reuses runSync and
+// overrides runSync's unreachable GC_DOLT_PORT=1 default.
 func runSyncGC(t *testing.T, cityPath, binDir string, port int, args ...string) string {
 	t.Helper()
-	root := repoRoot(t)
-	cmd := exec.Command("sh", append([]string{filepath.Join(root, syncScript), "--db", "app"}, args...)...)
-	cmd.Env = append(syncFilteredEnv(),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+filepath.Join(cityPath, "data"),
-		fmt.Sprintf("GC_DOLT_PORT=%d", port),
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-	)
-	out, err := cmd.CombinedOutput()
+	extraEnv := []string{fmt.Sprintf("GC_DOLT_PORT=%d", port)}
+	out, err := runSync(t, binDir, cityPath, extraEnv, append([]string{"--db", "app"}, args...)...)
 	if err != nil {
 		t.Fatalf("gc dolt sync %v failed: %v\n%s", args, err, out)
 	}
-	return string(out)
+	return out
 }
 
 // TestSyncGCForcesThePurge pins that --gc actually deletes: bd purge only

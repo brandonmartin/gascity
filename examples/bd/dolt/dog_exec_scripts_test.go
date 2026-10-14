@@ -606,6 +606,27 @@ set_hash() {
   printf '%%s\n' "$1" > "$hash_state_file"
 }
 case "$query" in
+  *"CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
+    # Live-database probe the compactor runs after any flatten or GC. The
+    # db_dir_vanishes_* mode answers like a server whose database directory
+    # left the data dir; the db_unserved_* modes answer like a server that
+    # kept the directory but can no longer resolve the default branch head
+    # (hq 2026-08-09).
+    if [ "$mode" = "db_dir_vanishes_after_gc" ] && [ ! -d "${GC_DOLT_DATA_DIR:-}/$db/.dolt" ]; then
+      printf 'Error 1049 (HY000): database not found: %%s\n' "$db" >&2
+      exit 1
+    fi
+    unserved_file="${state_file}.unserved-$db"
+    if [ -f "$unserved_file" ]; then
+      if [ "$mode" = "db_unserved_once_after_gc" ]; then
+        rm -f -- "$unserved_file"
+      fi
+      printf "Error 1105 (HY000): cannot resolve default branch head for database '%%s': 'main'\n" "$db" >&2
+      exit 1
+    fi
+    print_cell "$db:$(current_head)"
+    exit 0
+    ;;
   *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)
     # Legacy date-ordered "HEAD" probe. A future-dated (clock-skewed) commit
     # sorts first, so this is NOT the branch HEAD; compact must resolve HEAD
@@ -1491,6 +1512,13 @@ case "$query" in
       printf 'read tcp 127.0.0.1:19266->127.0.0.1:40354: i/o timeout\n' >&2
       printf 'Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled\n' >&2
       exit 45
+    fi
+    if [ "$mode" = "db_dir_vanishes_after_gc" ]; then
+      rm -rf -- "${GC_DOLT_DATA_DIR:?}/$db"
+      exit 0
+    fi
+    if [ "$mode" = "db_unserved_after_gc" ] || [ "$mode" = "db_unserved_once_after_gc" ]; then
+      : > "${state_file}.unserved-$db"
     fi
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0

@@ -131,6 +131,7 @@ go_test(
         "install_bd_pinned_test.go",
         "integration_packages_shards_test.go",
         "integration_shards_test.go",
+        "lint_cache_contract_test.go",
         "lint_readonly_contract_test.go",
         "makefile_bazel_primary_test.go",
         "makefile_cgo_test.go",

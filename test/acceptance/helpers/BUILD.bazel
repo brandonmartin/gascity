@@ -25,10 +25,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/test/acceptance/helpers",
     visibility = ["//visibility:public"],
     deps = [
-        "//internal/bazeltest",
         "//internal/config",
-        "//internal/testutil",
-        "//test/toolhome",
         "@com_github_steveyegge_beads//schema",
         "@org_golang_x_mod//semver",
     ],
@@ -54,10 +51,7 @@ go_test(
         "tooling_test.go",
     ],
     embed = [":helpers"],
-    deps = [
-        "//internal/testenv",
-        "@com_github_steveyegge_beads//schema",
-    ],
+    deps = ["@com_github_steveyegge_beads//schema"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -16,19 +16,7 @@ go_test(
         "//:go.mod",
         "//examples:all_examples",
     ],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/coordclass",
-        "//internal/fsys",
-        "//internal/mail",
-        "//internal/nudgequeue",
-        "//internal/orders",
-        "//internal/session",
-        "//internal/storebinding",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

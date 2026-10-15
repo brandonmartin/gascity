@@ -10,7 +10,6 @@ go_library(
         "doctor/check-bd/run.sh",
         "pack.toml",
         "template-fragments/bead-worktree.template.md",
-        "//examples/bd/dolt:embed_files",
     ],
     importpath = "github.com/gastownhall/gascity/examples/bd",
     visibility = ["//visibility:public"],

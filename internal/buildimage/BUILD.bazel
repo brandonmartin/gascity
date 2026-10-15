@@ -9,7 +9,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/buildimage",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/citylayout"],
 )
 
 go_test(
@@ -20,10 +19,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":buildimage"],
-    deps = [
-        "//internal/citylayout",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

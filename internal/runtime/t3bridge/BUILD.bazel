@@ -12,10 +12,6 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/t3bridge",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/events",
-        "//internal/runtime",
         "@com_github_google_uuid//:uuid",
         "@com_github_gorilla_websocket//:websocket",
     ],
@@ -34,13 +30,7 @@ go_test(
         "watched_bead_event_test.go",
     ],
     embed = [":t3bridge"],
-    deps = [
-        "//internal/events",
-        "//internal/runtime",
-        "//internal/runtime/runtimetest",
-        "//internal/testenv",
-        "@com_github_gorilla_websocket//:websocket",
-    ],
+    deps = ["@com_github_gorilla_websocket//:websocket"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

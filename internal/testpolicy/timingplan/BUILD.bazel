@@ -5,7 +5,6 @@ go_library(
     srcs = ["plan.go"],
     importpath = "github.com/gastownhall/gascity/internal/testpolicy/timingplan",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/testpolicy/timingsummary"],
 )
 
 go_test(
@@ -15,10 +14,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":timingplan"],
-    deps = [
-        "//internal/testenv",
-        "//internal/testpolicy/timingsummary",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -5,11 +5,7 @@ go_library(
     srcs = ["featureflags.go"],
     importpath = "github.com/gastownhall/gascity/internal/featureflags",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/config",
-        "//internal/formula",
-        "//internal/molecule",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -18,11 +14,7 @@ go_test(
         "featureflags_test.go",
         "testenv_import_test.go",
     ],
-    deps = [
-        ":featureflags",
-        "//internal/config",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

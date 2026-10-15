@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "beacon.go",
         "carrier.go",
+        "claude_trust.go",
         "composite_forward.go",
         "control_socket.go",
         "dialog.go",
@@ -41,7 +42,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/overlay"],
 )
 
 go_test(
@@ -51,6 +51,7 @@ go_test(
         "beacon_test.go",
         "capacity_test.go",
         "carrier_test.go",
+        "claude_trust_test.go",
         "composite_forwarding_test.go",
         "dialog_codex_late_test.go",
         "dialog_midsession_test.go",
@@ -96,20 +97,6 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":runtime"],
-    deps = [
-        "//internal/runtime/acp",
-        "//internal/runtime/auto",
-        "//internal/runtime/exec",
-        "//internal/runtime/herdr",
-        "//internal/runtime/hybrid",
-        "//internal/runtime/k8s",
-        "//internal/runtime/runtimetest",
-        "//internal/runtime/ssh",
-        "//internal/runtime/subprocess",
-        "//internal/runtime/t3bridge",
-        "//internal/runtime/tmux",
-        "//internal/testenv",
-    ],
 )
 
 filegroup(

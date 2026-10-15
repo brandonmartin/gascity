@@ -14,9 +14,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/fsys",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/pidutil",
-    ] + select({
+    deps = select({
         "@rules_go//go/platform:aix": [
             "@org_golang_x_sys//unix",
         ],
@@ -65,10 +63,6 @@ go_test(
         "tree_snapshot_test.go",
     ],
     embed = [":fsys"],
-    deps = [
-        "//internal/fsys/fsystest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

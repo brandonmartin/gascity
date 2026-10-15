@@ -20,8 +20,6 @@ go_test(
         "//internal/bootstrap/packs/core:pack_files",
     ],
     deps = [
-        "//internal/bazeltest",
-        "//internal/testenv",
         "@com_github_burntsushi_toml//:toml",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],

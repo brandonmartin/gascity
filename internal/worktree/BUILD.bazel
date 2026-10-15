@@ -10,10 +10,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/worktree",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/git",
-        "//internal/pathutil",
-    ] + select({
+    deps = select({
         "@rules_go//go/platform:windows": [
             "@org_golang_x_sys//windows",
         ],
@@ -31,11 +28,6 @@ go_test(
         "worktree_test.go",
     ],
     embed = [":worktree"],
-    deps = [
-        "//internal/git",
-        "//internal/testenv",
-        "//internal/testutil",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

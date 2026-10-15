@@ -15,16 +15,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/rig",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads/contract",
-        "//internal/builtinpacks",
-        "//internal/config",
-        "//internal/fsys",
-        "//internal/git",
-        "//internal/packregistry",
-        "//internal/pathdurability",
-        "//internal/remotesource",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -42,14 +33,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":rig"],
-    deps = [
-        "//internal/builtinpacks",
-        "//internal/config",
-        "//internal/fsys",
-        "//internal/git",
-        "//internal/pathdurability",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

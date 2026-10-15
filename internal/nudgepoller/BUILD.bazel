@@ -5,10 +5,6 @@ go_library(
     srcs = ["poller.go"],
     importpath = "github.com/gastownhall/gascity/internal/nudgepoller",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/pathutil",
-        "//internal/pidutil",
-    ],
 )
 
 go_test(
@@ -19,7 +15,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":nudgepoller"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -31,22 +31,12 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/runtime",
-    ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/pidutil",
-        ],
+    deps = select({
         "@rules_go//go/platform:darwin": [
-            "//internal/pidutil",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/pidutil",
             "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:linux": [
-            "//internal/pidutil",
         ],
         "//conditions:default": [],
     }),
@@ -73,28 +63,12 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":proctable"],
-    deps = [
-        "//internal/beads/proxyendpoint",
-        "//internal/nudgepoller",
-        "//internal/testenv",
-    ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/pidutil",
-            "//internal/testutil",
-        ],
+    deps = select({
         "@rules_go//go/platform:darwin": [
-            "//internal/pidutil",
-            "//internal/runtime",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/pidutil",
-            "//internal/runtime",
             "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:linux": [
-            "//internal/pidutil",
-            "//internal/testutil",
         ],
         "//conditions:default": [],
     }),

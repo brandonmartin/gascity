@@ -6,7 +6,6 @@ go_test(
         "env_required_test.go",
         "testenv_import_test.go",
     ],
-    deps = ["//internal/testenv"],
 )
 
 exports_files(

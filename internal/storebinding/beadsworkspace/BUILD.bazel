@@ -8,13 +8,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/storebinding/beadsworkspace",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/config",
-        "//internal/coordclass",
-        "//internal/shellquote",
-        "//internal/storebinding",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -29,14 +23,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":beadsworkspace"],
-    deps = [
-        "//internal/beads",
-        "//internal/config",
-        "//internal/coordclass",
-        "//internal/shellquote",
-        "//internal/storebinding",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

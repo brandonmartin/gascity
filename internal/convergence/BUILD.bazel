@@ -28,14 +28,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/convergence",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/citylayout",
-        "//internal/doltauth",
-        "//internal/fsys",
-        "//internal/gchome",
-        "//internal/pathutil",
-    ],
 )
 
 go_test(
@@ -69,14 +61,6 @@ go_test(
         "trigger_test.go",
     ],
     embed = [":convergence"],
-    deps = [
-        "//internal/beads",
-        "//internal/fsys",
-        "//internal/gchome",
-        "//internal/processenv",
-        "//internal/testenv",
-        "//internal/testutil",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -14,9 +14,6 @@ go_test(
     data = glob(["testdata/**"]),
     deps = [
         "//internal/api",  # keep
-        "//internal/api/genclient",
-        "//internal/runproj",
-        "//internal/testenv",
         "//test/dashport/corpus",  # keep
     ],
 )

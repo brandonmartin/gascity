@@ -197,18 +197,7 @@ go_test(
         "//tools/bazel/rules:openapi_base_spec.bzl",
     ],
     shard_count = 6,
-    deps = [
-        "//internal/bazeltest",
-        "//internal/deps",
-        "//internal/runtime",
-        "//internal/runtime/exec",
-        "//internal/testenv",
-        "//internal/testpolicy/timingplan",
-        "//internal/testpolicy/timingplancli",
-        "//internal/testpolicy/timingsummary",
-        "//internal/testutil",
-        "@in_gopkg_yaml_v3//:yaml_v3",
-    ],
+    deps = ["@in_gopkg_yaml_v3//:yaml_v3"],
 )
 
 exports_files(

@@ -5,13 +5,6 @@ go_library(
     srcs = ["invocation.go"],
     importpath = "github.com/gastownhall/gascity/internal/graphv2",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/convoy",
-        "//internal/formula",
-        "//internal/molecule",
-    ],
 )
 
 go_test(
@@ -22,13 +15,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":graphv2"],
-    deps = [
-        "//internal/beads",
-        "//internal/convoy",
-        "//internal/coordclass",
-        "//internal/formulatest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -5,7 +5,6 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/internal/worker/fakecmd",
     visibility = ["//visibility:private"],
-    deps = ["//internal/worker/fake"],
 )
 
 go_binary(

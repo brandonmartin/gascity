@@ -4,7 +4,6 @@ go_test(
     name = "tutorial_goldens_test",
     srcs = ["testenv_import_test.go"],
     data = glob(["testdata/**"]),
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

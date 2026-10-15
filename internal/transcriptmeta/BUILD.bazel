@@ -5,7 +5,6 @@ go_library(
     srcs = ["transcriptmeta.go"],
     importpath = "github.com/gastownhall/gascity/internal/transcriptmeta",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/fsys"],
 )
 
 go_test(
@@ -15,7 +14,6 @@ go_test(
         "transcriptmeta_test.go",
     ],
     embed = [":transcriptmeta"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

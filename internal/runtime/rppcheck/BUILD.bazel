@@ -5,7 +5,6 @@ go_library(
     srcs = ["rppcheck.go"],
     importpath = "github.com/gastownhall/gascity/internal/runtime/rppcheck",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
 )
 
 go_test(
@@ -15,7 +14,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":rppcheck"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

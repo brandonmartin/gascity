@@ -5,10 +5,6 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/cmd/gc-write-mint",
     visibility = ["//visibility:private"],
-    deps = [
-        "//internal/citywriteauth",
-        "//internal/clientgrant",
-    ],
 )
 
 go_binary(
@@ -38,12 +34,6 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    deps = [
-        "//internal/bazeltest",
-        "//internal/citywriteauth",
-        "//internal/clientgrant",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

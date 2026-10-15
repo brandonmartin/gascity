@@ -19,10 +19,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/rollout",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/config",
-        "//internal/rollout/gate",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -48,11 +45,7 @@ go_test(
         "//:go.mod",
     ],
     embed = [":rollout"],
-    deps = [
-        "//internal/config",
-        "//internal/fsys",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 filegroup(

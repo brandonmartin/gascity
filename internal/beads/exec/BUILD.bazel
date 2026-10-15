@@ -8,7 +8,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/exec",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/beads"],
 )
 
 go_test(
@@ -28,11 +27,6 @@ go_test(
         "//contrib:all_files",
     ],
     embed = [":exec"],
-    deps = [
-        "//internal/beads",
-        "//internal/beads/beadstest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

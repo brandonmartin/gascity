@@ -10,7 +10,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/cliauth",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/gchome"],
 )
 
 go_test(
@@ -22,7 +21,6 @@ go_test(
         "wire_test.go",
     ],
     embed = [":cliauth"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

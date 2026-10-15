@@ -10,13 +10,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/convoy",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/config",
-        "//internal/coordclass",
-        "//internal/events",
-        "//internal/storeref",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -28,12 +22,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":convoy"],
-    deps = [
-        "//internal/beads",
-        "//internal/config",
-        "//internal/events",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

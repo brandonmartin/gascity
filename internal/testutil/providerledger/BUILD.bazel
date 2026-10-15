@@ -9,10 +9,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/testutil/providerledger",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/testpolicy/waiverclock",
-    ],
 )
 
 go_test(
@@ -40,10 +36,6 @@ go_test(
         "@go_sdk//:srcs",
     ],
     embed = [":providerledger"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

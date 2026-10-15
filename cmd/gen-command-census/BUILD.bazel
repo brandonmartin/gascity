@@ -5,7 +5,6 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/cmd/gen-command-census",
     visibility = ["//visibility:private"],
-    deps = ["//internal/commandcensus"],
 )
 
 go_binary(
@@ -31,11 +30,6 @@ go_test(
         "//internal/productmetrics:command_ids_gen.go",
     ],
     embed = [":gen-command-census_lib"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/commandcensus",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

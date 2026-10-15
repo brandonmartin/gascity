@@ -14,15 +14,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/materialize",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/agentutil",
-        "//internal/bootstrap",
-        "//internal/citylayout",
         "//internal/config",
-        "//internal/fsys",
-        "//internal/git",
-        "//internal/pathutil",
-        "//internal/runtime",
-        "//internal/workdir",
         "@com_github_burntsushi_toml//:toml",
     ],
 )
@@ -37,12 +29,7 @@ go_test(
     ],
     embed = [":materialize"],
     deps = [
-        "//internal/bootstrap",
         "//internal/config",
-        "//internal/fsys",
-        "//internal/runtime",
-        "//internal/testenv",
-        "//internal/testutil",
         "@com_github_burntsushi_toml//:toml",
     ],
 )

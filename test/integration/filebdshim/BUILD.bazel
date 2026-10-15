@@ -5,11 +5,6 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/test/integration/filebdshim",
     visibility = ["//visibility:private"],
-    deps = [
-        "//internal/beads",
-        "//internal/events",
-        "//internal/fsys",
-    ],
 )
 
 go_binary(
@@ -25,10 +20,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":filebdshim_lib"],
-    deps = [
-        "//internal/beads",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -10,7 +10,6 @@ go_library(
     srcs = ["conformance.go"],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimetest",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
 )
 
 go_test(
@@ -20,10 +19,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":runtimetest"],
-    deps = [
-        "//internal/runtime",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

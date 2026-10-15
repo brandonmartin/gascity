@@ -21,10 +21,6 @@ go_test(
         "rules_test.go",
         "testenv_import_test.go",
     ],
-    deps = [
-        ":chartest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

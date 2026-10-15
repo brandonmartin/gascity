@@ -5,7 +5,6 @@ go_library(
     srcs = ["exec.go"],
     importpath = "github.com/gastownhall/gascity/internal/events/exec",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/events"],
 )
 
 go_test(
@@ -15,11 +14,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":exec"],
-    deps = [
-        "//internal/events",
-        "//internal/events/eventstest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -21,12 +21,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/acp",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/citylayout",
-        "//internal/fsys",
-        "//internal/runtime",
-        "//internal/runtime/proctable",
-    ],
 )
 
 go_test(
@@ -70,23 +64,6 @@ go_test(
             "GC_TEST_FAKEACP_BIN": "$(rootpath //internal/runtime/acp/testdata/fakeacp)",
         },
         "//conditions:default": {},
-    }),
-    deps = [
-        "//internal/bazeltest",
-        "//internal/runtime",
-        "//internal/runtime/auto",
-        "//internal/runtime/hybrid",
-        "//internal/runtime/runtimetest",
-        "//internal/testenv",
-        "//internal/testutil",
-    ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/runtime/proctable",
-        ],
-        "@rules_go//go/platform:linux": [
-            "//internal/runtime/proctable",
-        ],
-        "//conditions:default": [],
     }),
 )
 

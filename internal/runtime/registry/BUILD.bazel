@@ -5,10 +5,7 @@ go_library(
     srcs = ["registry.go"],
     importpath = "github.com/gastownhall/gascity/internal/runtime/registry",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/config",
-        "//internal/runtime",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -18,11 +15,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":registry"],
-    deps = [
-        "//internal/config",
-        "//internal/runtime",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -23,10 +23,6 @@ go_test(
         "//test:bazel-hermeticity.toml",
     ],
     embed = [":bazelhermetic"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

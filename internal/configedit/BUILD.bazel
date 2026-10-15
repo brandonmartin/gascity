@@ -9,11 +9,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/configedit",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/citylayout",
         "//internal/config",
-        "//internal/fsys",
-        "//internal/suspensionstate",
-        "//internal/workspacesvc",
         "@com_github_burntsushi_toml//:toml",
     ],
 )
@@ -29,21 +25,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":configedit"],
-    deps = [
-        "//internal/config",
-        "//internal/fsys",
-        "//internal/pathutil",
-        "//internal/suspensionstate",
-        "//internal/testenv",
-    ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:linux": [
-            "//internal/testutil",
-        ],
-        "//conditions:default": [],
-    }),
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

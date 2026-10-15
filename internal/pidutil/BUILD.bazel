@@ -36,7 +36,6 @@ go_test(
         "vanish_linux_test.go",
     ],
     embed = [":pidutil"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

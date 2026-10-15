@@ -66,21 +66,6 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/config",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/agent",
-        "//internal/beadmeta",
-        "//internal/builtinpacks",
-        "//internal/citylayout",
-        "//internal/clock",
-        "//internal/fsys",
-        "//internal/git",
-        "//internal/orders",
-        "//internal/pathdurability",
-        "//internal/pathutil",
-        "//internal/pricing",
-        "//internal/remotesource",
-        "//internal/rollout/gate",
-        "//internal/shellquote",
-        "//internal/worker/builtin",
         "@com_github_burntsushi_toml//:toml",
     ] + select({
         "@rules_go//go/platform:windows": [
@@ -203,20 +188,7 @@ go_test(
         "//examples/storage:pack_files",
     ],
     embed = [":config"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/beadmeta",
-        "//internal/builtinpacks",
-        "//internal/citylayout",
-        "//internal/coordclass",
-        "//internal/fsys",
-        "//internal/pathdurability",
-        "//internal/pathutil",
-        "//internal/pricing",
-        "//internal/shellquote",
-        "//internal/testenv",
-        "@com_github_burntsushi_toml//:toml",
-    ],
+    deps = ["@com_github_burntsushi_toml//:toml"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -10,7 +10,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimecontract",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
 )
 
 go_test(
@@ -28,7 +27,6 @@ go_test(
         "//internal/runtime/runtimetest:conformance.go",
     ],
     embed = [":runtimecontract"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

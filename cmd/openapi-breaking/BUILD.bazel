@@ -44,10 +44,6 @@ go_test(
         "GC_REQUIRE_OASDIFF": "1",
         "GC_TEST_OASDIFF_BIN": "$(rootpath @oasdiff_bin//:oasdiff)",
     },
-    deps = [
-        "//internal/bazeltest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

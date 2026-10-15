@@ -150,16 +150,7 @@ go_test(
         "//conditions:default": {},
     }),
     shard_count = 6,
-    deps = [
-        "//internal/bazeltest",
-        "//internal/config",
-        "//internal/formula",
-        "//internal/fsys",
-        "//internal/orders",
-        "//internal/testenv",
-        "//internal/testutil",
-        "//internal/workdir",
-    ],
+    deps = ["//internal/config"],
 )
 
 exports_files(glob(

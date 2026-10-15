@@ -107,6 +107,16 @@ func (s *failingSequenceBumpStore) SetMetadataBatch(id string, kvs map[string]st
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
+// newPinnedIDMemStore returns an in-memory store that keeps a caller's pinned
+// bead ID and refuses a second bead with it, as every production bead store
+// does. The default MemStore mints over a pinned ID, so it cannot model the
+// store-level refusal that keeps transcript sequences unique.
+func newPinnedIDMemStore() *beads.MemStore {
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	return store
+}
+
 func appendInboundForSequenceTest(ctx context.Context, svc TranscriptService, ref ConversationRef, providerMessageID string, at time.Time) (ConversationTranscriptRecord, error) {
 	return svc.Append(ctx, AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
@@ -205,7 +215,7 @@ func finishGatedAppend(t *testing.T, gate *gatedCreateStore, done <-chan error, 
 func TestTranscriptAppendSequenceUniqueAcrossLockPools(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
-	shared := beads.NewMemStore()
+	shared := newPinnedIDMemStore()
 	ref := testConversationRef()
 
 	writerA := newTranscriptService(shared, newBindingLockPool())
@@ -232,7 +242,7 @@ func TestTranscriptAppendSequenceUniqueAcrossLockPools(t *testing.T) {
 func TestTranscriptBackfillCursorDoesNotSkipLateEntry(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
-	shared := beads.NewMemStore()
+	shared := newPinnedIDMemStore()
 	ref := testConversationRef()
 
 	writerA := newTranscriptService(shared, newBindingLockPool())
@@ -311,7 +321,7 @@ func TestTranscriptBackfillCursorDoesNotSkipLateEntry(t *testing.T) {
 func TestTranscriptAppendSequenceUniqueAfterAmbiguousCreate(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
-	inner := beads.NewMemStore()
+	inner := newPinnedIDMemStore()
 	svc := NewServices(&ambiguousCreateStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
@@ -335,7 +345,7 @@ func TestTranscriptAppendSequenceUniqueAfterAmbiguousCreate(t *testing.T) {
 func TestTranscriptAppendSequenceUniqueAfterStateBumpFailure(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
-	inner := beads.NewMemStore()
+	inner := newPinnedIDMemStore()
 	svc := NewServices(&failingSequenceBumpStore{Store: inner}).Transcript
 	ref := testConversationRef()
 
@@ -361,7 +371,7 @@ func TestTranscriptAppendSequenceUniqueAfterStateBumpFailure(t *testing.T) {
 func TestHandleInboundNormalizedAmbiguousCreateKeepsSequencesDistinct(t *testing.T) {
 	freezeTestClock(t)
 	ctx := context.Background()
-	inner := beads.NewMemStore()
+	inner := newPinnedIDMemStore()
 	fabric := NewServices(&ambiguousCreateStore{Store: inner})
 	ref := testConversationRef()
 	deps := InboundDeps{

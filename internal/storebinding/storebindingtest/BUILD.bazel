@@ -16,15 +16,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/storebinding/storebindingtest",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/mail",
-        "//internal/mail/mailtest",
-        "//internal/nudgequeue",
-        "//internal/orders",
-        "//internal/session",
-        "//internal/storebinding",
-    ],
 )
 
 go_test(
@@ -35,11 +26,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":storebindingtest"],
-    deps = [
-        "//internal/beads",
-        "//internal/storebinding",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

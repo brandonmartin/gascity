@@ -16,10 +16,6 @@ go_library(
 go_test(
     name = "runtimelease_test",
     srcs = ["runtimelease_test.go"],
-    deps = [
-        ":runtimelease",
-        "//tools/nogo/analyzers/internal/analyzertest",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

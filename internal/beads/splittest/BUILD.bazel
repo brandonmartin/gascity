@@ -10,11 +10,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/splittest",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/config",
-        "//internal/storeref",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -34,14 +30,7 @@ go_test(
         "//:repo_go_srcs",
     ],
     embed = [":splittest"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/beads",
-        "//internal/beads/beadstest",
-        "//internal/config",
-        "//internal/storeref",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

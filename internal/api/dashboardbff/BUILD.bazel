@@ -23,10 +23,6 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/api/dashboardbff",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/beads",
-        "//internal/beads/proxyendpoint",
-        "//internal/events",
-        "//internal/runproj",
         "@com_github_shirou_gopsutil_v4//host",
         "@com_github_shirou_gopsutil_v4//load",
         "@com_github_shirou_gopsutil_v4//mem",
@@ -60,12 +56,6 @@ go_test(
     ],
     embed = [":dashboardbff"],
     deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/events",
-        "//internal/runproj",
-        "//internal/testenv",
-        "//internal/testutil",
         "@com_github_shirou_gopsutil_v4//load",
         "@com_github_shirou_gopsutil_v4//mem",
     ],

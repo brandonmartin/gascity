@@ -14,7 +14,6 @@ go_test(
         "waiverclock_test.go",
     ],
     embed = [":waiverclock"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -25,12 +25,6 @@ go_test(
     ],
     deps = [
         "//internal/config",
-        "//internal/configedit",
-        "//internal/fsys",
-        "//internal/testenv",
-        "//test/acceptance/helpers",
-        "//test/dolttest",
-        "//test/tmuxtest",
         "@com_github_stretchr_testify//require",
     ],
 )

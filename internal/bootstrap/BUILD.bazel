@@ -8,7 +8,6 @@ go_library(
     ),
     importpath = "github.com/gastownhall/gascity/internal/bootstrap",
     visibility = ["//:__subpackages__"],
-    embedsrcs = ["//internal/bootstrap/packs/core:pack_files"],
     deps = [
         "//internal/config",
         "@com_github_burntsushi_toml//:toml",
@@ -31,12 +30,7 @@ go_test(
         "//internal/bootstrap/packs/core:pack_files",
     ],
     embed = [":bootstrap"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/config",
-        "//internal/formula",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

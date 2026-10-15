@@ -23,14 +23,7 @@ go_test(
         "@bd_bin_v1_3_1//:bd",
         "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
-    deps = [
-        "//internal/beads",
-        "//internal/beads/beadstest",
-        "//internal/fsys",
-        "//internal/testenv",
-        "//test/acceptance/helpers",
-        "@com_github_gastownhall_gascity_packs//:gascity-packs",
-    ],
+    deps = ["@com_github_gastownhall_gascity_packs//:gascity-packs"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

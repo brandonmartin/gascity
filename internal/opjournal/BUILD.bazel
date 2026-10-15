@@ -18,10 +18,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/opjournal",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/clock",
-    ],
 )
 
 go_test(
@@ -38,14 +34,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":opjournal"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/beads/beadstest",
-        "//internal/clock",
-        "//internal/coordclass",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

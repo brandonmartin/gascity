@@ -15,10 +15,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":ledgerfeed"],
-    deps = [
-        "//internal/testenv",
-        "@com_github_steveyegge_beads//journalops",
-    ],
+    deps = ["@com_github_steveyegge_beads//journalops"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

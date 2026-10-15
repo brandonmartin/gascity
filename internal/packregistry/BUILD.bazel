@@ -13,10 +13,6 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/packregistry",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/fsys",
-        "//internal/gchome",
-        "//internal/git",
-        "//internal/remotesource",
         "@com_github_burntsushi_toml//:toml",
     ] + select({
         "@rules_go//go/platform:windows": [
@@ -36,7 +32,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":packregistry"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

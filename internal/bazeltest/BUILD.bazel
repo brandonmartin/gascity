@@ -51,5 +51,4 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":bazeltest"],
-    deps = ["//internal/testenv"],
 )

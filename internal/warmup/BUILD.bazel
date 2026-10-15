@@ -10,8 +10,6 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
-        "//internal/doctor",
-        "//internal/mail",
         "@org_golang_x_sync//errgroup",
     ],
 )
@@ -23,12 +21,7 @@ go_test(
         "warmup_test.go",
     ],
     embed = [":warmup"],
-    deps = [
-        "//internal/config",
-        "//internal/doctor",
-        "//internal/mail",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

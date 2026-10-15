@@ -5,10 +5,7 @@ go_library(
     srcs = ["skill_collision.go"],
     importpath = "github.com/gastownhall/gascity/internal/validation",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/config",
-        "//internal/materialize",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -18,10 +15,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":validation"],
-    deps = [
-        "//internal/config",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

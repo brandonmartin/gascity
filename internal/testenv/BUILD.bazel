@@ -33,11 +33,6 @@ go_test(
         "//tools/nogo:go.mod",
     ],
     embed = [":testenv"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/beads/contract",
-        "//internal/rollout",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

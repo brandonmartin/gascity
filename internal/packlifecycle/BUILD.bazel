@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "packlifecycle",
+    srcs = ["runner.go"],
+    importpath = "github.com/gastownhall/gascity/internal/packlifecycle",
+    visibility = ["//worktrees/ga-d51f:__subpackages__"],
+)
+
+go_test(
+    name = "packlifecycle_test",
+    srcs = [
+        "runner_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":packlifecycle"],
+)

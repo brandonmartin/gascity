@@ -8,7 +8,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/mail/exec",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/mail"],
 )
 
 go_test(
@@ -21,11 +20,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":exec"],
-    deps = [
-        "//internal/mail",
-        "//internal/mail/mailtest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

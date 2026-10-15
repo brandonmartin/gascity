@@ -22,7 +22,6 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":bepsummary"],
     embedsrcs = ["redact.jq"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

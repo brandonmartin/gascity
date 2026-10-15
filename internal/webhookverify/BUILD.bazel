@@ -34,7 +34,6 @@ go_test(
     embed = [":webhookverify"],
     deps = [
         "//internal/config",
-        "//internal/testenv",
         "@com_github_go_jose_go_jose_v4//:go-jose",
         "@com_github_golang_jwt_jwt_v5//:jwt",
     ],

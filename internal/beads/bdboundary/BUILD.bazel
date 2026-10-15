@@ -14,10 +14,6 @@ go_test(
         "//:repo_go_srcs",
         "//:repo_go_test_srcs",
     ],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

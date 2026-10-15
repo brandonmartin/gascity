@@ -6,7 +6,6 @@ go_library(
     importpath = "github.com/gastownhall/gascity/tools/nogo/analyzers/unconvert",
     visibility = ["//visibility:public"],
     deps = [
-        "//tools/nogo/analyzers/internal/position",
         "@com_github_golangci_unconvert//:unconvert",
         "@org_golang_x_tools//go/analysis",
     ],
@@ -15,10 +14,6 @@ go_library(
 go_test(
     name = "unconvert_test",
     srcs = ["unconvert_test.go"],
-    deps = [
-        ":unconvert",
-        "//tools/nogo/analyzers/internal/analyzertest",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

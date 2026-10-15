@@ -35,20 +35,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/storebinding",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/coordclass",
-        "//internal/events",
-        "//internal/extmsg",
-        "//internal/mail",
-        "//internal/mail/beadmail",
-        "//internal/nudgequeue",
-        "//internal/orders",
-        "//internal/pathutil",
-        "//internal/session",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -102,46 +89,7 @@ go_test(
         "//:repo_go_srcs",
     ],
     embed = [":storebinding"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/coordclass",
-        "//internal/extmsg",
-        "//internal/mail",
-        "//internal/nudgequeue",
-        "//internal/orders",
-        "//internal/session",
-        "//internal/storebinding/storebindingtest",
-        "//internal/testenv",
-        "//internal/testpolicy/resourcecensus",
-    ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:darwin": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:dragonfly": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:freebsd": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:ios": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:linux": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:netbsd": [
-            "//internal/testutil",
-        ],
-        "@rules_go//go/platform:openbsd": [
-            "//internal/testutil",
-        ],
-        "//conditions:default": [],
-    }),
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -16,15 +16,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/workspacesvc",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/citylayout",
-        "//internal/config",
-        "//internal/execenv",
-        "//internal/pidutil",
-        "//internal/runtime",
-        "//internal/supervisor",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -39,16 +31,7 @@ go_test(
         "validate_test.go",
     ],
     embed = [":workspacesvc"],
-    deps = [
-        "//internal/beads",
-        "//internal/citylayout",
-        "//internal/config",
-        "//internal/execenv",
-        "//internal/pidutil",
-        "//internal/runtime",
-        "//internal/supervisor",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

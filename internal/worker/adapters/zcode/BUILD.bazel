@@ -14,12 +14,6 @@ go_test(
         "adapter_test.go",
         "testenv_import_test.go",
     ],
-    deps = [
-        ":zcode",
-        "//internal/pathutil",
-        "//internal/sessionlog",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

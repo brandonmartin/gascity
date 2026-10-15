@@ -5,13 +5,7 @@ go_library(
     srcs = ["corpus.go"],
     importpath = "github.com/gastownhall/gascity/test/dashport/corpus",
     visibility = ["//visibility:public"],
-    deps = [
-        "//internal/beads",
-        "//internal/config",
-        "//internal/events",
-        "//internal/mail/beadmail",
-        "//internal/session",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

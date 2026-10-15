@@ -5,10 +5,6 @@ go_library(
     srcs = ["muxsource.go"],
     importpath = "github.com/gastownhall/gascity/internal/eventfeed",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/events",
-        "//pkg/eventexport",
-    ],
 )
 
 go_test(
@@ -19,12 +15,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":eventfeed"],
-    deps = [
-        "//internal/events",
-        "//internal/testenv",
-        "//internal/testutil",
-        "//pkg/eventexport",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

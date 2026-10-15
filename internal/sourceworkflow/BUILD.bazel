@@ -5,14 +5,6 @@ go_library(
     srcs = ["sourceworkflow.go"],
     importpath = "github.com/gastownhall/gascity/internal/sourceworkflow",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/beads/closeorder",
-        "//internal/citylayout",
-        "//internal/coordclass",
-        "//internal/pathutil",
-    ],
 )
 
 go_test(
@@ -23,12 +15,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":sourceworkflow"],
-    deps = [
-        "//internal/beads",
-        "//internal/session",
-        "//internal/testenv",
-        "//internal/testutil",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

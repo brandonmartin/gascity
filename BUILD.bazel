@@ -332,6 +332,10 @@ filegroup(
 filegroup(
     name = "repo_source_tree",
     srcs = [
+        ":Makefile",
+        ":TESTING.md",
+        ":go.mod",
+        ":root_extras",
         "//cmd:bazel_repo_srcs",
         "//cmd/gc:bazel_repo_srcs",
         "//cmd/gc-write-mint:bazel_repo_srcs",
@@ -579,10 +583,6 @@ filegroup(
         "//tools/nogo/analyzers/unused:bazel_repo_srcs",
         "//tools/nogo/analyzers/v2purity:bazel_repo_srcs",
         "//tools/nogo/analyzers/worklegs:bazel_repo_srcs",
-        ":go.mod",
-        ":Makefile",
-        ":TESTING.md",
-        ":root_extras",
     ],
     visibility = ["//visibility:public"],
 )
@@ -591,6 +591,7 @@ filegroup(
 filegroup(
     name = "repo_go_srcs",
     srcs = [
+        ":schemas_embed.go",
         "//cmd:bazel_go_srcs",
         "//cmd/gc:bazel_go_srcs",
         "//cmd/gc-write-mint:bazel_go_srcs",
@@ -838,7 +839,6 @@ filegroup(
         "//tools/nogo/analyzers/unused:bazel_go_srcs",
         "//tools/nogo/analyzers/v2purity:bazel_go_srcs",
         "//tools/nogo/analyzers/worklegs:bazel_go_srcs",
-        ":schemas_embed.go",
     ],
     visibility = ["//visibility:public"],
 )

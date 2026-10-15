@@ -5,13 +5,6 @@ go_library(
     srcs = ["projector.go"],
     importpath = "github.com/gastownhall/gascity/internal/executionevent",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/convoy",
-        "//internal/events",
-        "//pkg/eventexport",
-    ],
 )
 
 go_test(
@@ -27,12 +20,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":executionevent"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/events",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

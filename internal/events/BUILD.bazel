@@ -81,11 +81,6 @@ go_test(
         "watch_backfill_test.go",
     ],
     embed = [":events"],
-    deps = [
-        "//internal/events/eventstest",
-        "//internal/testenv",
-        "//internal/testutil",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

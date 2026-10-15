@@ -21,11 +21,7 @@ go_test(
         "stored_param_test.go",
         "v2purity_test.go",
     ],
-    deps = [
-        ":v2purity",
-        "//tools/nogo/analyzers/internal/analyzertest",
-        "@org_golang_x_tools//go/analysis",
-    ],
+    deps = ["@org_golang_x_tools//go/analysis"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

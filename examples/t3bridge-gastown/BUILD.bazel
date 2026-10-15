@@ -12,14 +12,7 @@ go_test(
     ) + [
         "//:go.mod",
     ],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/builtinpacks",
-        "//internal/config",
-        "//internal/fsys",
-        "//internal/packman",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 exports_files(glob(

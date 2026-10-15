@@ -30,11 +30,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/beadstest",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/testpolicy/waiverclock",
-    ],
 )
 
 go_test(
@@ -48,11 +43,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":beadstest"],
-    deps = [
-        "//internal/beads",
-        "//internal/fsys",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

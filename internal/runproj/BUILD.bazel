@@ -32,11 +32,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runproj",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/events",
-    ],
 )
 
 go_test(
@@ -71,12 +66,6 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":runproj"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/events",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

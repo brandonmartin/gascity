@@ -16,10 +16,6 @@ go_library(
 go_test(
     name = "testrelax_test",
     srcs = ["testrelax_test.go"],
-    deps = [
-        ":testrelax",
-        "//tools/nogo/analyzers/internal/analyzertest",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

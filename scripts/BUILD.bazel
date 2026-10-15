@@ -126,6 +126,7 @@ go_test(
         "go_test_run_script_test.go",
         "gomod_replace_guard_test.go",
         "harness_reap_test.go",
+        "install_bd_pinned_test.go",
         "integration_packages_shards_test.go",
         "integration_shards_test.go",
         "lint_readonly_contract_test.go",
@@ -197,18 +198,7 @@ go_test(
         "//tools/bazel/rules:openapi_base_spec.bzl",
     ],
     shard_count = 6,
-    deps = [
-        "//internal/bazeltest",
-        "//internal/deps",
-        "//internal/runtime",
-        "//internal/runtime/exec",
-        "//internal/testenv",
-        "//internal/testpolicy/timingplan",
-        "//internal/testpolicy/timingplancli",
-        "//internal/testpolicy/timingsummary",
-        "//internal/testutil",
-        "@in_gopkg_yaml_v3//:yaml_v3",
-    ],
+    deps = ["@in_gopkg_yaml_v3//:yaml_v3"],
 )
 
 exports_files(

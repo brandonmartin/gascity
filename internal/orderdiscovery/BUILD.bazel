@@ -5,12 +5,7 @@ go_library(
     srcs = ["discovery.go"],
     importpath = "github.com/gastownhall/gascity/internal/orderdiscovery",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/citylayout",
-        "//internal/config",
-        "//internal/fsys",
-        "//internal/orders",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -20,10 +15,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":orderdiscovery"],
-    deps = [
-        "//internal/config",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

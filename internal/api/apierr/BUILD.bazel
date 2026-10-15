@@ -20,11 +20,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":apierr"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/testenv",
-        "@com_github_danielgtaylor_huma_v2//:huma",
-    ],
+    deps = ["@com_github_danielgtaylor_huma_v2//:huma"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

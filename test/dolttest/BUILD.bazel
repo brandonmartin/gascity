@@ -5,7 +5,6 @@ go_library(
     srcs = ["dolttest.go"],
     importpath = "github.com/gastownhall/gascity/test/dolttest",
     visibility = ["//visibility:public"],
-    deps = ["//internal/doltorphan"],
 )
 
 go_test(
@@ -15,7 +14,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":dolttest"],
-    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

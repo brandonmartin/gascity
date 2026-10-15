@@ -17,7 +17,6 @@ go_test(
     embed = [":doltpool"],
     deps = [
         "//internal/config",
-        "//internal/testenv",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )

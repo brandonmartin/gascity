@@ -17,12 +17,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/herdr",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/execgrace",
-        "//internal/runtime",
-        "//internal/runtime/proctable",
-        "//internal/shellquote",
-    ],
 )
 
 go_test(
@@ -35,6 +29,7 @@ go_test(
         "agentname_test.go",
         "claude_text_test.go",
         "client_test.go",
+        "conformance_test.go",
         "dial_bound_test.go",
         "effectiveworkdir_test.go",
         "errorcode_test.go",
@@ -62,13 +57,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":herdr"],
-    deps = [
-        "//internal/runtime",
-        "//internal/runtime/herdr/herdrtest",
-        "//internal/runtime/proctable",
-        "//internal/shellquote",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

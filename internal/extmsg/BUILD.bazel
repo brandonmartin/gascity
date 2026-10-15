@@ -26,12 +26,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/extmsg",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beads",
-        "//internal/events",
-        "//internal/promptsafe",
-        "//internal/session",
-    ],
 )
 
 go_test(
@@ -43,7 +37,9 @@ go_test(
         "extmsg_test.go",
         "helpers_test.go",
         "http_adapter_test.go",
+        "inbound_asleep_test.go",
         "outbound_test.go",
+        "publishable_test.go",
         "rebind_test.go",
         "session_directory_test.go",
         "session_model_phase0_spec_test.go",
@@ -52,12 +48,6 @@ go_test(
         "types_wire_test.go",
     ],
     embed = [":extmsg"],
-    deps = [
-        "//internal/beads",
-        "//internal/events",
-        "//internal/session",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

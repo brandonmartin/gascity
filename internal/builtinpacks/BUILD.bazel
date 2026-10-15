@@ -6,12 +6,6 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/builtinpacks",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//examples/bd",
-        "//examples/bd/dolt",
-        "//internal/bootstrap/packs/core",
-        "//internal/fsys",
-        "//internal/git",
-        "//internal/remotesource",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
     ],
@@ -38,11 +32,7 @@ go_test(
         "//internal/bootstrap/packs/core:pack_files",
     ],
     embed = [":builtinpacks"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/testenv",
-        "@com_github_burntsushi_toml//:toml",
-    ],
+    deps = ["@com_github_burntsushi_toml//:toml"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

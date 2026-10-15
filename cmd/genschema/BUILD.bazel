@@ -6,10 +6,7 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/cmd/genschema",
     visibility = ["//visibility:private"],
-    deps = [
-        "//internal/docgen",
-        "@com_github_invopop_jsonschema//:jsonschema",
-    ],
+    deps = ["@com_github_invopop_jsonschema//:jsonschema"],
 )
 
 go_binary(

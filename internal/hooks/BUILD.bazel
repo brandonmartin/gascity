@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "hooks",
     srcs = [
+        "codex_trust.go",
         "hooks.go",
         "preserve.go",
     ],
@@ -12,18 +13,12 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/hooks",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/bootstrap/packs/core",
-        "//internal/citylayout",
-        "//internal/fsys",
-        "//internal/overlay",
-        "//internal/shellquote",
-    ],
 )
 
 go_test(
     name = "hooks_test",
     srcs = [
+        "codex_trust_test.go",
         "hooks_family_test.go",
         "hooks_test.go",
         "overlay_provider_hook_path_shape_test.go",
@@ -37,14 +32,7 @@ go_test(
         "//internal/bootstrap/packs/core:overlay/per-provider/opencode/.opencode/plugins/gascity.js",
     ],
     embed = [":hooks"],
-    deps = [
-        "//internal/bootstrap/packs/core",
-        "//internal/config",
-        "//internal/fsys",
-        "//internal/overlay",
-        "//internal/shellquote",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 filegroup(

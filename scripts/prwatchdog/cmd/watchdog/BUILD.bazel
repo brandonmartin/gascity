@@ -5,7 +5,6 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/scripts/prwatchdog/cmd/watchdog",
     visibility = ["//visibility:private"],
-    deps = ["//scripts/prwatchdog"],
 )
 
 go_binary(
@@ -52,8 +51,4 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":watchdog_lib"],
-    deps = [
-        "//internal/testenv",
-        "//scripts/prwatchdog",
-    ],
 )

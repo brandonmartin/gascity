@@ -5,7 +5,6 @@ go_library(
     srcs = ["auth.go"],
     importpath = "github.com/gastownhall/gascity/internal/doltauth",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/beads/contract"],
 )
 
 go_test(
@@ -15,10 +14,6 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":doltauth"],
-    deps = [
-        "//internal/beads/contract",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

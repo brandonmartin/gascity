@@ -63,6 +63,7 @@ go_test(
         "reader_context_test.go",
         "reader_history_tail_test.go",
         "reader_since_bounded_test.go",
+        "reader_types_test.go",
         "recorder_batch_test.go",
         "recorder_handle_test.go",
         "recorder_readonly_test.go",
@@ -81,11 +82,6 @@ go_test(
         "watch_backfill_test.go",
     ],
     embed = [":events"],
-    deps = [
-        "//internal/events/eventstest",
-        "//internal/testenv",
-        "//internal/testutil",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

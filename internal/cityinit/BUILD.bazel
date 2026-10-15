@@ -12,11 +12,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/cityinit",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/citylayout",
-        "//internal/config",
-        "//internal/fsys",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -35,12 +31,6 @@ go_test(
         "//:go.mod",
     ],
     embed = [":cityinit"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/citylayout",
-        "//internal/fsys",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

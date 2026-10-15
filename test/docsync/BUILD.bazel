@@ -17,11 +17,6 @@ go_test(
         "//contrib:all_files",
         "//docs:all_files",
     ],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/docgen",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

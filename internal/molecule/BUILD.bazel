@@ -13,15 +13,6 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/molecule",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/beads/closeorder",
-        "//internal/coordclass",
-        "//internal/formula",
-        "//internal/fsys",
-        "//internal/pathutil",
-    ],
 )
 
 go_test(
@@ -47,16 +38,6 @@ go_test(
         "//internal/bootstrap/packs/core:pack_files",
     ],
     embed = [":molecule"],
-    deps = [
-        "//internal/bazeltest",
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/formula",
-        "//internal/formulatest",
-        "//internal/fsys",
-        "//internal/rollout/gate",
-        "//internal/testenv",
-    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -8,13 +8,7 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/agentutil",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/agent",
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/workdir",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -26,11 +20,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":agentutil"],
-    deps = [
-        "//internal/config",
-        "//internal/runtime",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

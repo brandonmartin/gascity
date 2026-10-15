@@ -5,15 +5,7 @@ go_library(
     srcs = ["graphroute.go"],
     importpath = "github.com/gastownhall/gascity/internal/graphroute",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/agentutil",
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/formula",
-        "//internal/session",
-        "//internal/storeref",
-    ],
+    deps = ["//internal/config"],
 )
 
 go_test(
@@ -25,15 +17,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":graphroute"],
-    deps = [
-        "//internal/agentutil",
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/formula",
-        "//internal/session",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/config"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

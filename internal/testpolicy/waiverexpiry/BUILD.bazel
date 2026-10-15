@@ -15,7 +15,6 @@ go_test(
     ],
     # The test compares waiver dates with today, an input no cache can key on,
     # so it must re-run on every invocation. See the package documentation.
-    tags = ["external"],
     deps = [
         "//internal/beads/beadstest",
         "//internal/testenv",

@@ -60,7 +60,11 @@ func setupAgentHomeWorktreeCleanupTest(t *testing.T) (cityPath, builderWTPath st
 func agentHomeConfig() *config.City {
 	return &config.City{
 		Workspace: config.Workspace{Name: "test", Prefix: "ga"},
-		Agents:    []config.Agent{{Name: "builder", Dir: "ga-rig"}},
+		Agents: []config.Agent{{
+			Name:    "builder",
+			Dir:     "ga-rig",
+			WorkDir: filepath.Join(".gc", "worktrees", "ga-rig", "builder"),
+		}},
 	}
 }
 
@@ -415,5 +419,96 @@ func TestCleanupClosedBeadAgentHomeWorktrees_DetachesToMainNotCurrentBranch(t *t
 	}
 	if fake.checkoutDetachRef == "origin/builder/ga-abc123" {
 		t.Error("reset detached to the closed bead branch; must reset to origin/main")
+	}
+}
+
+// TestCleanupClosedBeadAgentHomeWorktrees_BindingPrefixedHomeBasenameDiffers
+// is a regression test for a binding-prefixed seat whose home directory
+// basename ("refinery") differs from its binding-qualified name
+// ("gasburger.refinery"). The producer writes .worktree-stale in the resolved
+// work_dir, so the consumer must match on that path, not on the agent name.
+func TestCleanupClosedBeadAgentHomeWorktrees_BindingPrefixedHomeBasenameDiffers(t *testing.T) {
+	cityPath := t.TempDir()
+	homePath := filepath.Join(cityPath, ".gc", "worktrees", "ga-rig", "refinery")
+	if err := os.MkdirAll(homePath, 0o755); err != nil {
+		t.Fatalf("creating seat home: %v", err)
+	}
+	stalePath := filepath.Join(homePath, worktreeStaleFileName)
+	if err := os.WriteFile(stalePath, []byte("branch=\nreason=uncommitted-work\n"), 0o644); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test", Prefix: "ga"},
+		Agents: []config.Agent{{
+			Name:        "refinery",
+			BindingName: "gasburger",
+			Dir:         "ga-rig",
+			WorkDir:     filepath.Join(".gc", "worktrees", "ga-rig", "refinery"),
+		}},
+	}
+
+	orig := newAgentWorktreeGitProbe
+	defer func() { newAgentWorktreeGitProbe = orig }()
+	newAgentWorktreeGitProbe = func(_ string) agentWorktreeGitProbe {
+		return &fakeAgentWorktreeGit{isRepo: true, currentBranch: "HEAD"}
+	}
+
+	var stderr bytes.Buffer
+	cleaned := cleanupClosedBeadAgentHomeWorktrees(cityPath, cfg, map[string]beads.Store{"ga-rig": beads.NewMemStore()}, &stderr)
+	if cleaned != 1 {
+		t.Errorf("cleaned = %d, want 1 for binding-prefixed seat home; stderr=%q", cleaned, stderr.String())
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Error("stale marker not removed from binding-prefixed seat home")
+	}
+}
+
+// TestCleanupClosedBeadAgentHomeWorktrees_AbsoluteWorkDir verifies that an
+// absolute work_dir is matched against the scanned directory path.
+func TestCleanupClosedBeadAgentHomeWorktrees_AbsoluteWorkDir(t *testing.T) {
+	cityPath, builderWTPath, store := setupAgentHomeWorktreeCleanupTest(t)
+	cfg := agentHomeConfig()
+	cfg.Agents[0].WorkDir = builderWTPath
+	stalePath := filepath.Join(builderWTPath, worktreeStaleFileName)
+	if err := os.WriteFile(stalePath, []byte("branch=\n"), 0o644); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+
+	orig := newAgentWorktreeGitProbe
+	defer func() { newAgentWorktreeGitProbe = orig }()
+	newAgentWorktreeGitProbe = func(_ string) agentWorktreeGitProbe {
+		return &fakeAgentWorktreeGit{isRepo: true, currentBranch: "HEAD"}
+	}
+
+	cleaned := cleanupClosedBeadAgentHomeWorktrees(cityPath, cfg, map[string]beads.Store{"ga-rig": store}, nil)
+	if cleaned != 1 {
+		t.Errorf("cleaned = %d, want 1 for absolute work_dir", cleaned)
+	}
+}
+
+// TestCleanupClosedBeadAgentHomeWorktrees_NameMatchWithoutWorkDirSkips
+// verifies that a directory whose basename equals an agent name is not an
+// agent home unless the agent's resolved work_dir points at it.
+func TestCleanupClosedBeadAgentHomeWorktrees_NameMatchWithoutWorkDirSkips(t *testing.T) {
+	cityPath, builderWTPath, store := setupAgentHomeWorktreeCleanupTest(t)
+	cfg := agentHomeConfig()
+	cfg.Agents[0].WorkDir = filepath.Join(".gc", "worktrees", "ga-rig", "elsewhere")
+	stalePath := filepath.Join(builderWTPath, worktreeStaleFileName)
+	if err := os.WriteFile(stalePath, []byte("branch=\n"), 0o644); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+
+	orig := newAgentWorktreeGitProbe
+	defer func() { newAgentWorktreeGitProbe = orig }()
+	newAgentWorktreeGitProbe = func(_ string) agentWorktreeGitProbe {
+		return &fakeAgentWorktreeGit{isRepo: true, currentBranch: "HEAD"}
+	}
+
+	cleaned := cleanupClosedBeadAgentHomeWorktrees(cityPath, cfg, map[string]beads.Store{"ga-rig": store}, nil)
+	if cleaned != 0 {
+		t.Errorf("cleaned = %d, want 0: directory is not any agent's resolved work_dir", cleaned)
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Error("stale marker removed from a directory that is not an agent home")
 	}
 }

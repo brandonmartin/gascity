@@ -10,6 +10,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 const worktreeStaleFileName = ".worktree-stale"
@@ -40,7 +42,11 @@ var newAgentWorktreeGitProbe = func(workDir string) agentWorktreeGitProbe {
 //     reset to detached origin/main and remove the marker, provided the
 //     working tree has no uncommitted changes.
 //
-// Per-bead worktrees (directories whose names do not match a session home)
+// A directory is a session home when it is the resolved work_dir of a
+// configured agent — the same path the producer (writeWorktreeStaleMarker)
+// writes the marker into — not when its basename equals an agent name, which
+// a binding-prefixed seat ("gasburger.refinery" at <rig>/refinery) never
+// satisfies. Per-bead worktrees (directories that are no agent's work_dir)
 // are skipped — the bead_worktree_reaper handles those.
 // Returns the number of worktrees cleaned.
 //
@@ -62,12 +68,7 @@ func cleanupClosedBeadAgentHomeWorktrees(
 		return 0
 	}
 
-	sessionHomes := make(map[string]bool, len(cfg.Agents))
-	for i := range cfg.Agents {
-		if name := cfg.Agents[i].BindingQualifiedName(); name != "" {
-			sessionHomes[name] = true
-		}
-	}
+	sessionHomes := agentHomeWorkDirs(cityPath, cfg, stderr)
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
 	cleaned := 0
@@ -89,12 +90,10 @@ func cleanupClosedBeadAgentHomeWorktrees(
 			if !entry.IsDir() {
 				continue
 			}
-			name := entry.Name()
-			if !sessionHomes[name] {
+			worktreePath := filepath.Join(rigWorktreeDir, entry.Name())
+			if !sessionHomes[pathutil.NormalizePathForCompare(worktreePath)] {
 				continue
 			}
-
-			worktreePath := filepath.Join(rigWorktreeDir, name)
 			stalePath := filepath.Join(worktreePath, worktreeStaleFileName)
 			if _, err := os.Stat(stalePath); err != nil {
 				continue
@@ -170,4 +169,23 @@ func beadIDFromBranch(cfg *config.City, branch string) string {
 		}
 	}
 	return extractBeadIDFromWorktreeName(cfg, suffix)
+}
+
+// agentHomeWorkDirs returns the set of resolved work_dir paths of the
+// configured agents, normalized with pathutil.NormalizePathForCompare. An
+// agent whose work_dir template does not expand is skipped and reported on
+// stderr.
+func agentHomeWorkDirs(cityPath string, cfg *config.City, stderr io.Writer) map[string]bool {
+	cityName := workdir.CityName(cityPath, cfg)
+	homes := make(map[string]bool, len(cfg.Agents))
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		dir, err := workdir.ResolveWorkDirPathStrict(cityPath, cityName, a.QualifiedName(), a, cfg.Rigs)
+		if err != nil {
+			fmt.Fprintf(stderr, "cleanupClosedBeadAgentHomeWorktrees: resolving work_dir for agent %q: %v\n", a.QualifiedName(), err) //nolint:errcheck
+			continue
+		}
+		homes[pathutil.NormalizePathForCompare(dir)] = true
+	}
+	return homes
 }

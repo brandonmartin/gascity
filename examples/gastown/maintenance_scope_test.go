@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -613,6 +614,210 @@ func TestJsonlExportArchivesEveryScopeInBdExportFormat(t *testing.T) {
 	}
 	if !strings.Contains(f.read(t, f.gcLog), "bd --city "+f.cityDir+" --rig api export --all -o ") {
 		t.Fatalf("jsonl-export did not export the rig through gc bd:\n%s", f.read(t, f.gcLog))
+	}
+}
+
+// jsonlRowCountCase answers jsonl-export's row-count query per scope label
+// (city, rig:<name>); a scope not listed holds 5 rows.
+func jsonlRowCountCase(counts map[string]int) string {
+	var arms strings.Builder
+	for scope, rows := range counts {
+		fmt.Fprintf(&arms, "      %q) printf 'export_rows\\n%d\\n' ;;\n", scope, rows)
+	}
+	return `
+  *"export_rows"*)
+    case "$GC_FAKE_SCOPE" in
+` + arms.String() + `      *) printf 'export_rows\n5\n' ;;
+    esac
+    ;;`
+}
+
+// archiveFiles lists the paths in the archive's HEAD commit; an archive with
+// no commit yet holds none.
+func archiveFiles(archive string) []string {
+	out, err := exec.Command("git", "-C", archive, "ls-tree", "-r", "--name-only", "HEAD").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
+}
+
+// archiveHasFile reports whether the archive's HEAD commit holds path.
+func archiveHasFile(archive, path string) bool {
+	return slices.Contains(archiveFiles(archive), path)
+}
+
+func TestJsonlExportRowLimit(t *testing.T) {
+	cases := []struct {
+		name     string
+		limit    string // GC_JSONL_MAX_EXPORT_ROWS; empty keeps the default
+		rows     int
+		exported bool
+	}{
+		{"the default limit allows exactly 15000 rows", "", 15000, true},
+		{"the default limit refuses one row more", "", 15001, false},
+		{"0 disables the limit", "0", 5000000, true},
+		{"a custom limit applies", "100", 101, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScopeFixture(t, jsonlRowCountCase(map[string]int{"city": tc.rows})+`
+  *"SELECT * FROM "*"hq"*".issues"*)
+    printf '{"rows":[{"id":"hq-1","title":"city work","issue_type":"task"}]}\n'
+    ;;`)
+			f.env["FAKE_SCOPE_DBS"] = "city=hq"
+			archive := filepath.Join(f.cityDir, "archive")
+			jsonlScopeEnv(t, f, archive)
+			if tc.limit != "" {
+				f.env["GC_JSONL_MAX_EXPORT_ROWS"] = tc.limit
+			}
+			out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), f.env)
+			if err != nil {
+				t.Fatalf("jsonl-export failed: %v\n%s", err, out)
+			}
+
+			exportCalled := strings.Contains(f.read(t, f.gcLog), "export --all -o ")
+			if exportCalled != tc.exported {
+				t.Fatalf("gc bd export called = %v, want %v:\n%s", exportCalled, tc.exported, f.read(t, f.gcLog))
+			}
+			if got := archiveHasFile(archive, "hq/issues.jsonl"); got != tc.exported {
+				t.Fatalf("archive holds hq/issues.jsonl = %v, want %v\n%s", got, tc.exported, out)
+			}
+			refused := strings.Contains(string(out), "not exporting city (hq): ")
+			if refused == tc.exported {
+				t.Fatalf("refusal message present = %v, want %v:\n%s", refused, !tc.exported, out)
+			}
+			if !tc.exported {
+				if !strings.Contains(string(out), fmt.Sprintf("%d rows (issues plus wisps) exceed GC_JSONL_MAX_EXPORT_ROWS=", tc.rows)) {
+					t.Fatalf("refusal does not name the row count and the limit:\n%s", out)
+				}
+				if o, ok := f.outcome(t); !ok || !o.hasScope("city", "too many rows to export") {
+					t.Fatalf("outcome does not declare the city scope skipped for its size: %+v (declared=%v)", o, ok)
+				}
+			}
+		})
+	}
+}
+
+// TestJsonlExportOversizedScopeDoesNotStopTheOthers: the city store is the
+// first scope visited, so a scope that stalls the run starves every scope
+// after it. An oversized scope is left out and the rest are archived.
+func TestJsonlExportOversizedScopeDoesNotStopTheOthers(t *testing.T) {
+	f := newScopeFixture(t, jsonlRowCountCase(map[string]int{"city": 62000, "rig:api": 40})+`
+  *"SELECT * FROM "*"hq"*".issues"*)
+    printf '{"rows":[{"id":"hq-1","title":"city work","issue_type":"task"}]}\n'
+    ;;
+  *"SELECT * FROM "*"apidb"*".issues"*)
+    printf '{"rows":[{"id":"api-1","title":"rig work","issue_type":"bug"}]}\n'
+    ;;`)
+	f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+	f.env["FAKE_SCOPE_DBS"] = "city=hq rig:api=apidb"
+	archive := filepath.Join(f.cityDir, "archive")
+	jsonlScopeEnv(t, f, archive)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), f.env)
+	if err != nil {
+		t.Fatalf("jsonl-export failed: %v\n%s", err, out)
+	}
+
+	if !archiveHasFile(archive, "apidb/issues.jsonl") {
+		t.Fatalf("the rig scope was not archived behind the oversized city scope:\n%s", out)
+	}
+	if archiveHasFile(archive, "hq/issues.jsonl") {
+		t.Fatalf("the oversized city scope was archived:\n%s", out)
+	}
+	if !strings.Contains(string(out), "exported 1/2") || !strings.Contains(string(out), "failed: hq") {
+		t.Fatalf("summary does not report the city scope as the one that failed:\n%s", out)
+	}
+	if o, ok := f.outcome(t); !ok || o.Outcome != "partial" || !o.hasScope("city", "too many rows to export") {
+		t.Fatalf("outcome is not a partial run that skipped the city scope: %+v (declared=%v)", o, ok)
+	}
+}
+
+func TestJsonlExportExportsWhenTheRowCountIsUnavailable(t *testing.T) {
+	f := newScopeFixture(t, `
+  *"export_rows"*)
+    exit 1
+    ;;
+  *"SELECT * FROM "*"hq"*".issues"*)
+    printf '{"rows":[{"id":"hq-1","title":"city work","issue_type":"task"}]}\n'
+    ;;`)
+	f.env["FAKE_SCOPE_DBS"] = "city=hq"
+	archive := filepath.Join(f.cityDir, "archive")
+	jsonlScopeEnv(t, f, archive)
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), f.env)
+	if err != nil {
+		t.Fatalf("jsonl-export failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "could not count the rows of city (hq); exporting without the row limit") {
+		t.Fatalf("an unreadable row count was not reported:\n%s", out)
+	}
+	if !archiveHasFile(archive, "hq/issues.jsonl") {
+		t.Fatalf("the scope was not exported after the row count failed:\n%s", out)
+	}
+}
+
+// TestJsonlExportClearsLeftoverTempFilesBeforeStaging: a run the controller
+// killed leaves its temporary files behind, and `git add -A` over a scope's
+// directory would commit them. Temporary files in a scope directory are
+// removed, a stale run directory is removed, and a recent one (another run's)
+// is left alone; the run's own directory is gone when it ends.
+func TestJsonlExportClearsLeftoverTempFilesBeforeStaging(t *testing.T) {
+	f := newScopeFixture(t, `
+  *"SELECT * FROM "*"hq"*".issues"*)
+    printf '{"rows":[{"id":"hq-1","title":"city work","issue_type":"task"}]}\n'
+    ;;`)
+	f.env["FAKE_SCOPE_DBS"] = "city=hq"
+	archive := filepath.Join(f.cityDir, "archive")
+	jsonlScopeEnv(t, f, archive)
+
+	writeFile := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leftovers := []string{
+		filepath.Join(archive, "hq", "export.jsonl.tmp.AbCdEf"),
+		filepath.Join(archive, "hq", "issues.jsonl.tmp.GhIjKl"),
+	}
+	for _, p := range leftovers {
+		writeFile(p)
+	}
+	staleRun := filepath.Join(archive, ".jsonl-export.tmp.stale1")
+	writeFile(filepath.Join(staleRun, "export.jsonl.tmp.MnOpQr"))
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(staleRun, twoHoursAgo, twoHoursAgo); err != nil {
+		t.Fatal(err)
+	}
+	otherRunFile := filepath.Join(archive, ".jsonl-export.tmp.fresh1", "export.jsonl.tmp.StUvWx")
+	writeFile(otherRunFile)
+
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), f.env)
+	if err != nil {
+		t.Fatalf("jsonl-export failed: %v\n%s", err, out)
+	}
+
+	for _, p := range append(leftovers, staleRun) {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the run (stat err %v)", p, err)
+		}
+	}
+	if _, err := os.Stat(otherRunFile); err != nil {
+		t.Fatalf("another run's recent temporary file was removed: %v", err)
+	}
+	tracked := archiveFiles(archive)
+	if !slices.Equal(tracked, []string{"hq.jsonl", "hq/issues.jsonl"}) {
+		t.Fatalf("the archive commit holds %v, want exactly the snapshot", tracked)
+	}
+	entries, err := filepath.Glob(filepath.Join(archive, ".jsonl-export.tmp.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.HasSuffix(entries[0], ".jsonl-export.tmp.fresh1") {
+		t.Fatalf("run directories left after the run = %v, want only the other run's", entries)
 	}
 }
 

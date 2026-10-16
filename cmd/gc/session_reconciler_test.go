@@ -1008,12 +1008,15 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 		)
 	}()
 
+	// Stop blocks until releaseStop, so a reconcile that waits on it never
+	// returns however long this select waits; the window only has to outlast
+	// scheduler stalls in a loaded -p=4 sweep, which 200ms did not.
 	select {
 	case woken := <-done:
 		if woken != 0 {
 			t.Fatalf("woken = %d, want 0", woken)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(10 * time.Second):
 		releaseStop()
 		t.Fatal("reconcile blocked on provider Stop; drain-ack stop must be async")
 	}

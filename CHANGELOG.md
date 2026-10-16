@@ -339,6 +339,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `jsonl-export` order no longer launches an export Dolt cannot
+  finish, and no longer leaves its temporary files behind.** `gc bd export
+  --all` looks up the labels, comments and dependencies of every row it
+  exports in one `IN (...)` query per relation, wisps included, and the city
+  store's wisps table (order-tracking and session beads) outgrew what Dolt
+  answers: the export stalled for the full 900 s timeout every run, starved
+  every scope behind the city store, and each timed-out run left its query
+  running on the server. A scope holding more than
+  `GC_JSONL_MAX_EXPORT_ROWS` rows (issues plus wisps, default 15000, `0`
+  disables the limit) is now skipped with a message naming the count and the
+  limit and declared in the order outcome as `too many rows to export`, and
+  the other scopes are archived. Temporary files now live in one directory
+  that a TERM, INT, HUP or normal exit removes; leftovers of earlier runs are
+  swept before the archive is staged, so they are no longer committed. An
+  oversized scope stays out of the archive until its wisps plane is purged.
 - **The pool orphan sweep treats a claim it cannot observe as unobservable,
   not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
   city's config does not mint — another city's identity, a binding this city

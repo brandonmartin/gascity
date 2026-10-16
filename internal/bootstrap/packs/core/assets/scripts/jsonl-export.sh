@@ -64,6 +64,15 @@ GC_WINDOW_MEMORY="${GC_JSONL_GC_WINDOW_MEMORY:-256m}"
 # archive's filesystem can hold another copy of it and still keep this many
 # KiB free (default 500 MiB, the managed Dolt floor). 0 disables the check.
 GC_MIN_FREE_KB="${GC_JSONL_GC_MIN_FREE_KB:-512000}"
+# A scope holding more rows than this (issues plus wisps) is not exported; 0
+# disables the limit. `gc bd export --all` looks up the labels, comments and
+# dependencies of every row it exports in one IN (...) query per relation,
+# wisps included, and Dolt does not finish those past roughly 21,000 ids. A
+# run the order timeout cuts short leaves that query running on the server.
+MAX_EXPORT_ROWS="${GC_JSONL_MAX_EXPORT_ROWS:-15000}"
+# Temporary files of a run older than this many minutes are leftovers of a run
+# that was killed before it could clean up.
+STALE_TMP_MINUTES=60
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
 # get_archive_mode call and reused thereafter so every push checkpoint in a
@@ -92,6 +101,7 @@ require_non_negative_integer() {
 require_non_negative_integer GC_JSONL_GC_LOOSE_OBJECTS "$GC_LOOSE_OBJECT_LIMIT"
 require_non_negative_integer GC_JSONL_GC_LOOSE_KB "$GC_LOOSE_KB_LIMIT"
 require_non_negative_integer GC_JSONL_GC_MIN_FREE_KB "$GC_MIN_FREE_KB"
+require_non_negative_integer GC_JSONL_MAX_EXPORT_ROWS "$MAX_EXPORT_ROWS"
 # Git reads pack.windowMemory as a byte count with an optional unit suffix,
 # takes 0 to mean no limit and a leading 0 as octal; reject all of those now
 # rather than on the first packing run.
@@ -162,7 +172,9 @@ push_retry_delay_seconds() {
 # archive keeps. `--all` is used because plain `gc bd export` also drops role
 # beads and templates, which the archive has always carried. Always dropped:
 # wisps-plane rows (ephemeral, or no-history wisps stamped "wisp_plane"),
-# which never belonged to the durable issue archive. Memory records
+# which never belonged to the durable issue archive. bd cannot leave them out
+# of the export itself (even a plain export merges the no-history wisps), so
+# export_scope checks the scope's size before running it. Memory records
 # ("_type":"memory") are always kept. With scrub=true, issue records are also
 # filtered by the archive's scrub rules: test pollution, system issue types
 # (message, event, wisp, agent), gc:/order: system titles and sling
@@ -891,6 +903,40 @@ discard_staged_archive_outputs() {
     done
 }
 
+# Every temporary file of a run lives in one directory inside the archive (so
+# the final rename stays on one filesystem) that the exit trap removes. The
+# controller stops an order that runs past its timeout with TERM and then KILL;
+# a file left in a scope directory would be committed by the `git add -A` over
+# that directory.
+RUN_TMP_DIR=""
+
+cleanup_run_tmp() {
+    if [ -n "$RUN_TMP_DIR" ]; then
+        rm -rf "$RUN_TMP_DIR"
+    fi
+}
+
+on_script_exit() {
+    cleanup_run_tmp
+    order_outcome_write
+}
+
+# remove_leftover_temp_files clears what an earlier run left behind: files in a
+# scope directory (this script keeps none there) and run directories older
+# than STALE_TMP_MINUTES, which only a run killed before its exit trap leaves.
+remove_leftover_temp_files() {
+    if ! find "$ARCHIVE_REPO" -mindepth 2 -maxdepth 2 -type f \
+        -not -path "$ARCHIVE_REPO/.*" \
+        \( -name 'export.jsonl.tmp.*' -o -name 'issues.jsonl.tmp.*' \) \
+        -exec rm -f {} +; then
+        echo "jsonl-export: removing leftover temporary files from the scope directories failed" >&2
+    fi
+    if ! find "$ARCHIVE_REPO" -mindepth 1 -maxdepth 1 -type d -name '.jsonl-export.tmp.*' \
+        -mmin "+$STALE_TMP_MINUTES" -exec rm -rf {} +; then
+        echo "jsonl-export: removing stale run directories failed" >&2
+    fi
+}
+
 # State file for tracking consecutive push failures.
 STATE_FILE="$PACK_STATE_DIR/jsonl-export-state.json"
 LEGACY_PACK_STATE_FILE="$LEGACY_PACK_STATE_DIR/jsonl-export-state.json"
@@ -976,6 +1022,15 @@ if [ ! -d "$ARCHIVE_REPO/.git" ]; then
     git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
 fi
 
+# The signal traps turn the controller's TERM (sent to the whole process group
+# when the order times out) into an exit, which is what runs the EXIT trap.
+trap on_script_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+remove_leftover_temp_files
+RUN_TMP_DIR=$(mktemp -d "$ARCHIVE_REPO/.jsonl-export.tmp.XXXXXX")
+
 TOTAL_EXPORTED=0
 TOTAL_DBS=0
 FAILED_DBS=""
@@ -1006,6 +1061,25 @@ read_source_issue_count() {
     local count
 
     if ! output=$(scope_sql_read csv "SELECT COUNT(*) AS row_count FROM \`$db\`.issues $SCOPE_SCRUB_WHERE" 2>/dev/null); then
+        return 1
+    fi
+    count=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
+    case "$count" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$count"
+}
+
+# read_scope_export_rows prints how many rows `gc bd export --all` must load
+# relations for in the current scope: its issues plus its wisps. Returns 1 when
+# the count is unavailable, as on a store without a wisps table.
+read_scope_export_rows() {
+    local output
+    local count
+
+    if ! output=$(scope_sql_read csv "SELECT (SELECT COUNT(*) FROM \`$SCOPE_DB\`.issues) + (SELECT COUNT(*) FROM \`$SCOPE_DB\`.wisps) AS export_rows" 2>/dev/null); then
         return 1
     fi
     count=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
@@ -1051,14 +1125,31 @@ should_halt_for_jsonl_spike() {
 }
 
 # export_scope exports the current scope into <archive>/<db>/issues.jsonl
-# (plus the flat <db>.jsonl mirror). Returns 1 when the scope failed; its
-# outputs are then restored to HEAD.
+# (plus the flat <db>.jsonl mirror). Returns 1 when the scope failed, with the
+# reason in EXPORT_FAIL_REASON; its outputs are then restored to HEAD.
 export_scope() {
     local DB="$SCOPE_DB"
     local db_dir="$ARCHIVE_REPO/$DB"
     local raw_tmp
     local out
     local filtered_tmp
+    local export_rows
+
+    EXPORT_FAIL_REASON="export failed"
+
+    # Step 0: leave a scope too big for bd's relation lookups unexported rather
+    # than start a query Dolt cannot finish.
+    if [ "$MAX_EXPORT_ROWS" -gt 0 ]; then
+        if export_rows=$(read_scope_export_rows); then
+            if [ "$export_rows" -gt "$MAX_EXPORT_ROWS" ]; then
+                echo "jsonl-export: not exporting $SCOPE_LABEL ($DB): $export_rows rows (issues plus wisps) exceed GC_JSONL_MAX_EXPORT_ROWS=$MAX_EXPORT_ROWS; gc bd export looks up the relations of all of them in one query that Dolt cannot finish at this size, and a timed-out run leaves that query running on the server; purge the scope's wisps plane (the reaper order) or raise the limit" >&2
+                EXPORT_FAIL_REASON="too many rows to export"
+                return 1
+            fi
+        else
+            echo "jsonl-export: could not count the rows of $SCOPE_LABEL ($DB); exporting without the row limit" >&2
+        fi
+    fi
 
     if ! move_legacy_snapshot_files "$DB"; then
         echo "jsonl-export: moving the legacy snapshot of $DB to $DB/legacy/ failed" >&2
@@ -1068,7 +1159,7 @@ export_scope() {
     mkdir -p "$db_dir"
 
     # Step 1: gc bd export of the whole scope (read-only; one consistent snapshot).
-    raw_tmp=$(mktemp "$db_dir/export.jsonl.tmp.XXXXXX")
+    raw_tmp=$(mktemp "$RUN_TMP_DIR/export.jsonl.tmp.XXXXXX")
     if ! out=$(scope_bd export --all -o "$raw_tmp" 2>&1); then
         echo "jsonl-export: gc bd export failed for $SCOPE_LABEL ($DB): $out" >&2
         rm -f "$raw_tmp"
@@ -1078,7 +1169,7 @@ export_scope() {
 
     # Step 2: keep the archived records (see select_archived_records). A
     # malformed export fails the scope so it cannot become the new baseline.
-    filtered_tmp=$(mktemp "$db_dir/issues.jsonl.tmp.XXXXXX")
+    filtered_tmp=$(mktemp "$RUN_TMP_DIR/issues.jsonl.tmp.XXXXXX")
     if ! select_archived_records "$SCRUB" <"$raw_tmp" >"$filtered_tmp"; then
         echo "jsonl-export: gc bd export for $SCOPE_LABEL ($DB) is not valid JSONL" >&2
         rm -f "$raw_tmp" "$filtered_tmp"
@@ -1109,7 +1200,6 @@ else
     echo "jsonl-export: gc rig list failed; exporting the city scope only" >&2
     order_outcome_scope_skipped "rigs" "rig list unavailable"
 fi
-trap order_outcome_write EXIT
 
 VISITED_DBS=""
 while IFS= read -r SCOPE_SPEC; do
@@ -1144,7 +1234,7 @@ $SCOPE_DB
 
     if ! export_scope; then
         record_failed_db "$DB"
-        order_outcome_scope_skipped "$SCOPE_LABEL" "export failed"
+        order_outcome_scope_skipped "$SCOPE_LABEL" "$EXPORT_FAIL_REASON"
         continue
     fi
 

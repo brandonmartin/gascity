@@ -4,70 +4,84 @@ import (
 	"context"
 	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
+// TestLogFileWatcherWakeResetsStallTimer runs the watcher on the synctest
+// bubble's fake clock. Its windows are exact there: a loaded host cannot
+// stretch the sleep or the wake past the stall deadline, so only a wake that
+// fails to reset the stall timer can fire the stall early.
 func TestLogFileWatcherWakeResetsStallTimer(t *testing.T) {
-	lw := &logFileWatcher{
-		fallbackPoll: time.NewTicker(time.Hour),
-	}
-	defer lw.Close()
+	synctest.Test(t, func(t *testing.T) {
+		lw := &logFileWatcher{
+			fallbackPoll: time.NewTicker(time.Hour),
+		}
+		defer lw.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		ctx, cancel := context.WithCancel(context.Background())
+		runDone := make(chan struct{})
+		defer func() {
+			cancel()
+			<-runDone // the bubble ends only once Run has returned
+		}()
 
-	wake := make(chan struct{}, 1)
-	emits := make(chan struct{}, 4)
-	stalls := make(chan struct{}, 2)
+		wake := make(chan struct{}, 1)
+		emits := make(chan struct{}, 4)
+		stalls := make(chan struct{}, 2)
 
-	go lw.Run(
-		ctx,
-		func() bool {
-			select {
-			case emits <- struct{}{}:
-			default:
-			}
-			return true
-		},
-		func() {},
-		RunOpts{
-			Wake:         wake,
-			StallTimeout: 250 * time.Millisecond,
-			OnStall: func() {
-				select {
-				case stalls <- struct{}{}:
-				default:
-				}
-			},
-		},
-	)
+		go func() {
+			defer close(runDone)
+			lw.Run(
+				ctx,
+				func() bool {
+					select {
+					case emits <- struct{}{}:
+					default:
+					}
+					return true
+				},
+				func() {},
+				RunOpts{
+					Wake:         wake,
+					StallTimeout: 250 * time.Millisecond,
+					OnStall: func() {
+						select {
+						case stalls <- struct{}{}:
+						default:
+						}
+					},
+				},
+			)
+		}()
 
-	select {
-	case <-emits:
-	case <-time.After(time.Second):
-		t.Fatal("initial readAndEmit did not run")
-	}
+		select {
+		case <-emits:
+		case <-time.After(time.Second):
+			t.Fatal("initial readAndEmit did not run")
+		}
 
-	time.Sleep(150 * time.Millisecond)
-	wake <- struct{}{}
+		time.Sleep(150 * time.Millisecond)
+		wake <- struct{}{}
 
-	select {
-	case <-emits:
-	case <-time.After(time.Second):
-		t.Fatal("wake-driven readAndEmit did not run")
-	}
+		select {
+		case <-emits:
+		case <-time.After(time.Second):
+			t.Fatal("wake-driven readAndEmit did not run")
+		}
 
-	select {
-	case <-stalls:
-		t.Fatal("stall fired before wake-driven progress had a full timeout window")
-	case <-time.After(120 * time.Millisecond):
-	}
+		select {
+		case <-stalls:
+			t.Fatal("stall fired before wake-driven progress had a full timeout window")
+		case <-time.After(120 * time.Millisecond):
+		}
 
-	select {
-	case <-stalls:
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("stall did not fire after wake-reset timeout elapsed")
-	}
+		select {
+		case <-stalls:
+		case <-time.After(250 * time.Millisecond):
+			t.Fatal("stall did not fire after wake-reset timeout elapsed")
+		}
+	})
 }
 
 func TestLogFileWatcherPollingWithoutProgressStillFiresStall(t *testing.T) {

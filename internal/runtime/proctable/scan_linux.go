@@ -21,9 +21,10 @@ import (
 // GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
 // with any GC_SESSION_ID that were reparented away from their spawner, to
 // init or a subreaper ancestor of this process ([OrphanCandidate],
-// [pidutil.DetectSubreapers]), the only roots the sweep may reap. It reads a process's environment only when its parent makes it
-// a candidate, so a host's other processes cost one stat read each, not an
-// environ read (mc-ygved).
+// [pidutil.DetectSubreapers]), the only roots the sweep may reap. It reads a
+// process's environment only when its parent makes it a candidate, so a
+// host's other processes cost one stat read each, not an environ read
+// (mc-ygved).
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err

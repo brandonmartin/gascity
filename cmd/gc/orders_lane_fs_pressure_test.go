@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -131,5 +132,35 @@ func TestOrdersLanePressureSkippedPassIsNotALastPass(t *testing.T) {
 	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
 	if _, _, ran := lane.lastPass(); ran {
 		t.Fatal("a pressure-skipped pass was recorded as the lane's last pass")
+	}
+}
+
+// The maintenance lanes shed FS pressure the way the orders lane does, with an
+// episode of their own: skip while pressure is high, log once, and force a
+// pass after maxConsecutiveFSPressureSkips so collection cannot starve.
+func TestOrderMaintenancePassSkipsUnderFSPressure(t *testing.T) {
+	var stderr bytes.Buffer
+	cr := ordersLaneTestRuntime(t, &recordingOrderDispatcher{}, "1h", &stderr)
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+	runs := 0
+	lane := &orderMaintenanceLane{
+		name: beadRetentionLaneName,
+		jobs: []orderMaintenanceJob{{name: "job", run: func(context.Context, *config.City, time.Time) { runs++ }}},
+	}
+
+	for i := 0; i < maxConsecutiveFSPressureSkips; i++ {
+		cr.runOrderMaintenancePass(context.Background(), lane)
+	}
+	if runs != 0 {
+		t.Fatalf("maintenance job ran %d times during pressure-skipped passes", runs)
+	}
+	if n := strings.Count(stderr.String(), "skipping "+beadRetentionLaneName); n != 1 {
+		t.Fatalf("stderr = %q, want one %s skip warning per pressure episode", stderr.String(), beadRetentionLaneName)
+	}
+
+	cr.runOrderMaintenancePass(context.Background(), lane)
+	if runs != 1 {
+		t.Fatalf("maintenance job runs after the forced pass = %d, want 1", runs)
 	}
 }

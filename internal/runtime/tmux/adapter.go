@@ -984,7 +984,9 @@ func (p *Provider) nudgeNow(ctx context.Context, name string, content []runtime.
 const restartRequestedOption = "@GC_RESTART_REQUESTED"
 
 // SetMeta stores a key-value pair in the named session's tmux environment,
-// and the restart marker in its user-option mirror too.
+// and the restart marker in its user-option mirror too. set-option's -t is a
+// target-pane, where tmux 3.6 rejects a bare "=name" as "no such session"
+// and only "=name:" resolves, so the mirror takes [paneTarget].
 func (p *Provider) SetMeta(name, key, value string) error {
 	if err := p.tm.SetEnvironment(name, key, value); err != nil || key != "GC_RESTART_REQUESTED" {
 		return err

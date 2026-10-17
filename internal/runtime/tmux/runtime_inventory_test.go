@@ -535,7 +535,8 @@ func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 
 // Kills a restart marker the batched read cannot see (C7a-2b): SetMeta and
 // RemoveMeta of GC_RESTART_REQUESTED write its user-option mirror beside the
-// environment, and no other key gets one.
+// environment, and no other key gets one. set-option's -t is a target-pane, so
+// the mirror is addressed "=s:": tmux 3.6 rejects a bare "=s" there.
 func TestTmuxRestartMarkerIsMirroredToAnOption(t *testing.T) {
 	fe := &fakeExecutor{}
 	p := NewProviderWithConfig(Config{})
@@ -555,7 +556,11 @@ func TestTmuxRestartMarkerIsMirroredToAnOption(t *testing.T) {
 			options = append(options, strings.Join(call, " "))
 		}
 	}
-	if len(options) != 2 || !strings.Contains(options[0], "@GC_RESTART_REQUESTED 1700000050") || !strings.Contains(options[1], "-u @GC_RESTART_REQUESTED") {
-		t.Fatalf("option writes %q, want the marker set then unset, and nothing else", options)
+	want := []string{
+		"-u set-option -t =s: @GC_RESTART_REQUESTED 1700000050",
+		"-u set-option -t =s: -u @GC_RESTART_REQUESTED",
+	}
+	if !slices.Equal(options, want) {
+		t.Fatalf("option writes %q, want %q: the marker set then unset, each on the exact pane target, and nothing else", options, want)
 	}
 }

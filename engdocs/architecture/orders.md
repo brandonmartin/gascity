@@ -178,7 +178,7 @@ the tick never waits on order gates.
   A panic is recovered per pass (`safeTick`). Each pass is its own trace
   cycle with trigger `orders`, with one phase operation per step
   (`order_rescan`, `install_order_dispatcher`, `order_dispatch`), and a pass
-  that runs past a minute writes one `orders-lane lane: slow pass` line to
+  that runs past a minute writes one `lane orders-lane: slow pass` line to
   the supervisor log with every step's time.
 - **Store maintenance runs on lanes of its own**
   (`cmd/gc/order_maintenance_lane.go`), never in a dispatch pass. Each

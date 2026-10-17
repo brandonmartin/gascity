@@ -42,7 +42,7 @@ func (cr *CityRuntime) logSlowLanePass(lane, reason string, took time.Duration, 
 	for _, p := range phases {
 		parts = append(parts, fmt.Sprintf("%s=%s", p.name, p.took.Round(time.Millisecond)))
 	}
-	fmt.Fprintf(cr.stderr, "%s: %s lane: slow pass (%s) took %s (threshold %s): %s\n", //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(cr.stderr, "%s: lane %s: slow pass (%s) took %s (threshold %s): %s\n", //nolint:errcheck // best-effort stderr
 		cr.logPrefix, lane, reason, took.Round(time.Millisecond), lanePassSlowThreshold, strings.Join(parts, " "))
 }
 

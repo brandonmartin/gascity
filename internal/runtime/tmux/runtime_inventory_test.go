@@ -28,13 +28,13 @@ func runtimeInventoryFrom(t *testing.T, fe *fakeExecutor) (map[string]runtime.In
 // (one entry per pane, or the last pane winning).
 func TestTmuxRuntimeInventory_ParsesPanesCorpsesAndAttach(t *testing.T) {
 	fe := &fakeExecutor{out: inventoryLines(
-		"live\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t",
-		"corpse\t$2\t1700000002\t0\t0.0\t1\t201\t1700000100\t",
-		"corpse\t$2\t1700000002\t0\t0.1\t1\t202\t1700000100\t",
-		"mixed\t$3\t1700000003\t1\t0.0\t0\t301\t1700000100\t",
-		"mixed\t$3\t1700000003\t1\t0.1\t1\t302\t1700000100\t",
-		"watched\t$4\t1700000004\t2\t0.0\t0\t401\t1700000100\t",
-		"odd\t$5\t1700000005\tx\t0.0\t?\t501\t1700000100\t",
+		"live\t$1\t1700000001\t0\t0.0\t0\t101\t\t1700000100",
+		"corpse\t$2\t1700000002\t0\t0.0\t1\t201\t\t1700000100",
+		"corpse\t$2\t1700000002\t0\t0.1\t1\t202\t\t1700000100",
+		"mixed\t$3\t1700000003\t1\t0.0\t0\t301\t\t1700000100",
+		"mixed\t$3\t1700000003\t1\t0.1\t1\t302\t\t1700000100",
+		"watched\t$4\t1700000004\t2\t0.0\t0\t401\t\t1700000100",
+		"odd\t$5\t1700000005\tx\t0.0\t?\t501\t\t1700000100",
 	)}
 
 	got, err := runtimeInventoryFrom(t, fe)
@@ -65,9 +65,9 @@ func TestTmuxRuntimeInventory_ParsesPanesCorpsesAndAttach(t *testing.T) {
 // incarnation taken from a pane other than the lowest window.pane index.
 func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 	before, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.0\t0\t200\t1700000100\t",
+		"s\t$7\t1700000007\t0\t10.0\t0\t900\t\t1700000100",
+		"s\t$7\t1700000007\t0\t2.1\t0\t210\t\t1700000100",
+		"s\t$7\t1700000007\t0\t2.0\t0\t200\t\t1700000100",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory before respawn: %v", err)
@@ -79,9 +79,9 @@ func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 	// respawn-pane keeps the session id and creation time but starts a new
 	// process in the same pane.
 	after, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100\t",
-		"s\t$7\t1700000007\t0\t2.0\t0\t555\t1700000100\t",
+		"s\t$7\t1700000007\t0\t10.0\t0\t900\t\t1700000100",
+		"s\t$7\t1700000007\t0\t2.1\t0\t210\t\t1700000100",
+		"s\t$7\t1700000007\t0\t2.0\t0\t555\t\t1700000100",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory after respawn: %v", err)
@@ -96,9 +96,9 @@ func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 // reference, in the same batched read).
 func TestTmuxRuntimeInventory_ActivityIsTheLatestWindowsOrUnknown(t *testing.T) {
 	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$1\t1700000001\t0\t0.0\t0\t101\t1700000200\t",
-		"s\t$1\t1700000001\t0\t1.0\t1\t102\t1700000300\t",
-		"s\t$1\t1700000001\t0\t2.0\t0\t103\t1700000250\t",
+		"s\t$1\t1700000001\t0\t0.0\t0\t101\t\t1700000200",
+		"s\t$1\t1700000001\t0\t1.0\t1\t102\t\t1700000300",
+		"s\t$1\t1700000001\t0\t2.0\t0\t103\t\t1700000250",
 		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t\t",
 	)})
 	if err != nil {
@@ -139,11 +139,11 @@ func TestTmuxRuntimeInventory_NoServerIsError(t *testing.T) {
 func TestTmuxRuntimeInventory_MalformedLineIsError(t *testing.T) {
 	for _, bad := range []string{
 		"s\t$1\t1700000001\t0\t0.1",
-		"s\t$1\t1700000001\t0\tx.0\t0\t101\t1700000100\t",
+		"s\t$1\t1700000001\t0\tx.0\t0\t101\t\t1700000100",
 		"\t$1\t1700000001\t0\t0.1\t0\t101",
 	} {
 		got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-			"s\t$1\t1700000001\t0\t0.0\t1\t100\t1700000100\t",
+			"s\t$1\t1700000001\t0\t0.0\t1\t100\t\t1700000100",
 			bad,
 		)})
 		if err == nil {
@@ -496,7 +496,7 @@ func TestTmuxAttributionEnvironment_MatchesGetMeta(t *testing.T) {
 func TestTmuxRuntimeInventory_ActivityDiscountsAPoke(t *testing.T) {
 	prior, poke := time.Unix(1700000000, 0), time.Now().Add(-time.Hour).Truncate(time.Second)
 	p := NewProviderWithConfig(Config{})
-	p.tm.exec = &fakeExecutor{out: fmt.Sprintf("s\t$1\t1700000001\t0\t0.0\t0\t101\t%d\t", poke.Unix())}
+	p.tm.exec = &fakeExecutor{out: fmt.Sprintf("s\t$1\t1700000001\t0\t0.0\t0\t101\t\t%d", poke.Unix())}
 	p.tm.pokeMu.Lock()
 	if p.tm.pokes == nil {
 		p.tm.pokes = map[string]pokeInfo{}
@@ -518,9 +518,9 @@ func TestTmuxRuntimeInventory_ActivityDiscountsAPoke(t *testing.T) {
 // RestartRequested; a blank one leaves it unset.
 func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"asked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1700000050",
-		"asked\t$1\t1700000001\t0\t0.1\t0\t102\t1700000100\t1700000050",
-		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t",
+		"asked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000050\t1700000100",
+		"asked\t$1\t1700000001\t0\t0.1\t0\t102\t1700000050\t1700000100",
+		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t\t1700000100",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory: %v", err)
@@ -528,14 +528,20 @@ func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 	if !got["asked"].RestartRequested || got["quiet"].RestartRequested {
 		t.Fatalf("RestartRequested asked=%t quiet=%t, want only asked", got["asked"].RestartRequested, got["quiet"].RestartRequested)
 	}
-	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{@GC_RESTART_REQUESTED}") {
-		t.Fatalf("format %q does not read the marker's option", runtimeInventoryFormat)
+	if !strings.Contains(runtimeInventoryFormat, "\t#{@GC_RESTART_REQUESTED}\t") {
+		t.Fatalf("format %q does not read the marker's option ahead of a further field", runtimeInventoryFormat)
+	}
+	// The executor trims tmux's output, so a blank marker as the last field of
+	// the final line would arrive one field short and fail the whole read.
+	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{window_activity}") {
+		t.Fatalf("format %q must end in a field tmux never leaves blank", runtimeInventoryFormat)
 	}
 }
 
 // Kills a restart marker the batched read cannot see (C7a-2b): SetMeta and
 // RemoveMeta of GC_RESTART_REQUESTED write its user-option mirror beside the
-// environment, and no other key gets one.
+// environment, and no other key gets one. set-option's -t is a target-pane, so
+// the mirror is addressed "=s:": tmux 3.6 rejects a bare "=s" there.
 func TestTmuxRestartMarkerIsMirroredToAnOption(t *testing.T) {
 	fe := &fakeExecutor{}
 	p := NewProviderWithConfig(Config{})
@@ -555,7 +561,11 @@ func TestTmuxRestartMarkerIsMirroredToAnOption(t *testing.T) {
 			options = append(options, strings.Join(call, " "))
 		}
 	}
-	if len(options) != 2 || !strings.Contains(options[0], "@GC_RESTART_REQUESTED 1700000050") || !strings.Contains(options[1], "-u @GC_RESTART_REQUESTED") {
-		t.Fatalf("option writes %q, want the marker set then unset, and nothing else", options)
+	want := []string{
+		"-u set-option -t =s: @GC_RESTART_REQUESTED 1700000050",
+		"-u set-option -t =s: -u @GC_RESTART_REQUESTED",
+	}
+	if !slices.Equal(options, want) {
+		t.Fatalf("option writes %q, want %q: the marker set then unset, each on the exact pane target, and nothing else", options, want)
 	}
 }

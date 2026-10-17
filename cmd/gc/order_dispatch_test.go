@@ -4301,7 +4301,7 @@ func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSte
 	})
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(context.Background(), store, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
 		retainLast:       minClosedOrderTrackingRetained,
 	}, nil, 10)
@@ -10383,7 +10383,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_HonorsBudgetAcross
 
 	// limit=4: budget spans both stores (3 eligible each = 6 total), stops at 4.
 	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		[]beads.Store{storeA, storeB}, now, policy, nil, 4)
+		context.Background(), []beads.Store{storeA, storeB}, now, policy, nil, 4)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
 	}
@@ -10414,7 +10414,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ReturnsPartialCoun
 
 	// limit=2, 5 eligible: returns 2 with nil error.
 	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		[]beads.Store{store}, now, policy, nil, 2)
+		context.Background(), []beads.Store{store}, now, policy, nil, 2)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
 	}
@@ -10445,7 +10445,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_DoesNotBypassRetai
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		[]beads.Store{store}, now, policy, nil, 100)
+		context.Background(), []beads.Store{store}, now, policy, nil, 100)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
 	}
@@ -10475,7 +10475,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		[]beads.Store{store}, now, policy, nil, 0)
+		context.Background(), []beads.Store{store}, now, policy, nil, 0)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionAcrossStoresBounded: %v", err)
 	}

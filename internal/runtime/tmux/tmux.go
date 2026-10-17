@@ -1522,8 +1522,12 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 
 // runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
 // session name, session id, creation time, attached client count,
-// window.pane index, pane_dead, pane pid and the pane's window activity.
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{" + restartRequestedOption + "}"
+// window.pane index, pane_dead, pane pid, the session's restart marker option
+// and the pane's window activity. The marker is blank on almost every
+// session, so it is not the last field: the executor trims the output, which
+// would eat a blank trailing field from the final line and leave it one field
+// short.
+const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{" + restartRequestedOption + "}\t#{window_activity}"
 
 // listRuntimeInventory reads every pane on the server with one untargeted
 // list-panes -a and folds the panes into one entry per session. A live server
@@ -1581,7 +1585,7 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			entry.AttachedKnown = err == nil && clients >= 0
 			entry.Attached = entry.AttachedKnown && clients > 0
 			entry.DeadKnown, entry.AllPanesDead = true, true
-			entry.RestartRequested = strings.TrimSpace(fields[8]) != "" // a session option: every pane line carries it
+			entry.RestartRequested = strings.TrimSpace(fields[7]) != "" // a session option: every pane line carries it
 		}
 		switch paneDead {
 		case "0":
@@ -1596,7 +1600,7 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 
 		// The session's activity is its latest window's, dead panes
 		// included, as the state cache's FetchState reads it.
-		if activity, err := strconv.ParseInt(strings.TrimSpace(fields[7]), 10, 64); err == nil && activity > 0 {
+		if activity, err := strconv.ParseInt(strings.TrimSpace(fields[8]), 10, 64); err == nil && activity > 0 {
 			if at := time.Unix(activity, 0); !entry.ActivityKnown || at.After(entry.LastActivity) {
 				entry.ActivityKnown, entry.LastActivity = true, at
 			}

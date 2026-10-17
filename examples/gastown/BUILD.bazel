@@ -11,6 +11,7 @@ go_test(
         "main_test.go",
         "maintenance_bd_integration_test.go",
         "maintenance_installed_layout_test.go",
+        "maintenance_jsonl_signal_test.go",
         "maintenance_scope_test.go",
         "maintenance_scripts_dolt_integration_test.go",
         "maintenance_scripts_test.go",

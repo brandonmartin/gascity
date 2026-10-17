@@ -347,7 +347,15 @@ LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
 LINT_GOMEMLIMIT ?= 6GiB
-LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)
+# golangci-lint's result cache is keyed by module-relative content, but a
+# cached issue keeps the absolute path of the checkout that produced it. Shared
+# across sibling or throwaway checkouts (gate scratch trees, per-bead
+# worktrees) it replays paths into a tree that may already be gone, and then
+# the nolint and generated-file processors cannot read the source: every
+# suppressed finding leaks and a clean tree lints red (ga-3w9i, gp-to2zr). Keep
+# the cache inside the checkout; a caller that wants one shared sets its own.
+GOLANGCI_LINT_CACHE ?= $(CURDIR)/.cache/golangci-lint
+LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)"
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 
@@ -432,7 +440,7 @@ fmt-check-changed: $(GOLANGCI_LINT)
 
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
-	GOMEMLIMIT=$(LINT_GOMEMLIMIT) $(GOLANGCI_LINT) fmt ./...
+	GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" $(GOLANGCI_LINT) fmt ./...
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
 ## agent-session vars (GC_CITY, GC_HOME, GC_SESSION_ID, ...) cannot leak into
@@ -531,9 +539,11 @@ test: bazel-tmpdir
 ## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
+## The per-package -timeout is GO_TEST_BUDGET (below): the fan-out's number,
+## or GO_TEST_TIMEOUT=30m make test-go on a loaded host.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test-go: test-fsys-darwin-compile
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout $(GO_TEST_BUDGET) ./...
 
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
 ## the provider's own tier under internal/runtime/herdr, plus the controller's
@@ -553,7 +563,7 @@ MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
 test-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout $(GO_TEST_BUDGET) $(MAC_UNIT_PKGS)
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
@@ -564,6 +574,16 @@ LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 # does; the sibling *-parallel targets below run without env -i and inherit an
 # override from the environment directly.
 GO_TEST_TIMEOUT ?=
+## GO_TEST_BUDGET: the -timeout the unsharded sweeps (test-go, test-mac) hand
+## to go test: GO_TEST_TIMEOUT when set, else the fan-out's default, which
+## scripts/go-test-budget reads out of scripts/test-local-parallel so the sweeps
+## cannot drift onto a smaller budget than the shards. They carried their own
+## 15m until ga-3w9i, and cmd/gc crossed it on a loaded host with every test
+## green: the refinery gate read a red with no failing test to name. Resolved
+## before TEST_ENV's env -i, so the override needs no forwarding, and expanded
+## at recipe time, so a missing budget stops the target instead of handing go
+## test an empty flag.
+GO_TEST_BUDGET = $(or $(shell GO_TEST_TIMEOUT="$(GO_TEST_TIMEOUT)" ./scripts/go-test-budget),$(error scripts/go-test-budget resolved no per-package go test budget))
 
 ## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
 test-fast-parallel:

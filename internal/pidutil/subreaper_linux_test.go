@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -51,7 +50,13 @@ func TestDetectSubreapersFindsAnAncestorSubreaper(t *testing.T) {
 	case "scanner":
 		orphanPID := startOrphan(t)
 		helper := os.Getppid()
-		ppid := waitForParent(t, orphanPID, helper)
+		ppid, err := ParentPID(orphanPID)
+		if err != nil {
+			t.Fatalf("reading parent of orphan %d: %v", orphanPID, err)
+		}
+		if ppid != helper {
+			t.Fatalf("orphan %d has parent %d (%s), want the helper subreaper %d", orphanPID, ppid, Comm(ppid), helper)
+		}
 		if Comm(helper) == "systemd" {
 			t.Fatalf("helper subreaper %d is named systemd; the test no longer models a non-systemd subreaper", helper)
 		}
@@ -71,7 +76,9 @@ func TestDetectSubreapersFindsAnAncestorSubreaper(t *testing.T) {
 }
 
 // startOrphan starts a sleep under a shell that exits at once, so the sleep
-// is orphaned, and returns the sleep's pid. The sleep is killed at cleanup.
+// is orphaned, and returns the sleep's pid. The kernel reparents the sleep as
+// the shell exits, before the shell can be reaped, so the sleep already has
+// its adopter when this returns. The sleep is killed at cleanup.
 func startOrphan(t *testing.T) int {
 	t.Helper()
 	out, err := exec.Command("sh", "-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!").Output()
@@ -84,25 +91,4 @@ func startOrphan(t *testing.T) int {
 	}
 	t.Cleanup(func() { _ = unix.Kill(pid, unix.SIGKILL) })
 	return pid
-}
-
-// waitForParent returns pid's parent once it is want. The kernel reparents an
-// orphan when its parent exits, so this settles at once; the deadline only
-// bounds a broken topology.
-func waitForParent(t *testing.T, pid, want int) int {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		ppid, err := ParentPID(pid)
-		if err != nil {
-			t.Fatalf("reading parent of orphan %d: %v", pid, err)
-		}
-		if ppid == want {
-			return ppid
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("orphan %d has parent %d (%s), want the helper subreaper %d", pid, ppid, Comm(ppid), want)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }

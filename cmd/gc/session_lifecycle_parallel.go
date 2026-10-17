@@ -39,6 +39,11 @@ const (
 	// preparation stays chunked so flapping dependencies are observed between batches.
 	defaultStartDependencyRecheckBatchSize = 3
 
+	// defaultStartPrepareBudget bounds the time one planner call spends in
+	// prepareStartCandidateForCity, summed over its candidates. The controller
+	// reconcile sites opt in with withPrepareBudget.
+	defaultStartPrepareBudget = 60 * time.Second
+
 	// Stops and interrupts are teardown paths, so their parallelism is not
 	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3
@@ -413,7 +418,11 @@ type startExecutionOptions struct {
 	// performs the closes. Safe to defer: the closes already fail closed and are
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
-	readyAssignedFlags       []bool
+	// prepareBudget caps the cumulative time one planner call spends preparing
+	// candidates; once spent, the remaining candidates defer to the next tick.
+	// Zero or negative leaves prepare unbounded.
+	prepareBudget      time.Duration
+	readyAssignedFlags []bool
 	// scaleDemandExcludes is one raw gc.exclude_claimants value per demand
 	// bead, keyed by template. Nil leaves ComputeAwakeSet's scaled pass
 	// unchanged. A session named by every entry is not woken and does not
@@ -561,6 +570,15 @@ func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOptio
 func withOnDeathGate(gate *onDeathGate) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.onDeathGate = gate
+	}
+}
+
+// withPrepareBudget caps the cumulative time one planner call spends in
+// prepareStartCandidateForCity. Zero or negative (or the option omitted)
+// leaves prepare unbounded.
+func withPrepareBudget(d time.Duration) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.prepareBudget = d
 	}
 }
 
@@ -4200,6 +4218,62 @@ func rollbackPendingCreateClearingClaim(info sessionpkg.Info, sessFront *session
 	return batch
 }
 
+// prepareMeter charges the time one planner call spends in
+// prepareStartCandidateForCity against the call's prepare budget. A limit of
+// zero or less never defers.
+type prepareMeter struct {
+	limit   time.Duration
+	clk     clock.Clock
+	spent   time.Duration
+	began   time.Time
+	summary bool
+}
+
+// now reads the meter's clock, falling back to the wall clock when it has none.
+func (m *prepareMeter) now() time.Time {
+	if m.clk == nil {
+		return time.Now()
+	}
+	return m.clk.Now()
+}
+
+// begin starts timing one prepare.
+func (m *prepareMeter) begin() {
+	if m.limit > 0 {
+		m.began = m.now()
+	}
+}
+
+// end charges the prepare begin started, a failed one included. A clock that
+// moved backwards charges nothing.
+func (m *prepareMeter) end() {
+	if m.limit > 0 {
+		m.spent += max(0, m.now().Sub(m.began))
+	}
+}
+
+// deferIfSpent reports whether the budget is spent and, if so, defers the
+// candidate: it logs and traces the deferral, and logs one summary line the
+// first time in a planner call. The deferral happens before any slot, lease,
+// ticket, breaker accounting or write.
+func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTraceCycle, wave int, candidate startCandidate, cfg *config.City) bool {
+	if m.limit <= 0 || m.spent < m.limit {
+		return false
+	}
+	if !m.summary {
+		m.summary = true
+		fmt.Fprintf(stderr, "session reconciler: prepare budget exhausted (spent=%s, budget=%s); deferring the remaining starts to the next tick\n", m.spent.Round(time.Millisecond), m.limit) //nolint:errcheck // best-effort stderr
+	}
+	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByPrepareBudget), time.Time{}, time.Time{}, nil)
+	if trace != nil {
+		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonPrepareBudgetSpent, TraceOutcomeDeferredByPrepareBudget, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
+			"spent_ms":  m.spent.Milliseconds(),
+			"budget_ms": m.limit.Milliseconds(),
+		})
+	}
+	return true
+}
+
 func executePlannedStartsTraced(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -4285,6 +4359,7 @@ func executePlannedStartsTraced(
 		}
 	}()
 	wakeCount := 0
+	prepareSpend := &prepareMeter{limit: startOpts.prepareBudget, clk: clk}
 	for wave := 0; wave <= maxWave; wave++ {
 		if ctx != nil && ctx.Err() != nil {
 			return wakeCount
@@ -4355,6 +4430,11 @@ func executePlannedStartsTraced(
 					if trace != nil {
 						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonOnDeathHookPending, TraceOutcomeDeferredByOnDeathHook, candidate.tp.TemplateName, candidate.name(), nil)
 					}
+					continue
+				}
+				// A planner call that has spent its prepare budget defers the
+				// rest before any slot, lease, ticket, breaker accounting or write.
+				if prepareSpend.deferIfSpent(stderr, trace, wave, candidate, cfg) {
 					continue
 				}
 				var release func()
@@ -4494,7 +4574,9 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
+				prepareSpend.begin()
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources)
+				prepareSpend.end()
 				if err != nil {
 					// A PreWake refused because the row moved (or the lease was
 					// taken over) is no restart and leaves the row's in-flight

@@ -175,7 +175,7 @@ func TestLogSlowLanePass(t *testing.T) {
 	cr.logSlowLanePass(beadRetentionLaneName, orderMaintenanceLaneReason, 7*time.Minute+32*time.Second, phases)
 	out := stderr.String()
 	for _, want := range []string{
-		"gc test: bead-retention lane: slow pass (cadence) took 7m32s",
+		"gc test: lane bead-retention: slow pass (cadence) took 7m32s",
 		"nudge_mail_sweep_watchdog=2s",
 		"order_tracking_retention_watchdog=7m30s",
 	} {

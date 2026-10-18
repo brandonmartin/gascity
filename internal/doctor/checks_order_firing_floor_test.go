@@ -59,7 +59,7 @@ func TestOrderFiringCurrent_NeverFired_BeyondTheDispatchFloorStaysBlocking(t *te
 
 func TestOrderFiringCurrent_StalenessIsJudgedAgainstTheDispatchFloor(t *testing.T) {
 	// Last fired 100s ago: three 30s intervals have passed (CRITICAL against
-	// the interval), but not one and a half of the 1m30s cadence the budget allows.
+	// the interval), but not overdue against the 1m30s cadence the budget allows.
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
 	writeOrderFiringTestOrder(t, cityPath, "beads-health", "cooldown", "30s")

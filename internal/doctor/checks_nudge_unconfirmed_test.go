@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
@@ -102,6 +103,93 @@ func TestNudgeUnconfirmedCheckCountsSessionsNotArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "1 session(s)") {
 		t.Fatalf("message = %q, want it to name 1 session for one session holding two artifacts", r.Message)
+	}
+}
+
+func TestNudgeUnconfirmedCheckReportsNoBusyIndicatorAsInformational(t *testing.T) {
+	cityRoot := t.TempDir()
+	session := "gc-provider-without-busy-indicator"
+	path := filepath.Join(citylayout.SessionDiagnosticsDir(cityRoot), session, "nudge-unconfirmed.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	content := "session: " + session + "\ncause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write diagnostic: %v", err)
+	}
+
+	r := NewNudgeUnconfirmedCheck().Run(&CheckContext{CityPath: cityRoot})
+	if r.Status != StatusOK {
+		t.Fatalf("no-busy-indicator diagnostic warned: status = %v: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "informational") || !strings.Contains(r.Message, "no busy-state indicator") {
+		t.Fatalf("message = %q, want a separate informational count for providers without a busy-state indicator", r.Message)
+	}
+	if strings.Contains(r.Message, "1 session(s) have an unconfirmed nudge delivery") {
+		t.Fatalf("no-busy-indicator diagnostic was counted as a delivery warning: %q", r.Message)
+	}
+	if len(r.Details) != 1 || !strings.Contains(r.Details[0], session) {
+		t.Fatalf("details = %v, want the informational artifact named", r.Details)
+	}
+}
+
+func TestNudgeUnconfirmedCheckSeparatesInformationalFromWarnings(t *testing.T) {
+	cityRoot := t.TempDir()
+	writeNudgeDiagnostic(t, cityRoot, "gc-confirmable-provider", "nudge-unconfirmed.log")
+	path := filepath.Join(citylayout.SessionDiagnosticsDir(cityRoot), "gc-provider-without-busy-indicator", "nudge-unconfirmed.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	content := "session: gc-provider-without-busy-indicator\ncause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write no-busy-indicator diagnostic: %v", err)
+	}
+
+	r := NewNudgeUnconfirmedCheck().Run(&CheckContext{CityPath: cityRoot})
+	if r.Status != StatusWarning {
+		t.Fatalf("confirmable-provider diagnostic was hidden: status = %v: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "1 session(s) have an unconfirmed nudge delivery") {
+		t.Fatalf("message = %q, want only the confirmable provider in the warning count", r.Message)
+	}
+	if !strings.Contains(r.Message, "1 session(s) have unconfirmable deliveries (informational") {
+		t.Fatalf("message = %q, want the no-busy-indicator delivery reported separately", r.Message)
+	}
+	joined := strings.Join(r.Details, "\n")
+	if !strings.Contains(joined, "gc-confirmable-provider") || !strings.Contains(joined, "gc-provider-without-busy-indicator") {
+		t.Fatalf("details = %v, want both the warning and informational sessions", r.Details)
+	}
+}
+
+func TestNudgeUnconfirmedCheckIgnoresOldDiagnostics(t *testing.T) {
+	cityRoot := t.TempDir()
+	writeNudgeDiagnostic(t, cityRoot, "gc-old-submit", "nudge-unconfirmed.log")
+	writeNudgeDiagnostic(t, cityRoot, "gc-old-startup", "startup-nudge-unconfirmed.log")
+	writeNudgeDiagnostic(t, cityRoot, "gc-recent", "nudge-unconfirmed.log")
+
+	stale := time.Now().Add(-48 * time.Hour)
+	for _, path := range []string{
+		filepath.Join(citylayout.SessionDiagnosticsDir(cityRoot), "gc-old-submit", "nudge-unconfirmed.log"),
+		filepath.Join(citylayout.SessionDiagnosticsDir(cityRoot), "gc-old-startup", "startup-nudge-unconfirmed.log"),
+	} {
+		if err := os.Chtimes(path, stale, stale); err != nil {
+			t.Fatalf("age diagnostic %s: %v", path, err)
+		}
+	}
+
+	r := NewNudgeUnconfirmedCheck().Run(&CheckContext{CityPath: cityRoot})
+	if r.Status != StatusWarning {
+		t.Fatalf("recent diagnostic was hidden by old artifacts: status = %v: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "1 session(s)") {
+		t.Fatalf("message = %q, want only the recent session counted", r.Message)
+	}
+	joined := strings.Join(r.Details, "\n")
+	if !strings.Contains(joined, "gc-recent") {
+		t.Fatalf("details = %v, want the recent diagnostic", r.Details)
+	}
+	if strings.Contains(joined, "gc-old-submit") || strings.Contains(joined, "gc-old-startup") {
+		t.Fatalf("stale diagnostics were reported: %v", r.Details)
 	}
 }
 

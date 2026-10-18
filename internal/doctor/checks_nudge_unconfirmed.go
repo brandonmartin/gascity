@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
@@ -16,6 +18,13 @@ var nudgeUnconfirmedDiagnosticFiles = []string{
 	"nudge-unconfirmed.log",
 	"startup-nudge-unconfirmed.log",
 }
+
+const (
+	// nudgeUnconfirmedMaxAge bounds how long an old diagnostic can remain an
+	// active finding when no newer delivery outcome is available.
+	nudgeUnconfirmedMaxAge    = 24 * time.Hour
+	noBusyStateIndicatorCause = "no busy-state indicator for this provider family"
+)
 
 // LiveSessionNamesFunc returns the tmux session names of every session that is
 // still live (not closed), which is also the directory name its diagnostics
@@ -39,13 +48,10 @@ func WithLiveSessionNames(fn LiveSessionNamesFunc) NudgeUnconfirmedOption {
 	}
 }
 
-// NudgeUnconfirmedCheck surfaces sessions whose most recent nudge or
-// startup-nudge submit could not be confirmed delivered. tmux's fallback
-// nudge path has no busy-state indicator to confirm delivery against, so it
-// cannot retry (retrying would duplicate every successful send); instead it
-// writes a diagnostic file. This check is the reconciliation that reads that
-// file back so the unconfirmed outcome reaches an operator instead of being
-// silently dropped.
+// NudgeUnconfirmedCheck surfaces recent sessions whose nudge or startup-nudge
+// submit could not be confirmed delivered. Diagnostics that state the provider
+// has no busy-state indicator are informational because their delivery cannot
+// be confirmed by design.
 type NudgeUnconfirmedCheck struct {
 	liveSessions LiveSessionNamesFunc
 }
@@ -65,12 +71,13 @@ func (c *NudgeUnconfirmedCheck) Name() string { return "nudge-unconfirmed" }
 
 // nudgeDiagnostic is one diagnostic file found under a session directory.
 type nudgeDiagnostic struct {
-	session  string
-	filename string
+	session       string
+	filename      string
+	informational bool
 }
 
-// Run scans the city's runtime sessions directory for unconfirmed-nudge
-// diagnostic files and warns when any belong to a live session.
+// Run scans the city's runtime sessions directory for recent unconfirmed-nudge
+// diagnostics and warns when any belong to a live session.
 func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
@@ -93,6 +100,8 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 
 	var found []nudgeDiagnostic
 	var malformed []string
+	staleDiagnostics := 0
+	cutoff := time.Now().Add(-nudgeUnconfirmedMaxAge)
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() {
@@ -105,8 +114,23 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		for _, filename := range nudgeUnconfirmedDiagnosticFiles {
 			path := filepath.Join(sessionsDir, name, filename)
-			if _, statErr := os.Stat(path); statErr == nil {
-				found = append(found, nudgeDiagnostic{session: name, filename: filename})
+			if info, statErr := os.Stat(path); statErr == nil {
+				if info.ModTime().Before(cutoff) {
+					staleDiagnostics++
+					continue
+				}
+				content, readErr := os.ReadFile(path)
+				if readErr != nil {
+					r.Status = StatusError
+					r.Severity = SeverityAdvisory
+					r.Message = fmt.Sprintf("cannot read session diagnostic %s: %v", path, readErr)
+					return r
+				}
+				found = append(found, nudgeDiagnostic{
+					session:       name,
+					filename:      filename,
+					informational: strings.Contains(string(content), noBusyStateIndicatorCause),
+				})
 			} else if !os.IsNotExist(statErr) {
 				r.Status = StatusError
 				r.Severity = SeverityAdvisory
@@ -129,8 +153,15 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	var details []string
+	var informationalDetails []string
 	sessions := make(map[string]struct{})
+	informationalSessions := make(map[string]struct{})
 	for _, d := range found {
+		if d.informational {
+			informationalDetails = append(informationalDetails, fmt.Sprintf("session %q: %s (informational: no busy-state indicator)", d.session, d.filename))
+			informationalSessions[d.session] = struct{}{}
+			continue
+		}
 		details = append(details, fmt.Sprintf("session %q: %s", d.session, d.filename))
 		sessions[d.session] = struct{}{}
 	}
@@ -138,13 +169,24 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(details) == 0 && len(malformed) == 0 {
 		r.Status = StatusOK
 		r.Message = "no unconfirmed nudge deliveries"
-		if len(closed) > 0 {
+		if len(closed) > 0 && len(informationalSessions) == 0 && staleDiagnostics == 0 {
 			r.Message = fmt.Sprintf("no unconfirmed nudge deliveries for live sessions (%d closed session(s) skipped)", len(closed))
 		}
+		if len(informationalSessions) > 0 {
+			r.Message += fmt.Sprintf("; %d session(s) have unconfirmable deliveries (informational: no busy-state indicator)", len(informationalSessions))
+		}
+		if staleDiagnostics > 0 {
+			r.Message += fmt.Sprintf("; %d stale diagnostic(s) ignored", staleDiagnostics)
+		}
+		if len(closed) > 0 && (len(informationalSessions) > 0 || staleDiagnostics > 0) {
+			r.Message += fmt.Sprintf("; %d closed session(s) skipped", len(closed))
+		}
+		r.Details = informationalDetails
 		return r
 	}
 
 	sort.Strings(details)
+	sort.Strings(informationalDetails)
 	sort.Strings(malformed)
 	for _, name := range malformed {
 		details = append(details, fmt.Sprintf("unexpected non-directory entry %q under %s", name, sessionsDir))
@@ -165,9 +207,17 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 			r.Message += fmt.Sprintf("; %d unexpected non-directory entry(ies) under %s", len(malformed), sessionsDir)
 		}
 	}
+	if len(informationalSessions) > 0 {
+		r.Message += fmt.Sprintf("; %d session(s) have unconfirmable deliveries (informational: no busy-state indicator)", len(informationalSessions))
+	}
+	if staleDiagnostics > 0 {
+		r.Message += fmt.Sprintf("; %d stale diagnostic(s) ignored", staleDiagnostics)
+	}
 	if len(closed) > 0 {
 		r.Message += fmt.Sprintf("; %d closed session(s) skipped", len(closed))
 	}
+	details = append(details, informationalDetails...)
+	sort.Strings(details)
 	r.Details = details
 	return r
 }

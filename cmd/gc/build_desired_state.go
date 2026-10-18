@@ -1103,6 +1103,45 @@ type demandTargets struct {
 // (controllerQueryRuntimeEnv).
 type probeEnvFunc func(cityPath string, cfg *config.City, agent *config.Agent) (map[string]string, error)
 
+// livePoolSessions counts the live pool sessions of allOpenSessionInfos by
+// normalized template identity (normalizeAgentTemplateIdentity).
+type livePoolSessions map[string]int
+
+// livePoolSessionsByIdentity counts infos' live pool sessions once, by
+// normalized template identity, so each agent's count is one lookup rather
+// than a walk of every session that normalizes each (which scans every agent:
+// agents x sessions x agents, 1.2s of maintainer-city's 1.45s pass at 636
+// agents). Match by identity equivalence: infos is aggregated across the city
+// and every rig store, and pool session beads store the qualified name
+// (agent.QualifiedName(), see session_sleep.go); adopted beads may still carry
+// a legacy bound form of the same identity, which must count or the cold-wake
+// probe over-wakes a pool that already has a live session. Equivalence keeps
+// the cross-rig guarantee: an unqualified base name never normalizes to a
+// dir-scoped agent, and a same-base-name pool in another rig (rigB/planner)
+// normalizes to itself, so neither inflates this rig's count.
+func livePoolSessionsByIdentity(lookup agentLookup, infos []session.Info) livePoolSessions {
+	out := make(livePoolSessions)
+	for _, si := range infos {
+		if !isPoolManagedSessionInfo(si) || !poolSessionIsLiveInfo(si) {
+			continue
+		}
+		if t := strings.TrimSpace(si.Template); t != "" {
+			out[lookup.normalize(t)]++
+		}
+	}
+	return out
+}
+
+// count is the number of live pool sessions whose template is equivalent to
+// template (agentTemplateIdentitiesEquivalent): equal trimmed identities
+// normalize equally, so the normalized count is exactly the equivalence count.
+func (l livePoolSessions) count(lookup agentLookup, template string) int {
+	if t := strings.TrimSpace(template); t != "" {
+		return l[lookup.normalize(t)]
+	}
+	return 0
+}
+
 // buildDemandTargets runs the demand pass's agent loop. allOpenSessionInfos is
 // the cross-store session census; it decides which pools are cold. queryEnv
 // builds each custom scale_check pool's probe env.
@@ -1141,6 +1180,10 @@ func buildDemandTargets(
 	// authoritative, so each such template is reported partial (retain, don't
 	// drain) and the error reaches the demand pass's error list instead of
 	// being dropped here.
+	// One agent index for the build: every normalization below is a map
+	// lookup, not a scan of every agent (Gate S fix 3).
+	lookup := newAgentLookup(cfg)
+	livePools := livePoolSessionsByIdentity(lookup, allOpenSessionInfos)
 	var cityLegs []classStoreCandidate
 	var cityLegsErr error
 	if store != nil {
@@ -1226,24 +1269,7 @@ func buildDemandTargets(
 		hasCustomScaleCheck := strings.TrimSpace(cfg.Agents[i].ScaleCheck) != ""
 		template := cfg.Agents[i].QualifiedName()
 		storeScopedControlDispatcher := cfg.Agents[i].Name == config.ControlDispatcherAgentName
-		runningSessions := 0
-		for _, si := range allOpenSessionInfos {
-			if isPoolManagedSessionInfo(si) && poolSessionIsLiveInfo(si) {
-				// Match the qualified template by identity equivalence.
-				// allOpenSessionInfos is aggregated across the city + every rig
-				// store, and pool session beads store the qualified name
-				// (agent.QualifiedName(), see session_sleep.go); adopted beads may
-				// still carry a legacy bound form of the same identity, which must
-				// count here or the cold-wake probe over-wakes a pool that already
-				// has a live session. Equivalence preserves the cross-rig guarantee:
-				// an unqualified base name never normalizes to a dir-scoped agent,
-				// and a same-base-name pool in another rig (e.g. rigB/planner)
-				// normalizes to itself, so neither inflates this rig's count.
-				if agentTemplateIdentitiesEquivalent(cfg, si.Template, template) {
-					runningSessions++
-				}
-			}
-		}
+		runningSessions := livePools.count(lookup, template)
 
 		// Cold-pool wake probe (FR-S0.1): a pool with a custom scale_check that
 		// returns 0 while it has zero running sessions and min=0 would never wake
@@ -3886,6 +3912,8 @@ func realizePoolDesiredSessionsAt(
 					// the error because a stalled slot is only diagnosable if
 					// the operator can see who is sitting on the name.
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (slot stalled on its own runtime name; retrying next tick)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolTriggerWorktreeEvidence):
+					noticePoolWorktreeEvidenceSkip(stderr, qualifiedName, "", request.WorkBeadID, err)
 				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
@@ -4019,12 +4047,13 @@ func realizePoolDesiredSessionsAt(
 				// Unusable ownership evidence is not a partial bind: a reused
 				// session left in desired would restart against its previous
 				// binding's work dir.
-				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (skipping)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+				noticePoolWorktreeEvidenceSkip(stderr, qualifiedName, sbInfo.ID, item.request.WorkBeadID, err)
 				continue
 			}
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 		} else {
 			sbInfo = bound
+			clearPoolWorktreeEvidenceSkipNotice(item.request.WorkBeadID)
 		}
 		segmentStart = bp.realizeNow()
 		fpExtra := buildFingerprintExtra(resolveAgent)
@@ -4302,6 +4331,41 @@ var errPoolTriggerWorktreeEvidence = errors.New("pool trigger worktree evidence"
 
 // errPlanOnlyEffect refuses an effect attempted with planOnly build params.
 var errPlanOnlyEffect = errors.New("plan-only build params refuse effects")
+
+// poolWorktreeEvidenceSkipNoticed records, per work bead, the error text of
+// the last pool-starvation notice logged for it. A bead whose worktree
+// evidence is unusable is skipped on every tick until someone repairs its
+// metadata, so the notice logs once per state change rather than per tick.
+// A bead's entry is forgotten when it binds to a session.
+var poolWorktreeEvidenceSkipNoticed sync.Map // work bead ID -> error text
+
+// noticePoolWorktreeEvidenceSkip reports that a pool request was skipped
+// because its work bead's worktree evidence is unusable. The skip leaves
+// ready work unclaimed for as long as the evidence stays bad, so the line
+// carries a distinctive tag, names the work bead, and gives the command to
+// inspect it. sessionID is empty when the skip happened before a session
+// was chosen.
+func noticePoolWorktreeEvidenceSkip(stderr io.Writer, qualifiedName, sessionID, workBeadID string, err error) {
+	if stderr == nil || err == nil {
+		return
+	}
+	msg := err.Error()
+	if prev, loaded := poolWorktreeEvidenceSkipNoticed.Swap(workBeadID, msg); loaded && prev == msg {
+		return
+	}
+	sessionField := ""
+	if sessionID != "" {
+		sessionField = " session " + sessionID
+	}
+	fmt.Fprintf(stderr, "POOL-STARVATION-SKIP: pool %q%s work bead %s: %v (no session runs this bead until its worktree evidence is repaired or cleared; inspect with 'bd show %s')\n", //nolint:errcheck
+		qualifiedName, sessionField, workBeadID, err, workBeadID)
+}
+
+// clearPoolWorktreeEvidenceSkipNotice forgets a work bead's notice state once
+// it binds, so a later relapse logs again.
+func clearPoolWorktreeEvidenceSkipNotice(workBeadID string) {
+	poolWorktreeEvidenceSkipNoticed.Delete(workBeadID)
+}
 
 func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
 	if strings.TrimSpace(request.WorktreeError) != "" {

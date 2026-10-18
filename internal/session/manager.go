@@ -774,7 +774,9 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // FindRuntimesBySessionID): the orphans the scan did surface are still
 // terminated unless one of them is LiveUnlisted, which terminates none, and
 // matching the started replacement is impossible because it does not exist
-// yet.
+// yet. A root in a user-manager *.service other than the session's own unit is
+// left alone: that is a detached systemd-run --user service that inherited the
+// id.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
@@ -786,6 +788,10 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	// The session's own unit, when it lives in a user service. A scope
+	// session (the usual tmux pane) has none, so every nested *.service
+	// is a detached systemd-run that inherited the id.
+	ownUnit := proctable.SessionOwnUserService(found, sessionID)
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
@@ -803,6 +809,14 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
+		// A systemd-run --user service in its own cgroup inherited the id
+		// and reparented under the user manager. It is not this session.
+		// A root in the session's own unit is still reaped, and named.
+		unit, foreign := proctable.ForeignUserService(live.PID, ownUnit)
+		if foreign {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: user service %s (not the session's unit)", sessionID, live.PID, unit)
+			continue
+		}
 		// The provider claims this root as a live runtime of its own that it
 		// does not list: a pane of its socket that it cannot reach or that a
 		// failed listing missed. It is not an orphan, and a replacement would
@@ -812,6 +826,9 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		if live.LiveUnlisted {
 			log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d belongs to the provider but is not listed by it", sessionID, live.PID, live.PPID)
 			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s belongs to the provider but is not listed by it: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+		}
+		if unit != "" {
+			log.Printf("session: reaping orphaned runtime for %s pid=%d unit=%s", sessionID, live.PID, unit)
 		}
 		orphans = append(orphans, live)
 	}

@@ -96,7 +96,7 @@ func TestOrderFiringCurrent_MixedAdvisoryAndWarning_AggregatesAdvisory(t *testin
 	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "1h")
 	writeOrderFiringTestEvents(t, cityPath,
 		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
-		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-2 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(150 * -time.Minute)},
 	)
 
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
@@ -464,7 +464,7 @@ func TestOrderFiringCurrent_Overdue(t *testing.T) {
 	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
 	writeOrderFiringTestEvents(t, cityPath,
 		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
-		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-7 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-9 * time.Hour)},
 	)
 
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
@@ -691,6 +691,101 @@ func runOrderFiringCurrentTest(t *testing.T, cfg *config.City, cityPath string, 
 	check := NewOrderFiringCurrentCheck(cfg, cityPath)
 	check.clock = func() time.Time { return now }
 	return check.Run(&CheckContext{CityPath: cityPath})
+}
+
+// shortCadenceFiringResult runs the check over one cooldown order that last
+// fired age ago and returns the result. patrol, when non-empty, sets
+// [daemon] patrol_interval.
+func shortCadenceFiringResult(t *testing.T, interval, patrol string, age time.Duration) *CheckResult {
+	t.Helper()
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Daemon.PatrolInterval = patrol
+	writeOrderFiringTestOrder(t, cityPath, "gate-sweep", "cooldown", interval)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep", Ts: now.Add(-age)},
+	)
+	return runOrderFiringCurrentTest(t, cfg, cityPath, now)
+}
+
+// A cooldown order fires on the first orders-lane pass after it is due, so on
+// a healthy city a 30s order already lands 30-60s apart, and a loaded
+// controller adds a pass. The check must absorb that instead of reading
+// every late tick as overdue (ga-msi0q).
+func TestOrderFiringCurrent_ShortCooldownAbsorbsDispatchJitter(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		patrol   string
+		age      time.Duration
+		want     CheckStatus
+	}{
+		{"30s order one tick late", "30s", "30s", 60 * time.Second, StatusOK},
+		{"30s order a tick and a half late", "30s", "30s", 80 * time.Second, StatusOK},
+		{"30s order past the grace is overdue", "30s", "30s", 100 * time.Second, StatusWarning},
+		{"30s order far past is stale", "30s", "30s", 160 * time.Second, StatusError},
+		{"1m order one tick late", "1m", "30s", 90 * time.Second, StatusOK},
+		{"1m order just under two cadences", "1m", "30s", 119 * time.Second, StatusOK},
+		{"1m order two cadences late is overdue", "1m", "30s", 125 * time.Second, StatusWarning},
+		{"1m order three cadences late is stale", "1m", "30s", 3 * time.Minute, StatusError},
+		{"slower patrol widens the grace", "30s", "2m", 4 * time.Minute, StatusOK},
+		{"slower patrol still goes stale", "30s", "2m", 9 * time.Minute, StatusError},
+		{"unset patrol interval uses the 30s default", "30s", "", 80 * time.Second, StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := shortCadenceFiringResult(t, tt.interval, tt.patrol, tt.age)
+			if result.Status != tt.want {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.want, result.Message, result.Details)
+			}
+		})
+	}
+}
+
+// The grace is for short cadences. A long cadence keeps the two- and
+// three-cadence thresholds, so an hourly order is not tolerated a tick-sized
+// extra.
+func TestOrderFiringCurrent_LongCooldownKeepsCadenceThresholds(t *testing.T) {
+	tests := []struct {
+		name string
+		age  time.Duration
+		want CheckStatus
+	}{
+		{"under two cadences", 110 * time.Minute, StatusOK},
+		{"two cadences", 125 * time.Minute, StatusWarning},
+		{"three cadences", 190 * time.Minute, StatusError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := shortCadenceFiringResult(t, "1h", "30s", tt.age)
+			if result.Status != tt.want {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.want, result.Message, result.Details)
+			}
+		})
+	}
+}
+
+// An event inside the grace window answers "current" on its own: the
+// authoritative order-run lookup is a store round trip, and a 30s order
+// firing normally sits past 1.5 cadences most of the time.
+func TestLatestOrderFiredAt_ShortCadenceEventInsideGraceSkipsLastRun(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected := 30 * time.Second
+	order := orders.Order{Name: "gate-sweep", Trigger: "cooldown"}
+	evts := []events.Event{
+		{Type: events.OrderFired, Subject: order.ScopedName(), Ts: now.Add(-80 * time.Second)},
+	}
+
+	check := &OrderFiringCurrentCheck{
+		lastRun: func(orders.Order) (time.Time, error) {
+			t.Fatalf("lastRun was consulted for an event inside the grace window")
+			return time.Time{}, nil
+		},
+	}
+	if _, err := check.latestOrderFiredAt(evts, order, expected, now); err != nil {
+		t.Fatalf("latestOrderFiredAt returned error: %v", err)
+	}
 }
 
 func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {

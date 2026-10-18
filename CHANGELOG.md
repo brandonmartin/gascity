@@ -339,6 +339,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc doctor`'s `order-firing-current` check no longer flaps between ok
+  and "scheduled orders are overdue" on a loaded city.** The orders lane
+  fires a cooldown or cron order on the first pass after it is due, and
+  passes land once per patrol interval plus their own run time, so a 30s
+  cooldown order on a 30s patrol lands 30-60s apart even when idle. The
+  check read anything past one and a half cadences (45s for that order) as
+  overdue, so ordinary dispatch jitter tripped it. An order is now overdue
+  only at the longer of two cadences and one cadence plus two patrol
+  intervals, and stale at the longer of three cadences and one cadence plus
+  four patrol intervals; the patrol interval is the city's `[daemon]
+  patrol_interval`. An order whose
+  cadence is two patrol intervals or longer is judged on cadence alone, at
+  two cadences for overdue (it was one and a half) and three for stale; the
+  never-fired check is unchanged. The event-log fast path uses the same
+  overdue threshold, so a short-cadence order firing normally no longer
+  costs a store round trip per check.
 - **The `jsonl-export` order no longer launches an export Dolt cannot
   finish, and no longer leaves its temporary files behind.** `gc bd export
   --all` looks up the labels, comments and dependencies of every row it

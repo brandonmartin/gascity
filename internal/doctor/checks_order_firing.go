@@ -180,6 +180,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	tick := c.controllerTick()
 	cronIntervals := map[string]time.Duration{}
 	worst := StatusOK
 	monitored := 0
@@ -223,7 +224,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, expected, tick, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -575,7 +576,7 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCur
 	if lastRun == nil {
 		return latest, nil
 	}
-	if !eventEvidenceSuffices(latest, expected, now) {
+	if !eventEvidenceSuffices(latest, orderFiringOverdueAfter(expected, c.controllerTick()), now) {
 		runAt, err := lastRun(order)
 		if err != nil {
 			return time.Time{}, err
@@ -588,11 +589,11 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCur
 }
 
 // eventEvidenceSuffices reports whether the event log alone answers "is this
-// order current". Anything else needs the authoritative order-run lookup: the
-// event log can lag, and a stale event must not be reported as a real outage
-// without confirmation.
-func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Time) bool {
-	return !latest.IsZero() && now.Sub(latest) < expected+expected/2
+// order current": its newest firing is younger than overdueAfter. Anything
+// else needs the authoritative order-run lookup: the event log can lag, and a
+// stale event must not be reported as a real outage without confirmation.
+func eventEvidenceSuffices(latest time.Time, overdueAfter time.Duration, now time.Time) bool {
+	return !latest.IsZero() && now.Sub(latest) < overdueAfter
 }
 
 // pendingLastRunOrders returns the monitored orders the event log cannot
@@ -605,6 +606,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 	if c.lastRun == nil {
 		return nil
 	}
+	tick := c.controllerTick()
 	var pending []orders.Order
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -617,7 +619,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 		if err != nil {
 			continue
 		}
-		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), orderFiringOverdueAfter(expected, tick), now) {
 			continue
 		}
 		pending = append(pending, order)
@@ -697,7 +699,37 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
+// controllerTick is the controller's patrol interval, the pace of the orders
+// lane. It is the unit of dispatch jitter the freshness thresholds allow for.
+func (c *OrderFiringCurrentCheck) controllerTick() time.Duration {
+	var daemon config.DaemonConfig
+	if c.cfg != nil {
+		daemon = c.cfg.Daemon
+	}
+	return daemon.PatrolIntervalDuration()
+}
+
+// orderFiringOverdueAfter is the age at which a scheduled order reads as
+// overdue. The orders lane fires an order on the first pass after it is due,
+// and passes land once per patrol interval plus their own run time, so an
+// order on a healthy city fires up to a tick past its cadence and a loaded
+// controller adds another. Two cadences covers that for a long cadence; for
+// one only a tick or two long (a 30s cooldown on a 30s patrol) two ticks past
+// the cadence does, and the order is not reported overdue for ordinary
+// dispatch jitter.
+func orderFiringOverdueAfter(expected, tick time.Duration) time.Duration {
+	return max(2*expected, expected+2*tick)
+}
+
+// orderFiringStaleAfter is the age at which a scheduled order reads as stale,
+// the hard signal for an order that has stopped firing rather than fired
+// late. It stays three cadences for a long cadence and, for a short one, sits
+// four ticks past the cadence, clear of orderFiringOverdueAfter.
+func orderFiringStaleAfter(expected, tick time.Duration) time.Duration {
+	return max(3*expected, expected+4*tick)
+}
+
+func classifyOrderFiring(order orders.Order, now time.Time, expected, tick time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
@@ -719,9 +751,9 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
-	case age >= expected*3:
+	case age >= orderFiringStaleAfter(expected, tick):
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
+	case age >= orderFiringOverdueAfter(expected, tick):
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))

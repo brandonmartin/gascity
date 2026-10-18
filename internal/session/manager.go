@@ -748,7 +748,9 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // gating a Start can refuse rather than race a survivor for the same work. A
 // scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
 // the roots the scan did surface are still killed, and matching the started
-// replacement is impossible because it does not exist yet.
+// replacement is impossible because it does not exist yet. A root in a
+// user-manager *.service other than the session's own unit is left alone:
+// that is a detached systemd-run --user service that inherited the id.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
@@ -760,6 +762,10 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	// The session's own unit, when it lives in a user service. A scope
+	// session (the usual tmux pane) has none, so every nested *.service
+	// is a detached systemd-run that inherited the id.
+	ownUnit := proctable.SessionOwnUserService(found, sessionID)
 	var termErrs []error
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
@@ -776,6 +782,17 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		if proctable.IsCityInfrastructureRoot(live.PID) {
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
+		}
+		// A systemd-run --user service in its own cgroup inherited the id
+		// and reparented under the user manager. It is not this session.
+		// A root in the session's own unit is still reaped, and named.
+		unit, foreign := proctable.ForeignUserService(live.PID, ownUnit)
+		if foreign {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: user service %s (not the session's unit)", sessionID, live.PID, unit)
+			continue
+		}
+		if unit != "" {
+			log.Printf("session: reaping orphaned runtime for %s pid=%d unit=%s", sessionID, live.PID, unit)
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)

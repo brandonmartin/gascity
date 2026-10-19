@@ -189,12 +189,24 @@ func TestSessionHasAwakeAssignedWork_ExcludedAliasOpenWorkIsNotAwakeDemand(t *te
 		t.Fatal(err)
 	}
 
-	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, []string{"session-id", "olivia"})
+	info := sessionpkg.Info{ID: "session-id", Alias: "olivia"}
+	claimantIdentities := []string{"session-id", "olivia"}
+	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, claimantIdentities)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if has {
 		t.Fatal("sessionHasAwakeAssignedWorkInStoreByIdentifiers = true for open work excluded by the session's alias")
+	}
+
+	cfg := &config.City{}
+	seat := seatWorkFor(testWorkLegs("", cfg, store, nil), releaseScope(info, cfg))
+	has, err = sessionHasAwakeAssignedWorkForReachableStore(seat, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Fatal("sessionHasAwakeAssignedWorkForReachableStore = true for open work excluded by the session's alias")
 	}
 }
 

@@ -38,7 +38,7 @@ func TestAppendOpenAssignedMoleculeWorkUnique_SkipsFutureDeferred(t *testing.T) 
 		root("m-future", &future),
 		root("m-elapsed", &past),
 		root("m-undeferred", nil),
-	}, seen, nil, "")
+	}, seen, nil, "", nil)
 
 	if readyIDs["m-future"] {
 		t.Errorf("future-deferred root counted as ready wake demand")
@@ -71,7 +71,7 @@ func TestAppendOpenAssignedMoleculeWorkUnique_SkipsIndefinitelyDeferred(t *testi
 		readyIDs = map[string]bool{}
 		seen     = map[string]struct{}{}
 	)
-	appendOpenAssignedMoleculeWorkUnique(&dst, &stores, &refs, readyIDs, []beads.Bead{root}, seen, nil, "")
+	appendOpenAssignedMoleculeWorkUnique(&dst, &stores, &refs, readyIDs, []beads.Bead{root}, seen, nil, "", nil)
 
 	if readyIDs["m-indefinite"] {
 		t.Errorf("indefinitely-deferred root counted as ready wake demand")

@@ -322,22 +322,24 @@ func TestSQLiteStoreGraphCookUnderConcurrentWriter(t *testing.T) {
 	wg.Add(1)
 	// Paced far above the ~1 commit/s measured on the live city, but not a
 	// tight loop: a writer that re-takes the lock the instant it commits just
-	// measures SQLite's (unfair) busy-handler polling, not this store.
-	pace := time.NewTicker(2 * time.Millisecond)
-	defer pace.Stop()
+	// measures SQLite's (unfair) busy-handler polling, not this store. Sleep
+	// after each write rather than using a ticker: if a commit takes longer
+	// than the interval under I/O load, a ticker buffers a tick and the next
+	// write starts immediately after the commit.
 	go func() {
 		defer wg.Done()
 		for i := 0; ; i++ {
 			select {
 			case <-stop:
 				return
-			case <-pace.C:
+			default:
 			}
 			if err := controller.SetMetadata(hot.ID, "tick", strconv.Itoa(i)); err == nil {
 				if controllerWrites.Add(1) == 1 {
 					close(firstCommit)
 				}
 			}
+			time.Sleep(2 * time.Millisecond)
 		}
 	}()
 	select {

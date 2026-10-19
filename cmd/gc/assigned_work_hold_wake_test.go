@@ -78,6 +78,32 @@ func TestBuildDesiredState_OnDemandNamedSession_HeldAssignedOpenWorkIsNotWakeDem
 	}
 }
 
+func TestCollectAssignedWorkBeads_ExcludedSessionAliasOpenWorkIsNotWakeDemand(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "excluded open work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "session-id",
+		Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "olivia"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{{
+		ID:    "session-id",
+		Alias: "olivia",
+	}})
+
+	_, _, _, ready, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, store, nil, nil, sessions)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
+	}
+	if ready[storeScopedBeadKey{ID: work.ID}] {
+		t.Fatalf("excluded open work %s was marked wake-ready; the session ID assignment must be matched against the excluded alias", work.ID)
+	}
+}
+
 // The control: the identical bead without a hold label still wakes olivia, and a
 // held bead next to it does not mask it.
 func TestBuildDesiredState_OnDemandNamedSession_UnheldAssignedOpenWorkStillWakesBesideHeld(t *testing.T) {
@@ -151,6 +177,27 @@ func TestSessionHasAwakeAssignedWork_HeldOpenWorkIsNotAwakeDemand(t *testing.T) 
 	}
 }
 
+func TestSessionHasAwakeAssignedWork_ExcludedAliasOpenWorkIsNotAwakeDemand(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "excluded",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "session-id",
+		Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "olivia"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(store, []string{"session-id", "olivia"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Fatal("sessionHasAwakeAssignedWorkInStoreByIdentifiers = true for open work excluded by the session's alias")
+	}
+}
+
 // Drain-ack mirror: a session that drained past held open work drained
 // correctly (its hook could not serve it), so the open arm of the drain-ack
 // anomaly classifier must not report it as a stranded, claimable bead.
@@ -172,6 +219,31 @@ func TestDrainAckOpenArm_HeldOpenWorkIsProvablyNonClaimable(t *testing.T) {
 				t.Fatalf("drain-ack open arm reported held bead %s (labels %q) as claimable; draining past held work is correct pull", got.ID, got.Labels)
 			}
 		})
+	}
+}
+
+func TestDrainAckOpenArm_ExcludedAliasIsProvablyNonClaimable(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "excluded",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "session-id",
+		Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "olivia"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(
+		testSeatWork("", nil, store, nil),
+		sessionpkg.Info{ID: "session-id", Alias: "olivia"},
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatalf("drain-ack open arm reported excluded bead %s as claimable", got.ID)
 	}
 }
 

@@ -1656,13 +1656,11 @@ printf 'called' > "$BD_CAPTURE"
 		args []string
 		want string
 	}{
-		{"metadata file", "update", []string{"--metadata", "@metadata.json"}, "@file input"},
 		{"malformed metadata", "update", []string{"--metadata", "{not-json}"}, "malformed --metadata"},
 		{"non-string guarded metadata", "update", []string{"--metadata", `{"gc.routed_to":true}`}, "non-string gc.routed_to"},
 		{"malformed set metadata", "update", []string{"--set-metadata", "gc.routed_to"}, "malformed --set-metadata"},
 		{"missing metadata", "update", []string{"--metadata"}, "without a value"},
 		{"missing set metadata", "update", []string{"--set-metadata"}, "without a value"},
-		{"new alias metadata file", "new", []string{"--metadata", "@metadata.json"}, "@file input"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
@@ -1684,6 +1682,171 @@ printf 'called' > "$BD_CAPTURE"
 			}
 			if _, err := os.Stat(capture); !os.IsNotExist(err) {
 				t.Fatalf("bd was invoked for unvalidated metadata: %v", err)
+			}
+		})
+	}
+}
+
+// writeBdMetadataFileCity writes a one-rig city and a bd stub that records its
+// argv, and returns the city dir and the capture path the stub writes to.
+func writeBdMetadataFileCity(t *testing.T) (cityDir, capture string) {
+	t.Helper()
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "saitoc"
+path = "saitoc"
+prefix = "sa"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	capture = filepath.Join(t.TempDir(), "bd-ran")
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+printf '%s' "$*" > "$BD_CAPTURE"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_CAPTURE", capture)
+	return cityDir, capture
+}
+
+func TestGcBdForwardsValidatedMetadataFile(t *testing.T) {
+	cityDir, capture := writeBdMetadataFileCity(t)
+
+	// A board-sized document: past MAX_ARG_STRLEN (128 KiB), so it can only
+	// reach bd as a file, never as an inline --metadata argument.
+	large, err := json.Marshal(map[string]string{
+		"gc.routed_to": "saitoc/polecat-01",
+		"padding":      strings.Repeat("x", 200<<10),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		verb    string
+		content string
+		inline  bool
+	}{
+		{name: "registered route", verb: "update", content: `{"gc.routed_to":"saitoc/polecat-01"}`},
+		{name: "registered lease owner", verb: "update", content: `{"gc.lease_owner":"saitoc/polecat-01"}`},
+		{name: "bare actor", verb: "update", content: `{"gc.lease_owner":"polecat-01"}`},
+		{name: "unrelated non-string metadata", verb: "update", content: `{"attempts":2}`},
+		{name: "surrounding whitespace", verb: "update", content: "\n  {\"attempts\":2}\n"},
+		{name: "equals form", verb: "update", content: `{"attempts":2}`, inline: true},
+		{name: "larger than the argv limit", verb: "update", content: string(large)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			file := filepath.Join(t.TempDir(), "metadata.json")
+			if err := os.WriteFile(file, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			target := "scratch"
+			if tc.verb == "update" {
+				target = "scratch-1"
+			}
+			flag := []string{"--metadata", "@" + file}
+			if tc.inline {
+				flag = []string{"--metadata=@" + file}
+			}
+			args := append([]string{"--city", cityDir, tc.verb, target}, flag...)
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd() = %d, want success; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+			}
+			ran, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatalf("bd was not invoked for a valid @file: %v", err)
+			}
+			// bd gets the @file exactly as written: gc validated the file, it did
+			// not substitute or inline its content.
+			want := strings.Join(append([]string{tc.verb, target}, flag...), " ")
+			if !strings.Contains(string(ran), want) {
+				t.Fatalf("bd argv = %q, want it to contain %q", ran, want)
+			}
+		})
+	}
+}
+
+func TestGcBdRejectsMetadataFileItCannotValidateBeforeWrite(t *testing.T) {
+	cityDir, capture := writeBdMetadataFileCity(t)
+
+	dir := t.TempDir()
+	writeFile := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	for _, tc := range []struct {
+		name string
+		verb string
+		// arg is the --metadata value; a "%s" is replaced by the file's path.
+		arg  string
+		file string // file content; empty means no file is written
+		want []string
+	}{
+		{name: "route to an unconfigured rig", verb: "update", arg: "@%s", file: `{"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured", "ghostrig/polecat-01"}},
+		{name: "lease owner on an unconfigured rig", verb: "update", arg: "@%s", file: `{"gc.lease_owner":"ghostrig/polecat-01"}`, want: []string{"not configured", "ghostrig/polecat-01"}},
+		{name: "unconfigured rig beside valid keys", verb: "update", arg: "@%s", file: `{"attempts":2,"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured"}},
+		{name: "equals form", verb: "update", arg: "=@%s", file: `{"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured"}},
+		// create classifies the new bead from argv, so it cannot see a file's
+		// content; it is refused even when the file would validate.
+		{name: "create with a valid file", verb: "create", arg: "@%s", file: `{"gc.routed_to":"saitoc/polecat-01"}`, want: []string{"update only"}},
+		{name: "create with an equals form", verb: "create", arg: "=@%s", file: `{"attempts":2}`, want: []string{"update only"}},
+		{name: "new alias with a valid file", verb: "new", arg: "@%s", file: `{"gc.routed_to":"saitoc/polecat-01"}`, want: []string{"update only"}},
+		{name: "create with a missing file", verb: "create", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"update only"}},
+		{name: "non-string guarded value", verb: "update", arg: "@%s", file: `{"gc.routed_to":true}`, want: []string{"non-string gc.routed_to"}},
+		{name: "malformed JSON", verb: "update", arg: "@%s", file: `{not-json}`, want: []string{"malformed --metadata"}},
+		{name: "empty file", verb: "update", arg: "@%s", file: "\n", want: []string{"malformed --metadata"}},
+		{name: "JSON that is not an object", verb: "update", arg: "@%s", file: `["gc.routed_to"]`, want: []string{"malformed --metadata"}},
+		{name: "missing file", verb: "update", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"cannot read @file"}},
+		{name: "directory", verb: "update", arg: "@" + dir, want: []string{"not a regular file"}},
+		{name: "no path", verb: "update", arg: "@", want: []string{"names no path"}},
+		{name: "relative path", verb: "update", arg: "@metadata.json", want: []string{"must be absolute"}},
+		{name: "stdin", verb: "update", arg: "@-", want: []string{"must be absolute"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			arg := tc.arg
+			if strings.Contains(arg, "%s") {
+				arg = strings.ReplaceAll(arg, "%s", writeFile("metadata.json", tc.file))
+			}
+			target := "scratch"
+			if tc.verb == "update" {
+				target = "scratch-1"
+			}
+			flag := []string{"--metadata", arg}
+			if strings.HasPrefix(arg, "=") {
+				flag = []string{"--metadata" + arg}
+			}
+			args := append([]string{"--city", cityDir, tc.verb, target}, flag...)
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got == 0 {
+				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+				}
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatalf("bd was invoked for an @file that failed validation: %v", err)
 			}
 		})
 	}

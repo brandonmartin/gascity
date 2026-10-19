@@ -333,8 +333,13 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 //
 // Actor names without a slash remain compatible: historic dotted identities
 // are provenance, not rig-qualified routes. Both bd metadata spellings are
-// examined so --metadata cannot bypass the --set-metadata guard. Inputs this
-// preflight cannot interpret exactly are refused before bd can mutate state.
+// examined so --metadata cannot bypass the --set-metadata guard. On update, a
+// `--metadata @file` value is read here and its content checked exactly like an
+// inline document; the argument itself still reaches bd unchanged, which is
+// what lets a document past the argv size limit through. create and its `new`
+// alias refuse @file: the relocated-class create guard classifies the bead
+// from argv alone and cannot see a file's content. Inputs this preflight cannot
+// interpret exactly are refused before bd can mutate state.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
 	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
@@ -408,7 +413,14 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 
 		metadataJSON := strings.TrimSpace(value)
 		if strings.HasPrefix(metadataJSON, "@") {
-			return fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be validated before write\n", value), true
+			if verb != "update" {
+				return fmt.Sprintf("gc bd: refusing --metadata %q: @file input is accepted by gc bd update only; %s classifies the new bead from its arguments and cannot read a file\n", value, verb), true
+			}
+			content, msg := readBdMetadataFile(metadataJSON)
+			if msg != "" {
+				return msg, true
+			}
+			metadataJSON = strings.TrimSpace(content)
 		}
 		var metadata map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
@@ -428,6 +440,40 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		}
 	}
 	return "", false
+}
+
+// readBdMetadataFile returns the content of the file a `--metadata @path`
+// argument names, or the refusal message when it cannot be read as exactly the
+// document bd will write.
+//
+// The path must be absolute: gc runs bd from the scope root, so bd would
+// resolve a relative path there while gc resolved it against the caller's
+// working directory, and the file checked would not be the file written. The
+// file must be a regular file because a pipe, `@-`, or /dev/stdin can be read
+// only once; reading it here would leave bd an empty or consumed stream. bd
+// opens the file again when it runs, so a writer that rewrites the file between
+// the two reads is not covered; this guard stops stale and external writers,
+// not a concurrent edit of the file in flight.
+func readBdMetadataFile(arg string) (content, refusal string) {
+	path := strings.TrimPrefix(arg, "@")
+	switch {
+	case path == "":
+		return "", fmt.Sprintf("gc bd: refusing --metadata %q: @file names no path\n", arg)
+	case !filepath.IsAbs(path):
+		return "", fmt.Sprintf("gc bd: refusing --metadata %q: @file path must be absolute, because gc bd runs bd from the scope root and a relative path would name a different file than the one validated\n", arg)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Sprintf("gc bd: refusing --metadata %q: cannot read @file: %v\n", arg, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Sprintf("gc bd: refusing --metadata %q: @file is not a regular file\n", arg)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Sprintf("gc bd: refusing --metadata %q: cannot read @file: %v\n", arg, err)
+	}
+	return string(data), ""
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {

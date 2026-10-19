@@ -1778,6 +1778,7 @@ func collectAssignedWorkBeadsWithStores(
 		// it partial so every consumer retains rather than reaps.
 		return nil, nil, nil, nil, true
 	}
+	sessionAssigneeIndex := buildSessionAssigneeIndex(sessionBeads)
 
 	type storeAssignedWorkResult struct {
 		ref       string // store ref these beads came from (empty = city store)
@@ -1819,11 +1820,11 @@ func collectAssignedWorkBeadsWithStores(
 			inProgress, err := reads.Cached(source.store, beads.ListQuery{Status: "in_progress"})
 			pass.read(read("list_in_progress", demandReadTierCached), start, len(inProgress), err)
 			if err == nil {
-				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
+				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref, sessionAssigneeIndex)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
 				if beads.IsPartialResult(err) && len(inProgress) > 0 {
-					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
+					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref, sessionAssigneeIndex)
 				}
 			}
 			// Open assigned molecule roots that count as wake demand. Whether an
@@ -1838,11 +1839,11 @@ func collectAssignedWorkBeadsWithStores(
 			openDemand, err := reads.RawOpen(source.store)
 			pass.read(read("list_open", demandReadTierLive), start, len(openDemand), err)
 			if err == nil {
-				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref, sessionAssigneeIndex)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open, live demand): %w", err))
 				if beads.IsPartialResult(err) && len(openDemand) > 0 {
-					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref, sessionAssigneeIndex)
 				}
 			}
 			// Open pool-routed beads that still carry an assignee. These are
@@ -1954,7 +1955,7 @@ func collectAssignedWorkBeadsWithStores(
 			var readyStoreRefs []string
 			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
-			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref)
+			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref, sessionAssigneeIndex)
 			readyResults[idx] = storeAssignedWorkResult{ref: source.ref, beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
@@ -3207,24 +3208,24 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
-func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" && !isRecoverableUnassignedInProgressPoolWork(cfg, b) {
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, b, sessionAssigneeIndex)
 		}
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, b, sessionAssigneeIndex)
 		}
 	}
 }
@@ -3235,13 +3236,13 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 // for on-demand named sessions such as the Gas Town refinery patrol — so these
 // beads contribute to readyIDs (their assigned turn is genuinely actionable),
 // unlike the open-routed orphan-release pass.
-func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	for _, b := range beadList {
 		if !isOpenAssignedMoleculeWork(b) {
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, b, sessionAssigneeIndex)
 		}
 	}
 }
@@ -3251,21 +3252,38 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // store-Ready()/deps, and assigned molecule roots) — never by the open-routed
 // orphan-release pass, whose beads have not passed any readiness gate.
 //
-// OPEN work parked on a dispatch hold is never marked: bd's Ready() is
-// hold-transparent, but the session's own hook refuses to serve a held row
-// (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
-// session that drain-acked no_work and was re-woken every tick. The bead stays
-// in the assigned-work snapshot — orphan release, pool accounting and crash
-// recovery still see the assignment (ga-5736js) — it just carries no wake
-// readiness. assignedOpenWorkHeld is the shared predicate.
-func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
+// OPEN work parked on a dispatch hold or excluded from its assignee is never
+// marked: bd's Ready() does not apply either gate, but the session's own hook
+// refuses to serve the row. Counting it as wake demand woke a session that
+// drain-acked no_work and was re-woken every tick. The bead stays in the
+// assigned-work snapshot — orphan release, pool accounting and crash recovery
+// still see the assignment (ga-5736js) — it just carries no wake readiness.
+// assignedOpenWorkHeld is the shared predicate.
+func markReadyAssigned(readyIDs map[string]bool, b beads.Bead, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	if readyIDs == nil {
 		return
 	}
-	if assignedOpenWorkHeld(b) {
+	if assignedOpenWorkHeld(b, assignedWorkClaimantIdentities(b, sessionAssigneeIndex)...) {
 		return
 	}
 	readyIDs[b.ID] = true
+}
+
+// assignedWorkClaimantIdentities expands a work bead's Assignee through the
+// open-session index so an exclusion naming a session alias also matches work
+// assigned by session ID. An ambiguous identity is left as-is: only the
+// assignee itself is certain in that case.
+func assignedWorkClaimantIdentities(b beads.Bead, sessionAssigneeIndex map[string]sessionAssigneeMatch) []string {
+	assignee := strings.TrimSpace(b.Assignee)
+	identities := []string{assignee}
+	if assignee == "" || sessionAssigneeIndex == nil {
+		return identities
+	}
+	match, ok := sessionAssigneeIndex[assignee]
+	if !ok || match.ambiguous {
+		return identities
+	}
+	return append(identities, sessionBeadAssigneeIdentitiesInfo(match.info)...)
 }
 
 func isOpenAssignedMoleculeWork(b beads.Bead) bool {

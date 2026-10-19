@@ -400,6 +400,8 @@ func renormalizeFederatedCommand(federated string) string {
 	// migration fallback (which keeps --sort oldest for its retirement window).
 	federated = strings.ReplaceAll(federated, `--limit=20) || exit $?`, `--limit=20 2>/dev/null)`)
 	federated = strings.ReplaceAll(federated, `--limit=20 2>/dev/null) || exit $?`, `--limit=20 2>/dev/null)`)
+	// The routed tier's widened re-read after a fully excluded window.
+	federated = strings.ReplaceAll(federated, `--limit=0) || exit $?`, `--limit=0 2>/dev/null)`)
 	return federated
 }
 

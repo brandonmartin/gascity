@@ -755,7 +755,8 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			hookClaimCandidateIsMessage(candidate) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
 			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
-			hookCandidateBudgetDeferred(candidate, now) {
+			hookCandidateBudgetDeferred(candidate, now) ||
+			hookClaimExcludesSession(candidate, opts) {
 			continue
 		}
 		// F-B. Promoting a ready assignment is a status CAS — a mutation — so it
@@ -829,6 +830,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			)
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		if hookClaimExcludesSession(claimed, opts) {
+			if !releaseExcludedHookClaim(claimed, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			continue
+		}
 		// The claim ran as the bead's stored spelling (bd's idempotent --claim
 		// requires it), so a ready bead assigned to a legacy spelling of this
 		// session — e.g. an open bead pinned to the pool session_name before
@@ -897,6 +904,11 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
 		reclaimedFrom := ""
+		// gc.exclude_claimants is checked before the reclaim lane too: an
+		// excluded session must not even revert a stale lease it cannot take.
+		if hookClaimExcludesSession(candidate, opts) {
+			continue
+		}
 		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
 			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
 			// blocker is an existing (possibly stale) assignee gets a scoped,
@@ -982,6 +994,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 				opts.Assignee,
 			)
 			return hookClaimResult{terminal: true, code: 1}
+		}
+		// The candidate row is the work query's projection; the claimed bead is
+		// the canonical readback (hookClaimThroughStore), so an exclusion added
+		// after the query ran, or one a custom work_query did not project, is
+		// decided here before the receipt is minted.
+		if hookClaimExcludesSession(claimed, opts) {
+			if !releaseExcludedHookClaim(claimed, opts, ops, dir, stderr) {
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			continue
 		}
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		result := hookClaimJSONResult{
@@ -1133,6 +1155,12 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
 		return hookAdoptionRefused, ""
 	}
+	if hookClaimExcludesSession(canonical, opts) {
+		_, _ = fmt.Fprintf(stderr,
+			"gc hook --claim: refusing to re-serve %s: its canonical %s excludes this session (%s)\n",
+			beadID, beadmeta.ExcludeClaimantsMetadataKey, opts.Assignee)
+		return hookAdoptionRefused, ""
+	}
 	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
 }
 
@@ -1226,7 +1254,8 @@ func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions)
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "in_progress") &&
-			hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
+			hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) &&
+			!hookClaimExcludesSession(candidate, opts) {
 			result := hookClaimJSONResult{
 				SchemaVersion: "1",
 				OK:            true,
@@ -1592,7 +1621,10 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// sibling's required next actor is, by construction, not this
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
-			beadmeta.HasDispatchHold(sibling.Labels) {
+			beadmeta.HasDispatchHold(sibling.Labels) ||
+			// A sibling that excludes this session stays open and routed so an
+			// eligible seat in the pool claims it instead.
+			hookClaimExcludesSession(sibling, opts) {
 			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
@@ -3261,6 +3293,53 @@ func hookClaimHasIdentity(assignee string, identities []string) bool {
 	return false
 }
 
+// hookClaimExclusionIdentities returns every identity a bead's
+// gc.exclude_claimants is matched against: the session's claim identities, the
+// actor its bd mutations run as, and the stable GC_ALIAS and GC_AGENT from the
+// query environment, which an exclusion list names.
+func hookClaimExclusionIdentities(opts hookClaimOptions) []string {
+	identities := append([]string{opts.Assignee, opts.SessionID, opts.RuntimeActor}, opts.IdentityCandidates...)
+	return append(identities, hookClaimEnvValue(opts.Env, "GC_ALIAS"), hookClaimEnvValue(opts.Env, "GC_AGENT"))
+}
+
+// hookClaimExcludesSession reports whether bead's gc.exclude_claimants names
+// this session (beadmeta.ExcludesClaimant).
+func hookClaimExcludesSession(bead beads.Bead, opts hookClaimOptions) bool {
+	return beadmeta.ExcludesClaimant(bead.Metadata, hookClaimExclusionIdentities(opts)...)
+}
+
+// releaseExcludedHookClaim gives back a claim this invocation just won whose
+// canonical readback excludes this session, and reports whether the caller may
+// go on to the next candidate. The release is the same compare-and-swap on the
+// assignee the undelivered-claim unwind uses, so a bead that already changed
+// hands is left alone. A failed release returns false: this session then holds
+// a bead it must not work, and claiming more on top of it would bury that.
+//
+// No execution.step_started has been emitted for the bead yet (that happens
+// when the receipt is written), so there is no lifecycle record to compensate.
+func releaseExcludedHookClaim(claimed beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	assignee := strings.TrimSpace(claimed.Assignee)
+	if assignee == "" {
+		assignee = opts.Assignee
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	released, err := ops.Release(ctx, dir, opts.Env, claimed.ID, assignee)
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "gc hook --claim: claimed %s but its canonical %s excludes this session (%s), and releasing it failed: %v (recover with: bd update %s --status open --assignee \"\")\n", //nolint:errcheck
+			claimed.ID, beadmeta.ExcludeClaimantsMetadataKey, assignee, err, claimed.ID)
+		return false
+	case !released:
+		fmt.Fprintf(stderr, "gc hook --claim: claimed %s but its canonical %s excludes this session (%s); it was no longer ours to release\n", //nolint:errcheck
+			claimed.ID, beadmeta.ExcludeClaimantsMetadataKey, assignee)
+	default:
+		fmt.Fprintf(stderr, "gc hook --claim: released %s: its canonical %s excludes this session (%s)\n", //nolint:errcheck
+			claimed.ID, beadmeta.ExcludeClaimantsMetadataKey, assignee)
+	}
+	return true
+}
+
 // hookRouteIdentitiesEqual reports whether two route/identity strings refer
 // to the same qualified agent, tolerating the tmux-safe session-name
 // encoding (/ -> --, . -> __) alongside the canonical slash-qualified form.
@@ -3345,6 +3424,9 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 // even for unrouted work; that stricter rule is correct for claiming but
 // would wrongly hide legitimately unrouted display candidates (ga-1xaqgo.2).
 func hookCandidateVisible(candidate beads.Bead, identities, routeTargets []string) bool {
+	if beadmeta.ExcludesClaimant(candidate.Metadata, identities...) {
+		return false
+	}
 	if assignee := strings.TrimSpace(candidate.Assignee); assignee != "" {
 		return hookClaimHasIdentity(assignee, identities)
 	}

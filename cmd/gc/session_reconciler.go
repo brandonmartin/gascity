@@ -5435,7 +5435,7 @@ func drainStepRootFormulaName(root beads.Bead) string {
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
 // should keep a session awake: in-progress work always counts, held or not,
 // while open work counts only when it is ready (unblocked, not deferred, and not
-// ready-excluded) and not parked on a dispatch hold (assignedOpenWorkHeld).
+// ready-excluded) and the hook can serve it (assignedOpenWorkHeld).
 func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	scope := releaseScope(info, sw.Legs().cfg)
 	if sw == nil || sw.ids == nil {
@@ -5461,14 +5461,14 @@ func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.
 		return len(hits) > 0, err
 	}
 	open, unknown := sw.snapshot(seatWorkQuery{scope: scope, statuses: []string{"open"}}, false)
-	return readyAssignedWorkIn(open, unknown)
+	return readyAssignedWorkIn(open, unknown, scope.scopeIDs())
 }
 
 // readyAssignedWorkIn reports whether the ready query, run once per (leg,
 // assignee) that holds an open row in open, concurrently and on both tiers,
-// finds unheld non-session work; unknown is the seat read's incomplete
-// legs, which fail the answer closed when nothing is found.
-func readyAssignedWorkIn(open []seatWorkHit, unknown error) (bool, error) {
+// finds work the hook can serve; unknown is the seat read's incomplete legs,
+// which fail the answer closed when nothing is found.
+func readyAssignedWorkIn(open []seatWorkHit, unknown error, claimantIdentities []string) (bool, error) {
 	type probe struct {
 		store    beads.Store
 		assignee string
@@ -5495,7 +5495,7 @@ func readyAssignedWorkIn(open []seatWorkHit, unknown error) (bool, error) {
 				defer wg.Done()
 				has, err := func() (has bool, err error) {
 					defer recoverLeg(&err, "ready assigned work", log.Writer()) // a panic counts as work
-					return sessionHasReadyAssignedWorkForTier(p.store, p.assignee, tier)
+					return sessionHasReadyAssignedWorkForTier(p.store, p.assignee, tier, claimantIdentities)
 				}()
 				mu.Lock()
 				defer mu.Unlock()
@@ -5531,7 +5531,7 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 		if isSessionOwnDrainStepBead(s, b) {
 			return false, nil
 		}
-		suppress, err := openAssignedRowProvablyNonClaimable(s, b, now)
+		suppress, err := openAssignedRowProvablyNonClaimable(s, b, now, sessionBeadAssigneeIdentitiesInfo(info)...)
 		return !suppress, err
 	}}
 	return sw.first(q)
@@ -5549,9 +5549,10 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 //   - deferred — defer_until and bd's indefinite deferral are fresh bead-local
 //     fields, never stale, so this is PROOF: no worker could have claimed the row
 //     and draining past it was correct pull.
-//   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
-//     fresh bead-local field too, and the hook refuses to serve a held row on
-//     every path, so this is PROOF as well: draining past it was correct pull.
+//   - held or excluded — a canonical dispatch hold label or matching
+//     gc.exclude_claimants identity is a fresh bead-local field, and the hook
+//     refuses to serve such a row to this session on every path, so this is
+//     PROOF as well: draining past it was correct pull.
 //   - blockedness_unproven — bd's is_blocked projection reads STALE-CAPABLE true,
 //     or (the production reading) is absent entirely. Neither is proof, so the
 //     row's real blockedness is settled against live deps first
@@ -5579,7 +5580,10 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 // in_progress arm is probed first and consults no dependencies), and the
 // polarity is pinned by
 // TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError.
-func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time) (bool, error) {
+func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time, claimantIdentities ...string) (bool, error) {
+	if assignedOpenWorkHeld(item, claimantIdentities...) {
+		return true, nil
+	}
 	switch classifyDemandRowClaimability(item, now) {
 	case demandRowDeferred, demandRowHeld:
 		return true, nil
@@ -6121,7 +6125,7 @@ func sessionHasAwakeAssignedWorkInStoreByIdentifiers(store beads.Store, identifi
 			if has, err := sessionHasInProgressAssignedWorkForTier(store, assignee, tierMode); err != nil || has {
 				return has, err
 			}
-			if has, err := sessionHasReadyAssignedWorkForTier(store, assignee, tierMode); err != nil || has {
+			if has, err := sessionHasReadyAssignedWorkForTier(store, assignee, tierMode, identifiers); err != nil || has {
 				return has, err
 			}
 		}
@@ -6149,22 +6153,22 @@ func sessionHasOpenAssignedWispWork(store beads.Store, assignee, status string) 
 	return sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierWisps, true)
 }
 
-func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tierMode beads.TierMode) (bool, error) {
+func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tierMode beads.TierMode, claimantIdentities []string) (bool, error) {
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	items, err := wa.ReadyAssignedTo(assignee, tierMode)
 	if err != nil {
 		return false, err
 	}
-	// Ready is hold-transparent; the hook is not. Held open work cannot be
-	// served to this session, so it does not keep it awake (assignedOpenWorkHeld,
+	// Ready is hold- and exclusion-transparent; the hook is not. Open work the
+	// hook cannot serve does not keep this session awake (assignedOpenWorkHeld,
 	// the same gate desired-state wake demand applies in markReadyAssigned).
-	unheld := items[:0:0]
+	claimable := items[:0:0]
 	for _, item := range items {
-		if !assignedOpenWorkHeld(item) {
-			unheld = append(unheld, item)
+		if !assignedOpenWorkHeld(item, claimantIdentities...) {
+			claimable = append(claimable, item)
 		}
 	}
-	return wa.HasNonSessionWork(unheld), nil
+	return wa.HasNonSessionWork(claimable), nil
 }
 
 func sessionHasOpenAssignedWorkForTier(store beads.Store, assignee, status string, tierMode beads.TierMode, live bool) (bool, error) {

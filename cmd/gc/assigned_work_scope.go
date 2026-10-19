@@ -488,16 +488,26 @@ func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadL
 	return flags
 }
 
-// assignedOpenWorkHeld reports whether b is OPEN assigned work parked on a
-// canonical dispatch hold (beadmeta.HasDispatchHold). Such a row is never work
-// for its assignee — the hook's serve filter (isHeldHookCandidate) strips it
-// before claiming — so it must never be wake demand either: counting it wakes a
-// session whose hook immediately drain-acks no_work, and the controller re-wakes
-// it on the next tick, forever.
+// assignedOpenWorkHeld reports whether b is OPEN assigned work the hook will
+// not serve because it is parked on a canonical dispatch hold or its
+// gc.exclude_claimants metadata names the assignee. Such a row is not work for
+// that session, so it must not be wake demand: counting it wakes a session whose
+// hook immediately drain-acks no_work, and the controller re-wakes it on the
+// next tick, forever. claimantIdentities carries the session's other assignment
+// identities (such as its alias) when Assignee is a session ID.
 //
-// Only OPEN rows qualify. An in_progress held bead is a claimed ownership fact
-// and stays hold-transparent for demand/liveness accounting (ga-5736js), so its
-// owner remains visible to crash recovery.
-func assignedOpenWorkHeld(b beads.Bead) bool {
-	return b.Status == "open" && beadmeta.HasDispatchHold(b.Labels)
+// Only OPEN rows qualify. An in_progress held or excluded bead is a claimed
+// ownership fact and stays transparent for demand/liveness accounting
+// (ga-5736js), so its owner remains visible to crash recovery.
+func assignedOpenWorkHeld(b beads.Bead, claimantIdentities ...string) bool {
+	if b.Status != "open" {
+		return false
+	}
+	if beadmeta.HasDispatchHold(b.Labels) {
+		return true
+	}
+	identities := make([]string, 0, len(claimantIdentities)+1)
+	identities = append(identities, claimantIdentities...)
+	identities = append(identities, b.Assignee)
+	return beadmeta.ExcludesClaimant(b.Metadata, identities...)
 }

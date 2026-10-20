@@ -3599,6 +3599,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// The park verdicts over the build's whole assigned-work read (not the
 		// wake-filtered view), as the pool counts above decide them.
 		withParkedSeats(parked),
+		withScaleDemandExcludes(scaleDemandExcludesByTemplate(result.ScaleCheckDemand)),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
 		// instead of re-deriving a work ledger from gc.routed_to, which on a

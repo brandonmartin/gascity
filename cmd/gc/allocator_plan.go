@@ -123,6 +123,7 @@ func (p *decidePass) demand() {
 	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs }, canonical,
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
+	p.named = suppressExcludedCanonicalRoutedDemand(p.named, p.merged.ScaleCheckDemand)
 }
 
 // scaleCheckCauses are the causes of template's scale-check partial: an
@@ -824,7 +825,14 @@ func (p *decidePass) bindings() {
 		leased := info.PendingCreateClaim || info.MetadataState == string(session.StateCreating)
 		trigger := strings.TrimSpace(info.TriggerBeadID)
 		if _, taken := consumed[trigger]; trigger != "" && !taken && (p.snap.Entries[k].Liveness == livenessAlive || leased) {
-			consumed[trigger] = k
+			// A live row excluded from its trigger must not consume that
+			// work. selectPoolRow does not rebind a live row, and a clear
+			// patch is applied only at the start of a new session, so the
+			// persisted trigger stays. Leaving it unconsumed lets a fresh
+			// identity be planned for the same bead.
+			if !scaleDemandExcludesSession(p.merged.ScaleCheckDemand, trigger, info) {
+				consumed[trigger] = k
+			}
 		}
 	}
 	for _, k := range keys {

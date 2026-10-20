@@ -4670,6 +4670,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
 		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
 	)
+	awakeInput.ScaleDemandExcludes = reconcileOpts.scaleDemandExcludes
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)
 

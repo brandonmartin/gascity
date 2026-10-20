@@ -524,10 +524,11 @@ func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) {
 // whose object is not in argv at all — contributes nothing to the shape. Under
 // `gc bd` that is not a swallowed error, but the shield is a gc guard rather
 // than bd: bdRigQualifiedMetadataRefusal (cmd_bd.go) runs unconditionally ahead
-// of this one and refuses both spellings on every verb it admits — create, its
-// `new` alias, and update. `q`, the third mint verb here, has no --metadata
-// flag at all (bd q --help), so every mint verb that can carry one is refused
-// before this function is reached.
+// of this one and refuses both spellings on the mint verbs it admits — create
+// and its `new` alias. (It reads an `@file` only for update, which is not a mint
+// verb.) `q`, the third mint verb here, has no --metadata flag at all
+// (bd q --help), so every mint verb that can carry one is refused before this
+// function is reached.
 //
 // Attributing that to bd instead would be wrong, because bd's own behavior
 // differs by spelling: it rejects a malformed inline body (identical parse,

@@ -737,6 +737,50 @@ func TestWorkConsumedByAliveOrStartingRow(t *testing.T) {
 	}
 }
 
+// Kills: a live row whose trigger bead excludes that row still consuming the
+// bead (ga-u1n0v). selectPoolRow does not rebind a live row, so the persisted
+// trigger stays; bindings must leave the work free for a fresh identity.
+// Absent provenance keeps today's consume. A bead that names a different
+// identity still consumes. Alias history counts: AssigneeIdentities includes it.
+func TestExcludedLiveTriggerDoesNotConsumeScaleDemand(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	gc1 := poolRow("gc-1", "worker", 1, "active")
+	excluded := poolRow("gc-2", "worker", 2, "active", "gc.trigger_bead_id", "w-1", "alias", "rig/excluded-seat")
+	prior := poolRow("gc-2", "worker", 2, "active", "gc.trigger_bead_id", "w-1", "alias", "rig/current-seat", "alias_history", "rig/excluded-seat")
+	other := poolRow("gc-2", "worker", 2, "active", "gc.trigger_bead_id", "w-1", "alias", "rig/eligible-seat")
+	demand := map[string]scaleCheckDemand{
+		"worker": {
+			WorkBeadIDs:      []string{"w-1"},
+			ExcludeClaimants: map[string]string{"w-1": "rig/excluded-seat"},
+		},
+	}
+	for label, tc := range map[string]struct {
+		gc2       beads.Bead
+		demand    map[string]scaleCheckDemand
+		wantBound bool
+	}{
+		"no provenance":  {gc2: excluded, wantBound: false},
+		"excluded alias": {gc2: excluded, demand: demand, wantBound: true},
+		"prior alias":    {gc2: prior, demand: demand, wantBound: true},
+		"other alias":    {gc2: other, demand: demand, wantBound: false},
+	} {
+		f := newAllocFixture(t, cfg).sessions(gc1, tc.gc2).alive("s-gc-2", InventoryAttrs{AttachedKnown: true})
+		p := newDecidePass(f.inputs())
+		p.prepare()
+		p.merged.ScaleCheckDemand = tc.demand
+		p.selected[p.byID["gc-1"]] = &selection{binding: &bindingTarget{WorkBeadID: "w-1"}}
+		p.selected[p.byID["gc-2"]] = &selection{}
+		d := p.finish()
+		b1, b2 := entryOf(t, d, "gc-1").Binding, entryOf(t, d, "gc-2").Binding
+		if b2 != nil {
+			t.Errorf("%s: gc-2 bound %+v, want unbound", label, b2)
+		}
+		if bound := b1 != nil && b1.WorkBeadID == "w-1"; bound != tc.wantBound {
+			t.Errorf("%s: gc-1 binding %+v, want bound to w-1 = %v", label, b1, tc.wantBound)
+		}
+	}
+}
+
 // Kills: map order deciding which of two holders consumes one trigger. Two
 // start-lease rows carry w-1, and each is selected with a binding candidate
 // for it (its work dir differs from the row's). The first holder in key

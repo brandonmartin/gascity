@@ -1228,6 +1228,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		withParkedSeats(parked),
+		withScaleDemandExcludes(scaleDemandExcludesByTemplate(dsResult.ScaleCheckDemand)),
 		withAssignedWorkStores(awakeAssignedStores),
 	)
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -20,11 +21,18 @@ const defaultOnDemandIdleTimeout = 5 * time.Minute
 // should be awake. All external I/O (shell commands, tmux checks, store
 // queries) happens before this function is called.
 type AwakeInput struct {
-	Agents                   []AwakeAgent
-	NamedSessions            []AwakeNamedSession
-	SessionBeads             []AwakeSessionBead
-	WorkBeads                []AwakeWorkBead // in_progress assigned work plus ready open assigned work
-	ScaleCheckCounts         map[string]int  // agent template → scale_check count
+	Agents           []AwakeAgent
+	NamedSessions    []AwakeNamedSession
+	SessionBeads     []AwakeSessionBead
+	WorkBeads        []AwakeWorkBead // in_progress assigned work plus ready open assigned work
+	ScaleCheckCounts map[string]int  // agent template → scale_check count
+	// ScaleDemandExcludes is one raw gc.exclude_claimants value per demand
+	// bead, keyed by template, aligned with the beads behind
+	// ScaleCheckCounts. Nil means the caller did not supply exclusion
+	// metadata and every session stays eligible. A session is skipped only
+	// when the list is non-empty and every entry names it; it then neither
+	// wakes nor counts as a filled slot.
+	ScaleDemandExcludes      map[string][]string
 	NamedSessionDemand       map[string]bool // named-session identity → routed/assigned work demand
 	NamedSessionRoutedDemand map[string]bool // named-session identity → pre-suppression routed demand on backing template (wake-only, see DesiredStateResult.NamedSessionRoutedDemand)
 	NamedSessionWorkQ        map[string]bool // named-session identity → bridge-carried work_query demand
@@ -385,6 +393,9 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {
 				continue
 			}
+			if !scaleDemandAdmitsSession(input.ScaleDemandExcludes[template], bead) {
+				continue
+			}
 			desired[key(bead)] = "scaled:demand"
 			filled++
 		}
@@ -394,6 +405,9 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 				break
 			}
 			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {
+				continue
+			}
+			if !scaleDemandAdmitsSession(input.ScaleDemandExcludes[template], bead) {
 				continue
 			}
 			desired[key(bead)] = "scaled:creating"
@@ -869,6 +883,36 @@ func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {
 		}
 	}
 	return false
+}
+
+// scaleDemandAdmitsSession reports whether bead can serve at least one
+// demand row. excludes is one raw gc.exclude_claimants value per demand
+// bead. Nil or empty means the caller supplied no exclusion metadata, and
+// the session stays eligible. A session is refused only when every entry
+// names it, so a mixed queue still wakes a seat that can take the bead
+// that does not exclude it.
+func scaleDemandAdmitsSession(excludes []string, bead AwakeSessionBead) bool {
+	if len(excludes) == 0 {
+		return true
+	}
+	identities := awakeSessionClaimIdentities(bead)
+	for _, raw := range excludes {
+		if !beadmeta.ExcludesClaimant(map[string]string{beadmeta.ExcludeClaimantsMetadataKey: raw}, identities...) {
+			return true
+		}
+	}
+	return false
+}
+
+func awakeSessionClaimIdentities(bead AwakeSessionBead) []string {
+	values := []string{bead.ID, bead.SessionName, bead.Alias, bead.NamedIdentity}
+	identities := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			identities = append(identities, value)
+		}
+	}
+	return identities
 }
 
 func collectActiveBeads(beads []AwakeSessionBead, template string, now time.Time) []AwakeSessionBead {

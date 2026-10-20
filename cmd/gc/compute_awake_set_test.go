@@ -804,6 +804,50 @@ func TestScaled_DemandCountsStartPendingAsCreating(t *testing.T) {
 	assertReason(t, result, "polecat-pending-1", "scaled:creating")
 }
 
+func TestScaled_ExcludedSessionDoesNotConsumeDemand(t *testing.T) {
+	const template = "hello-world/polecat"
+	const excluded = "rig/excluded-seat"
+	excludedBead := AwakeSessionBead{
+		ID: "mc-excluded", SessionName: "polecat-excluded", Alias: excluded,
+		Template: template, State: "active",
+	}
+	eligibleBead := AwakeSessionBead{
+		ID: "mc-eligible", SessionName: "polecat-eligible", Alias: "rig/eligible-seat",
+		Template: template, State: "active",
+	}
+	input := AwakeInput{
+		Agents:           []AwakeAgent{{QualifiedName: template}},
+		SessionBeads:     []AwakeSessionBead{excludedBead, eligibleBead},
+		ScaleCheckCounts: map[string]int{template: 1},
+		ScaleDemandExcludes: map[string][]string{
+			template: {excluded},
+		},
+		RunningSessions: map[string]bool{"polecat-excluded": true, "polecat-eligible": true},
+		Now:             now,
+	}
+
+	// ComputeAwakeSet directly: computeAwakeSetChecked diffs against the
+	// pre-refactor twin, which has no exclusion field and still wakes the
+	// excluded seat. Nil ScaleDemandExcludes keeps that twin in agreement.
+	result := ComputeAwakeSet(input)
+	assertAsleep(t, result, "polecat-excluded")
+	assertAwake(t, result, "polecat-eligible")
+	assertReason(t, result, "polecat-eligible", "scaled:demand")
+
+	input.SessionBeads = []AwakeSessionBead{excludedBead}
+	input.RunningSessions = map[string]bool{"polecat-excluded": true}
+	alone := ComputeAwakeSet(input)
+	assertAsleep(t, alone, "polecat-excluded")
+
+	// A second bead that excludes nobody keeps the session eligible: it can
+	// still serve that bead, so the count may wake it.
+	input.SessionBeads = []AwakeSessionBead{excludedBead}
+	input.ScaleDemandExcludes = map[string][]string{template: {excluded, ""}}
+	mixed := ComputeAwakeSet(input)
+	assertAwake(t, mixed, "polecat-excluded")
+	assertReason(t, mixed, "polecat-excluded", "scaled:demand")
+}
+
 func TestScaled_Demand1_TwoActive(t *testing.T) {
 	result := computeAwakeSetChecked(t, AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},

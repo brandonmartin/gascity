@@ -203,6 +203,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storebinding"
@@ -1572,6 +1573,41 @@ func bdReservedClassIDs(token string) []string {
 // the same owner.
 func bdByIDClaimActor() string { return strings.TrimSpace(os.Getenv("BEADS_ACTOR")) }
 
+// gcDirectClaimIdentities are the names a direct `gc bd update --claim`
+// presents, matching the set `gc hook --claim` matches gc.exclude_claimants
+// against. BEADS_ACTOR is the assignee the claim records; the GC_* values are
+// the session the operator's environment says is calling.
+func gcDirectClaimIdentities() []string {
+	return []string{
+		os.Getenv("BEADS_ACTOR"),
+		os.Getenv("GC_ALIAS"),
+		os.Getenv("GC_AGENT"),
+		os.Getenv("GC_SESSION_ID"),
+		os.Getenv("GC_SESSION_NAME"),
+	}
+}
+
+func gcDirectClaimExcluded(metadata map[string]string) bool {
+	return beadmeta.ExcludesClaimant(metadata, gcDirectClaimIdentities()...)
+}
+
+func bdUpdateClaims(args []string) bool {
+	if len(args) == 0 || args[0] != "update" {
+		return false
+	}
+	for _, arg := range args[1:] {
+		if arg == "--claim" {
+			return true
+		}
+	}
+	return false
+}
+
+func refuseExcludedDirectClaim(id string, stderr io.Writer) int {
+	fmt.Fprintf(stderr, "gc bd: %s was not claimed: %s names this session\n", id, beadmeta.ExcludeClaimantsMetadataKey) //nolint:errcheck // best-effort stderr
+	return 1
+}
+
 // doBdByIDClaim acquires a class-store bead for assignee through the closed
 // graph contract.
 //
@@ -1590,6 +1626,13 @@ func doBdByIDClaim(graph storebinding.GraphStore, id, assignee string, jsonOut b
 	if assignee == "" {
 		fmt.Fprintf(stderr, "gc bd: claiming %s requires BEADS_ACTOR to name the claimant\n", id) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// Refuse before the CAS. A same-owner reclaim is a store no-op, so an
+	// excluded seat that already holds the bead would otherwise succeed.
+	// A Get that fails falls through: a missing bead is the store's answer,
+	// not proof that this session is excluded.
+	if current, getErr := graph.Get(id); getErr == nil && gcDirectClaimExcluded(current.Metadata) {
+		return refuseExcludedDirectClaim(id, stderr)
 	}
 	claimed, ok, err := graph.Claim(id, assignee)
 	if err != nil {

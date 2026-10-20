@@ -694,6 +694,19 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// gc.exclude_claimants is enforced on the in-process class claim and on
+	// this passthrough. The guard above loaded the beads it could read; a
+	// store miss leaves guardBeads empty and the command falls through, the
+	// same limitation as the other pre-exec guards. Raw bd outside gc cannot
+	// see the list.
+	if bdUpdateClaims(bdArgs) {
+		for id, bead := range guardBeads {
+			if gcDirectClaimExcluded(bead.Metadata) {
+				return refuseExcludedDirectClaim(id, stderr)
+			}
+		}
+	}
+
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam
 	// must satisfy the typed work-record contract (gc.work_outcome present;
 	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;

@@ -459,6 +459,13 @@ func (p poolClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, _ stri
 	if !ok || !isUnclaimedTrigger(p.cfg, w) {
 		return backstopTarget{}, backstopResolutionClear
 	}
+	// A stale trigger on a long-lived seat is not cleared by the allocator
+	// once the seat is past post-create protection. Re-nudging it would wake
+	// a session the bead forbids, and the seat would drain on a query that
+	// correctly does not serve the row.
+	if beadmeta.ExcludesClaimant(w.Metadata, sessionBeadAssigneeIdentities(s)...) {
+		return backstopTarget{}, backstopResolutionClear
+	}
 	return backstopTarget{ID: triggerID}, backstopResolutionOutstanding
 }
 

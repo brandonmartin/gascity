@@ -63,6 +63,32 @@ func mustGetTestBead(t *testing.T, store beads.Store, id string) beads.Bead {
 	return b
 }
 
+func TestPoolClaimBackstopResolveClearsExcludedTrigger(t *testing.T) {
+	cfg := idleClaimTestCfg()
+	work := beads.Bead{
+		ID:     "work-a",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.ExcludeClaimantsMetadataKey: "rig/excluded-seat",
+		},
+	}
+	session := idleClaimPoolSession()
+	session.Metadata["alias"] = "rig/excluded-seat"
+	backstop := poolClaimBackstop{
+		cfg:  cfg,
+		work: newIdleClaimWorkSnapshot([]beads.Bead{work}, []string{"city"}),
+	}
+
+	if _, got := backstop.resolve(session, nil, ""); got != backstopResolutionClear {
+		t.Fatalf("resolve = %v, want clear when the trigger excludes this session", got)
+	}
+
+	session.Metadata["alias"] = "rig/eligible-seat"
+	if _, got := backstop.resolve(session, nil, ""); got != backstopResolutionOutstanding {
+		t.Fatalf("resolve = %v, want outstanding for a session the trigger does not exclude", got)
+	}
+}
+
 func TestNudgeStalledPoolClaims_NudgesAfterGrace(t *testing.T) {
 	sp := runningIdleClaimFake(t, "session-a")
 	cfg := idleClaimTestCfg()

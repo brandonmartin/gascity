@@ -2001,6 +2001,140 @@ func TestComputePoolDesiredStates_PostCreateProtectionAllocatesDemandByTriggerId
 	}
 }
 
+func TestComputePoolDesiredStates_ExcludedConcreteDoesNotConsumeScaleDemand(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	const excludedAlias = "rig/excluded-seat"
+
+	t.Run("sole demand bead", func(t *testing.T) {
+		protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+		protected.Metadata["alias"] = excludedAlias
+		protected.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "work-excluded"
+		demand := map[string]scaleCheckDemand{
+			"claude": {
+				Count:            1,
+				WorkBeadIDs:      []string{"work-excluded"},
+				Titles:           map[string]string{"work-excluded": "excluded title"},
+				ExcludeClaimants: map[string]string{"work-excluded": excludedAlias},
+			},
+		}
+
+		result := computePoolDesiredStatesAt(
+			cfg, nil, sessionInfosFromBeads([]beads.Bead{protected}),
+			map[string]int{"claude": 1}, demand, now, nil,
+		)
+
+		if len(result) != 1 || len(result[0].Requests) != 2 {
+			t.Fatalf("result = %#v, want the protected session plus an anonymous request for the bead", result)
+		}
+		concrete := result[0].Requests[0]
+		if concrete.SessionBeadID != protected.ID || concrete.WorkBeadID != "" {
+			t.Fatalf("concrete request = %+v, want protected session unbound from the excluded bead", concrete)
+		}
+		anonymous := result[0].Requests[1]
+		if anonymous.SessionBeadID != "" || anonymous.WorkBeadID != "work-excluded" || anonymous.WorkExcludeClaimants != excludedAlias {
+			t.Fatalf("anonymous request = %+v, want a fresh session for work-excluded carrying the exclusion", anonymous)
+		}
+	})
+
+	t.Run("rebinds to a bead the session can serve", func(t *testing.T) {
+		protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+		protected.Metadata["alias"] = excludedAlias
+		demand := map[string]scaleCheckDemand{
+			"claude": {
+				Count:       2,
+				WorkBeadIDs: []string{"work-excluded", "work-ok"},
+				Titles:      map[string]string{"work-excluded": "no", "work-ok": "yes"},
+				ExcludeClaimants: map[string]string{
+					"work-excluded": excludedAlias,
+					"work-ok":       "someone-else",
+				},
+			},
+		}
+
+		result := computePoolDesiredStatesAt(
+			cfg, nil, sessionInfosFromBeads([]beads.Bead{protected}),
+			map[string]int{"claude": 2}, demand, now, nil,
+		)
+
+		if len(result) != 1 || len(result[0].Requests) != 2 {
+			t.Fatalf("result = %#v, want one rebound concrete and one anonymous request", result)
+		}
+		concrete := result[0].Requests[0]
+		if concrete.SessionBeadID != protected.ID || concrete.WorkBeadID != "work-ok" || concrete.WorkBeadTitle != "yes" {
+			t.Fatalf("concrete request = %+v, want rebound to work-ok", concrete)
+		}
+		anonymous := result[0].Requests[1]
+		if anonymous.SessionBeadID != "" || anonymous.WorkBeadID != "work-excluded" {
+			t.Fatalf("anonymous request = %+v, want residual work-excluded", anonymous)
+		}
+	})
+
+	t.Run("stale non-demand trigger is kept", func(t *testing.T) {
+		protected := protectedPoolSessionBeadAt("sess-protected", now.Add(-30*time.Second))
+		protected.Metadata["alias"] = excludedAlias
+		protected.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "work-prior"
+		demand := map[string]scaleCheckDemand{
+			"claude": {
+				Count:            1,
+				WorkBeadIDs:      []string{"work-excluded"},
+				ExcludeClaimants: map[string]string{"work-excluded": excludedAlias},
+			},
+		}
+
+		result := computePoolDesiredStatesAt(
+			cfg, nil, sessionInfosFromBeads([]beads.Bead{protected}),
+			map[string]int{"claude": 1}, demand, now, nil,
+		)
+
+		if len(result) != 1 || len(result[0].Requests) != 2 {
+			t.Fatalf("result = %#v, want protected session plus anonymous demand", result)
+		}
+		concrete := result[0].Requests[0]
+		if concrete.SessionBeadID != protected.ID || concrete.WorkBeadID != "work-prior" {
+			t.Fatalf("concrete request = %+v, want prior trigger work-prior kept", concrete)
+		}
+		if result[0].Requests[1].WorkBeadID != "work-excluded" || result[0].Requests[1].SessionBeadID != "" {
+			t.Fatalf("anonymous request = %+v, want work-excluded", result[0].Requests[1])
+		}
+	})
+}
+
+func TestReusablePoolSessionInfosForRequestSkipsExcludedSession(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	excluded := protectedPoolSessionBeadAt("sess-excluded", now.Add(-2*time.Hour))
+	excluded.Metadata["alias"] = "rig/excluded-seat"
+	eligible := protectedPoolSessionBeadAt("sess-eligible", now.Add(-time.Hour))
+	eligible.Metadata["alias"] = "rig/eligible-seat"
+	// Past the post-create window these are ordinary reusable active sessions,
+	// the long-lived namepool shape the wake loop hands an anonymous request.
+	snapshot := newSessionBeadSnapshot([]beads.Bead{excluded, eligible})
+	bp := &agentBuildParams{
+		city:         cfg,
+		agents:       cfg.Agents,
+		sessionBeads: snapshot,
+	}
+	request := SessionRequest{
+		Tier:                 "new",
+		WorkBeadID:           "work-1",
+		WorkExcludeClaimants: "rig/excluded-seat",
+	}
+
+	candidates := reusablePoolSessionInfosForRequest(bp, &cfg.Agents[0], "claude", request, now, nil)
+	got := make([]string, 0, len(candidates))
+	for _, info := range candidates {
+		got = append(got, info.ID)
+	}
+	if len(got) != 1 || got[0] != eligible.ID {
+		t.Fatalf("candidates = %v, want only %s", got, eligible.ID)
+	}
+}
+
 func TestComputePoolDesiredStates_PostCreateProtectionRebindsUnmatchedConcreteDemand(t *testing.T) {
 	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
 	cfg := &config.City{

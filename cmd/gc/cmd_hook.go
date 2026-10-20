@@ -57,7 +57,12 @@ identities, so an eligible session in the same pool claims the bead instead.
 --claim enforces this on every claim tier and again on the store's canonical
 readback, so a custom work_query cannot bypass it. The default work query
 also drops excluded beads before it picks one to serve, so an excluded bead
-at the head of the queue never hides the work behind it.
+at the head of the queue never hides the work behind it. gc bd update
+--claim refuses the same list, matched against BEADS_ACTOR, GC_ALIAS,
+GC_AGENT, GC_SESSION_ID and GC_SESSION_NAME, and does not acquire the bead.
+Pool demand still counts the bead for the pool, but it does not wake a
+session that every ready bead excludes, and that session does not consume
+the slot, so an eligible session is still scaled.
 
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),

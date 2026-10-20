@@ -414,6 +414,11 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
+	// scaleDemandExcludes is one raw gc.exclude_claimants value per demand
+	// bead, keyed by template. Nil leaves ComputeAwakeSet's scaled pass
+	// unchanged. A session named by every entry is not woken and does not
+	// count as a filled slot.
+	scaleDemandExcludes map[string][]string
 	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
 	// the same reconcile pass: the store each row was read through. The
 	// orphan-close tie-break releases through it instead of re-deriving an owner
@@ -575,6 +580,16 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 // to set AwakeWorkBead.Ready from the store's deps gate rather than guessing
 // from status, so a blocked open bead does not hold its session awake. Nil
 // leaves every open assigned bead non-ready.
+// withScaleDemandExcludes installs the per-template gc.exclude_claimants
+// rows for this reconcile pass. Nil (or the option omitted) leaves every
+// session eligible for scaled demand, which is what callers without
+// bead-backed provenance do.
+func withScaleDemandExcludes(excludes map[string][]string) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.scaleDemandExcludes = excludes
+	}
+}
+
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags

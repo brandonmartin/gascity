@@ -66,6 +66,11 @@ type DesiredStateResult struct {
 	State            map[string]TemplateParams
 	BaseState        map[string]TemplateParams
 	ScaleCheckCounts map[string]int // nil when store is nil or scale_check not run
+	// ScaleCheckDemand is the per-template provenance behind ScaleCheckCounts,
+	// including each bead's gc.exclude_claimants. Nil when this pass had no
+	// bead-backed demand. The reconciler reads it so a session named by every
+	// bead is not woken for that demand and does not consume the slot.
+	ScaleCheckDemand map[string]scaleCheckDemand
 	// ScaleCheckPartialTemplates records all templates whose bead-backed demand
 	// probe failed. PoolScaleCheckPartialTemplates blocks fresh pool creates;
 	// PoolPartialRetentionTemplates preserves existing pool capacity and may also
@@ -227,6 +232,11 @@ type scaleCheckDemand struct {
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
 	ParentSIDs map[string]string
+	// ExcludeClaimants maps work-bead id → the raw gc.exclude_claimants
+	// value. Absent or empty means that bead excludes nobody. Pool demand
+	// still counts the bead; a session named here must not be the one woken
+	// for it and must not consume its slot.
+	ExcludeClaimants map[string]string
 }
 
 var (
@@ -814,6 +824,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	subPhaseStart = trace.demandNow()
 	namedMaterialized := 0
 	named := computeNamedSessionDemand(cityName, cityPath, cfg, store, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
+	named = suppressExcludedCanonicalRoutedDemand(named, scaleCheckDemandByTemplate)
 	for identity, spec := range named.specs {
 		canonicalInfo, hasCanonical := findCanonicalNamedSessionInfo(bp.sessionBeads, spec)
 		if !hasCanonical {
@@ -888,6 +899,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		State:                              desired,
 		BaseState:                          baseDesired,
 		ScaleCheckCounts:                   scaleCheckCounts,
+		ScaleCheckDemand:                   scaleCheckDemandByTemplate,
 		ScaleCheckPartialTemplates:         scaleCheckPartialTemplates,
 		PoolScaleCheckPartialTemplates:     poolScaleCheckPartialTemplates,
 		PoolPartialRetentionTemplates:      poolPartialRetentionTemplates,
@@ -1078,6 +1090,102 @@ func computeNamedSessionDemandOn(
 		workBeadID:   namedWorkBeadID,
 		routedDemand: namedRoutedDemand,
 	}
+}
+
+// suppressExcludedCanonicalRoutedDemand clears routed-demand wake for a
+// canonical singleton whose every backing-template demand bead names that
+// holder. A nil demand map leaves the signal unchanged, so a caller that
+// has not loaded bead provenance still wakes the holder. Pool-level counts
+// are not touched: another identity can still be scaled for the same beads.
+func suppressExcludedCanonicalRoutedDemand(named namedSessionDemand, demand map[string]scaleCheckDemand) namedSessionDemand {
+	if demand == nil || len(named.routedDemand) == 0 {
+		return named
+	}
+	for identity, on := range named.routedDemand {
+		if !on {
+			continue
+		}
+		spec, ok := named.specs[identity]
+		if !ok || spec.Agent == nil || !spec.Agent.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
+		entry, ok := demand[namedSessionBackingTemplate(spec)]
+		if !ok || !demandExcludesEveryBead(entry, namedHolderClaimIdentities(identity, spec)) {
+			continue
+		}
+		delete(named.routedDemand, identity)
+	}
+	return named
+}
+
+func namedHolderClaimIdentities(identity string, spec namedSessionSpec) []string {
+	identities := make([]string, 0, 2)
+	if identity = strings.TrimSpace(identity); identity != "" {
+		identities = append(identities, identity)
+	}
+	if name := strings.TrimSpace(spec.SessionName); name != "" && name != identity {
+		identities = append(identities, name)
+	}
+	return identities
+}
+
+func demandExcludesEveryBead(demand scaleCheckDemand, identities []string) bool {
+	if len(demand.WorkBeadIDs) == 0 || len(identities) == 0 {
+		return false
+	}
+	for _, id := range demand.WorkBeadIDs {
+		if !demandExcludesIdentities(demand, id, identities) {
+			return false
+		}
+	}
+	return true
+}
+
+// scaleDemandExcludesByTemplate is the awake-set view of scale-check
+// provenance: one raw gc.exclude_claimants value per demand bead, in demand
+// order, and only for templates that exclude somebody. An empty string keeps
+// its place so a bead that excludes nobody still admits every session.
+// Nil means no template recorded an exclusion.
+func scaleDemandExcludesByTemplate(demand map[string]scaleCheckDemand) map[string][]string {
+	if len(demand) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(demand))
+	for template, entry := range demand {
+		if len(entry.WorkBeadIDs) == 0 || len(entry.ExcludeClaimants) == 0 {
+			continue
+		}
+		rows := make([]string, len(entry.WorkBeadIDs))
+		hasExclude := false
+		for i, id := range entry.WorkBeadIDs {
+			rows[i] = scaleDemandExcludeClaimants(entry, id)
+			if rows[i] != "" {
+				hasExclude = true
+			}
+		}
+		if hasExclude {
+			out[template] = rows
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// scaleDemandExcludesSession reports whether any scale-check bead identified
+// by workBeadID names one of info's assignee identities.
+func scaleDemandExcludesSession(demand map[string]scaleCheckDemand, workBeadID string, info session.Info) bool {
+	if len(demand) == 0 {
+		return false
+	}
+	identities := session.AssigneeIdentities(info)
+	for _, entry := range demand {
+		if demandExcludesIdentities(entry, workBeadID, identities) {
+			return true
+		}
+	}
+	return false
 }
 
 // demandTargets is what the demand pass's agent loop builds from config: the
@@ -2390,6 +2498,12 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 					}
 					entry.ParentSIDs[b.ID] = parentSID
 				}
+				if excluded := strings.TrimSpace(b.Metadata[beadmeta.ExcludeClaimantsMetadataKey]); excluded != "" {
+					if entry.ExcludeClaimants == nil {
+						entry.ExcludeClaimants = make(map[string]string)
+					}
+					entry.ExcludeClaimants[b.ID] = excluded
+				}
 				demand[template] = entry
 			}
 		}
@@ -2532,6 +2646,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	if existing.ExcludeClaimants == nil && len(incoming.ExcludeClaimants) > 0 {
+		existing.ExcludeClaimants = make(map[string]string, len(incoming.ExcludeClaimants))
+	}
 	if existing.WorktreeSpecs == nil && len(incoming.WorktreeSpecs) > 0 {
 		existing.WorktreeSpecs = make(map[string]*worktree.Spec, len(incoming.WorktreeSpecs))
 	}
@@ -2558,6 +2675,11 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		if incoming.ParentSIDs != nil {
 			if sid := incoming.ParentSIDs[id]; sid != "" {
 				existing.ParentSIDs[id] = sid
+			}
+		}
+		if incoming.ExcludeClaimants != nil {
+			if excluded := strings.TrimSpace(incoming.ExcludeClaimants[id]); excluded != "" {
+				existing.ExcludeClaimants[id] = excluded
 			}
 		}
 		if incoming.WorktreeSpecs != nil {

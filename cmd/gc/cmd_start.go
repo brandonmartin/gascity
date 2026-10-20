@@ -1154,6 +1154,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withScaleDemandExcludes(scaleDemandExcludesByTemplate(dsResult.ScaleCheckDemand)),
 		withAssignedWorkStores(awakeAssignedStores),
 	)
 

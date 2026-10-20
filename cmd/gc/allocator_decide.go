@@ -540,6 +540,7 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 	}
 	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, p.poolDesired, p.named.workReady,
 		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
+	input.ScaleDemandExcludes = scaleDemandExcludesByTemplate(p.merged.ScaleCheckDemand)
 	if p.index != nil {
 		input.workIndex = newAwakeWorkIndex(input.WorkBeads)
 	}

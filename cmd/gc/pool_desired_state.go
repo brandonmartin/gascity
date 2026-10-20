@@ -42,6 +42,11 @@ type SessionRequest struct {
 	// BrainParentSID is gc.brain_parent_sid from the driving work bead, when
 	// set: the parent session to fork this launch off of (warm-arm fork-launch).
 	BrainParentSID string
+	// WorkExcludeClaimants is the driving bead's raw gc.exclude_claimants
+	// value. Empty means the bead excludes nobody. Anonymous demand reuse
+	// skips a session named here so the request is not handed back to a seat
+	// that must not claim it.
+	WorkExcludeClaimants string
 	// FloorGuarantee marks a "new" request that satisfies an agent's
 	// min_active_sessions floor, whether reserveNestedCapFloors minted it for
 	// the floor or it was an elastic scale-check request the floor absorbed.
@@ -587,21 +592,28 @@ func computePoolDesiredStatesAt(
 		selectedConcrete = append(selectedConcrete, protected[:protectedCount]...)
 		selectedConcrete = append(selectedConcrete, inFlight[:inFlightCount]...)
 		demand := scaleCheckDemand[template]
-		selectedConcrete, residualWorkBeadIDs := allocateScaleDemandToConcrete(demand, selectedConcrete)
+		selectedConcrete, residualWorkBeadIDs := allocateScaleDemandExcluding(demand, selectedConcrete, func(req SessionRequest) []string {
+			info, ok := sessionInfoByID[req.SessionBeadID]
+			if !ok {
+				return nil
+			}
+			return sessionpkg.AssigneeIdentities(info)
+		})
+		anonymousCount := anonymousNewDemandCount(newCount, reusedCount, boundScaleDemandCount(selectedConcrete, demand), len(residualWorkBeadIDs))
 		if scaleCount > 0 && len(protected)+len(inFlight) > 0 && trace != nil {
 			trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, template, "", traceRecordPayload{
 				"scale_check":   scaleCount,
 				"in_flight":     len(inFlight),
 				"protected":     len(protected),
 				"reused":        reusedCount,
-				"anonymous_new": max(0, newCount-reusedCount),
+				"anonymous_new": anonymousCount,
 			})
 		}
 		for _, req := range selectedConcrete {
 			allRequests = append(allRequests, req)
 			usage.accept(req, limits)
 		}
-		for j := 0; j < newCount-reusedCount; j++ {
+		for j := 0; j < anonymousCount; j++ {
 			workBeadID := ""
 			workBeadTitle := ""
 			workPack := ""
@@ -635,16 +647,17 @@ func computePoolDesiredStatesAt(
 				}
 			}
 			req := SessionRequest{
-				Template:       template,
-				Tier:           "new",
-				WorkBeadID:     workBeadID,
-				WorkBeadTitle:  workBeadTitle,
-				WorkPack:       workPack,
-				WorkWorkspace:  workWorkspace,
-				WorkStoreRef:   workStoreRef,
-				BrainParentSID: workParentSID,
-				WorktreeSpec:   worktreeSpec,
-				WorktreeError:  worktreeError,
+				Template:             template,
+				Tier:                 "new",
+				WorkBeadID:           workBeadID,
+				WorkBeadTitle:        workBeadTitle,
+				WorkPack:             workPack,
+				WorkWorkspace:        workWorkspace,
+				WorkStoreRef:         workStoreRef,
+				BrainParentSID:       workParentSID,
+				WorkExcludeClaimants: scaleDemandExcludeClaimants(demand, workBeadID),
+				WorktreeSpec:         worktreeSpec,
+				WorktreeError:        worktreeError,
 			}
 			allRequests = append(allRequests, req)
 			usage.accept(req, limits)
@@ -676,20 +689,24 @@ func concreteNestedCapRequests(
 // silently consuming A while remaining pointed at X. Surplus concrete capacity
 // with no residual demand keeps its prior trigger because its protection floor
 // is independent of scale demand.
+//
+// identities is nil for callers that have no session identity to test. A
+// non-nil identities reports the claimant names of a concrete request, and a
+// bead whose gc.exclude_claimants names one of them is neither matched nor
+// used as a rebind target. A trigger that points at such a bead is cleared.
+// A prior trigger outside this demand set is kept.
 func allocateScaleDemandToConcrete(demand scaleCheckDemand, concrete []SessionRequest) ([]SessionRequest, []string) {
+	return allocateScaleDemandExcluding(demand, concrete, nil)
+}
+
+func allocateScaleDemandExcluding(demand scaleCheckDemand, concrete []SessionRequest, identities func(SessionRequest) []string) ([]SessionRequest, []string) {
 	allocated := append([]SessionRequest(nil), concrete...)
-	uniqueDemand := make([]string, 0, len(demand.WorkBeadIDs))
-	demandSet := make(map[string]struct{}, len(demand.WorkBeadIDs))
-	for _, rawID := range demand.WorkBeadIDs {
-		id := strings.TrimSpace(rawID)
-		if id == "" {
-			continue
+	uniqueDemand, demandSet := uniqueScaleDemandIDs(demand)
+	excluded := func(request SessionRequest, id string) bool {
+		if identities == nil {
+			return false
 		}
-		if _, seen := demandSet[id]; seen {
-			continue
-		}
-		demandSet[id] = struct{}{}
-		uniqueDemand = append(uniqueDemand, id)
+		return demandExcludesIdentities(demand, id, identities(request))
 	}
 
 	matched := make(map[string]struct{}, len(allocated))
@@ -697,7 +714,7 @@ func allocateScaleDemandToConcrete(demand scaleCheckDemand, concrete []SessionRe
 	for i, request := range allocated {
 		id := strings.TrimSpace(request.WorkBeadID)
 		if _, demanded := demandSet[id]; demanded {
-			if _, alreadyMatched := matched[id]; !alreadyMatched {
+			if _, alreadyMatched := matched[id]; !alreadyMatched && !excluded(request, id) {
 				matched[id] = struct{}{}
 				allocated[i] = requestWithScaleDemandProvenance(request, demand, id)
 				continue
@@ -712,12 +729,110 @@ func allocateScaleDemandToConcrete(demand scaleCheckDemand, concrete []SessionRe
 			remaining = append(remaining, id)
 		}
 	}
-	rebound := minInt(len(unmatchedConcrete), len(remaining))
-	for i := 0; i < rebound; i++ {
-		idx := unmatchedConcrete[i]
-		allocated[idx] = requestWithScaleDemandProvenance(allocated[idx], demand, remaining[i])
+	taken := make(map[string]struct{}, len(remaining))
+	for _, idx := range unmatchedConcrete {
+		request := allocated[idx]
+		bound := ""
+		for _, id := range remaining {
+			if _, used := taken[id]; used || excluded(request, id) {
+				continue
+			}
+			bound = id
+			break
+		}
+		if bound != "" {
+			taken[bound] = struct{}{}
+			allocated[idx] = requestWithScaleDemandProvenance(request, demand, bound)
+			continue
+		}
+		id := strings.TrimSpace(request.WorkBeadID)
+		if _, demanded := demandSet[id]; demanded && excluded(request, id) {
+			allocated[idx] = requestWithScaleDemandProvenance(request, demand, "")
+		}
 	}
-	return allocated, remaining[rebound:]
+	residual := make([]string, 0, len(remaining))
+	for _, id := range remaining {
+		if _, used := taken[id]; !used {
+			residual = append(residual, id)
+		}
+	}
+	return allocated, residual
+}
+
+func uniqueScaleDemandIDs(demand scaleCheckDemand) ([]string, map[string]struct{}) {
+	unique := make([]string, 0, len(demand.WorkBeadIDs))
+	set := make(map[string]struct{}, len(demand.WorkBeadIDs))
+	for _, rawID := range demand.WorkBeadIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, seen := set[id]; seen {
+			continue
+		}
+		set[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	return unique, set
+}
+
+func demandExcludesIdentities(demand scaleCheckDemand, workBeadID string, identities []string) bool {
+	raw := scaleDemandExcludeClaimants(demand, workBeadID)
+	if raw == "" || len(identities) == 0 {
+		return false
+	}
+	return beadmeta.ExcludesClaimant(map[string]string{beadmeta.ExcludeClaimantsMetadataKey: raw}, identities...)
+}
+
+func scaleDemandExcludeClaimants(demand scaleCheckDemand, workBeadID string) string {
+	if demand.ExcludeClaimants == nil {
+		return ""
+	}
+	return strings.TrimSpace(demand.ExcludeClaimants[strings.TrimSpace(workBeadID)])
+}
+
+func boundScaleDemandCount(requests []SessionRequest, demand scaleCheckDemand) int {
+	_, set := uniqueScaleDemandIDs(demand)
+	n := 0
+	for _, request := range requests {
+		if _, ok := set[strings.TrimSpace(request.WorkBeadID)]; ok {
+			n++
+		}
+	}
+	return n
+}
+
+// anonymousNewDemandCount is the number of fresh sessions scale demand still
+// needs after concrete capacity is bound. Concrete that cannot take a bead
+// (it is excluded from every bead it could serve) does not spend that bead's
+// slot: the bead stays available for a new session, up to the beads left over.
+// A non-positive base is the cap already filled by concrete that is serving
+// demand, and it is not allowed to go below zero when a protection floor
+// outnumbers the cap.
+func anonymousNewDemandCount(newCount, reusedCount, boundCount, residual int) int {
+	extra := reusedCount - boundCount
+	if extra < 0 {
+		extra = 0
+	}
+	if extra > residual {
+		extra = residual
+	}
+	n := (newCount - reusedCount) + extra
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// sessionExcludedFromDemandRequest reports whether info is named by an
+// anonymous demand request's gc.exclude_claimants. A concrete resume request
+// is not anonymous; callers keep that path on its own predicate.
+func sessionExcludedFromDemandRequest(info sessionpkg.Info, request SessionRequest) bool {
+	raw := strings.TrimSpace(request.WorkExcludeClaimants)
+	if raw == "" {
+		return false
+	}
+	return beadmeta.ExcludesClaimant(map[string]string{beadmeta.ExcludeClaimantsMetadataKey: raw}, sessionpkg.AssigneeIdentities(info)...)
 }
 
 func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckDemand, workBeadID string) SessionRequest {
@@ -733,6 +848,7 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	// workspace verified for other work.
 	request.WorktreeSpec = nil
 	request.WorktreeError = ""
+	request.WorkExcludeClaimants = scaleDemandExcludeClaimants(demand, workBeadID)
 	if demand.WorktreeSpecs != nil {
 		request.WorktreeSpec = demand.WorktreeSpecs[workBeadID]
 	}

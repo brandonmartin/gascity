@@ -21,12 +21,13 @@ func ExcludedClaimants(value string) []string {
 }
 
 // ExcludesClaimant reports whether metadata's gc.exclude_claimants names any
-// of identities. It is the one predicate every work-serving decision in
-// `gc hook --claim` answers with: the fresh claim, the ready-assignment
-// promotion, adoption of an in_progress bead, the canonical readback after a
-// claim, and continuation-group pre-assignment. The default work query's jq
-// clause (internal/config) mirrors it so an excluded head never hides allowed
-// work from a bounded read.
+// of identities. It is the predicate `gc hook --claim` answers with (the
+// fresh claim, the ready-assignment promotion, adoption of an in_progress
+// bead, the canonical readback after a claim, and continuation-group
+// pre-assignment) and the predicate `gc bd update --claim` and the pool
+// demand wake answer with. The default work query's jq clause
+// (internal/config) mirrors it so an excluded head never hides allowed work
+// from a bounded read.
 //
 // Matching is exact after trimming, and case-sensitive like route identities:
 // config accepts case-differing agent names as distinct agents. Members are

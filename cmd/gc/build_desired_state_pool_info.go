@@ -307,10 +307,14 @@ func reusablePoolSessionInfosForRequest(
 	// realization memo hands out a shared list (A3).
 	var filtered []session.Info
 	for i, info := range candidates {
-		keep := poolSessionConsumesNewDemandInfo(info) ||
-			(strings.TrimSpace(info.WaitHold) == "" &&
-				!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
-				!metadataTimeInFuture(info.QuarantinedUntil, decisionTime))
+		// An excluded session cannot satisfy this request, including one whose
+		// create is still in flight: keeping it would hand the bead back to a
+		// seat that must not claim it and would consume the slot.
+		keep := !sessionExcludedFromDemandRequest(info, request) &&
+			(poolSessionConsumesNewDemandInfo(info) ||
+				(strings.TrimSpace(info.WaitHold) == "" &&
+					!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
+					!metadataTimeInFuture(info.QuarantinedUntil, decisionTime)))
 		switch {
 		case filtered != nil && keep:
 			filtered = append(filtered, info)

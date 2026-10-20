@@ -325,6 +325,59 @@ func TestBdByIDServesClaimReleaseAndDepListFromTheClassBinding(t *testing.T) {
 	}
 }
 
+func TestBdByIDClaimRefusesExcludedClaimant(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	subject := mustCreateClassBead(t, classStore, beads.Bead{
+		Title: "not for this seat",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.ExcludeClaimantsMetadataKey: "by-id-tester, rig/other-seat",
+		},
+	})
+	t.Setenv("BEADS_ACTOR", "by-id-tester")
+	t.Setenv("GC_ALIAS", "rig/eligible")
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"update", subject.ID, "--claim"}, &stdout, &stderr)
+	if !handled || code == 0 {
+		t.Fatalf("excluded claim = (%d, %t), want a handled refusal: %s", code, handled, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), beadmeta.ExcludeClaimantsMetadataKey) {
+		t.Fatalf("stderr = %q, want the exclusion key named", stderr.String())
+	}
+	claimed, err := classStore.Get(subject.ID)
+	if err != nil {
+		t.Fatalf("re-reading %s: %v", subject.ID, err)
+	}
+	if strings.TrimSpace(claimed.Assignee) != "" {
+		t.Fatalf("assignee = %q, want the excluded claim to leave the bead unowned", claimed.Assignee)
+	}
+
+	// An identity named only through GC_ALIAS is excluded even when BEADS_ACTOR is not.
+	aliasExcluded := mustCreateClassBead(t, classStore, beads.Bead{
+		Title: "not for the alias",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.ExcludeClaimantsMetadataKey: "rig/other-seat",
+		},
+	})
+	t.Setenv("BEADS_ACTOR", "fresh-actor")
+	t.Setenv("GC_ALIAS", "rig/other-seat")
+	stdout.Reset()
+	stderr.Reset()
+	code, handled = maybeRouteBdByID(cityPath, "", []string{"update", aliasExcluded.ID, "--claim"}, &stdout, &stderr)
+	if !handled || code == 0 {
+		t.Fatalf("alias-excluded claim = (%d, %t), want a handled refusal: %s", code, handled, stderr.String())
+	}
+	after, err := classStore.Get(aliasExcluded.ID)
+	if err != nil {
+		t.Fatalf("re-reading %s: %v", aliasExcluded.ID, err)
+	}
+	if strings.TrimSpace(after.Assignee) != "" {
+		t.Fatalf("assignee = %q, want the alias-excluded claim to leave the bead unowned", after.Assignee)
+	}
+}
+
 // bdByIDTreeWireRow is the tree row as a CONSUMER reads it, declared here rather
 // than borrowed from the production type on purpose: what the pack scripts and
 // pr_review.py parse is the JSON, and a test that decodes into the emitter's own

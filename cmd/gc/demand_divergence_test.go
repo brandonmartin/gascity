@@ -187,6 +187,18 @@ func TestDivergenceClassification(t *testing.T) {
 			wantClass: events.DemandClaimBenign, wantStat: "open",
 		},
 		{
+			// The controller counted the row and stamped it as this seat's
+			// trigger, but gc.exclude_claimants names the seat. The seat's
+			// own query correctly does not serve it. That is not the
+			// agreement invariant breaking.
+			name: "open but excludes this session", triggerID: "wb-1",
+			bead: beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey:         "rig/worker",
+				beadmeta.ExcludeClaimantsMetadataKey: "gc__worker-1",
+			}},
+			wantClass: events.DemandClaimBenign, wantStat: "open",
+		},
+		{
 			name: "unreadable", triggerID: "wb-1", readErr: errors.New("store read failed"),
 			wantClass: events.DemandClaimUnknown, wantStat: "unreadable",
 		},

@@ -30,6 +30,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -115,6 +116,13 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	// serving rules. Anything else — a row that moved on, a sibling claim — is
 	// correct pull.
 	if status != "open" || !demandRowServable(bead) || !hookClaimMatchesRoute(bead, opts.RouteTargets) {
+		return status, events.DemandClaimBenign
+	}
+	// A row this seat is forbidden to claim is not the agreement invariant
+	// breaking. The controller may still have counted it — another seat in
+	// the pool can take it — and stamped it onto this seat's trigger. The
+	// seat's query correctly does not serve it.
+	if beadmeta.ExcludesClaimant(bead.Metadata, hookClaimExclusionIdentities(opts)...) {
 		return status, events.DemandClaimBenign
 	}
 	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock()) {

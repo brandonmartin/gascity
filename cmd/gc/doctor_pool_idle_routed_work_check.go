@@ -104,7 +104,8 @@ type poolIdleRoutedWorkScope struct {
 // once per store and grouped by template in memory, and a routed-work lookup
 // is issued only for a template with an idle instance, only in a store that
 // can hold work routed to it — the city store (HQ beads may be routed to any
-// pool) and the template's own rig store. It stops issuing store calls once
+// pool), the template's own rig store, and, for a city-scoped template, every
+// rig store. It stops issuing store calls once
 // the doctor runner abandons the check.
 func (c *poolIdleRoutedWorkCheck) collect(ctx *doctor.CheckContext) (findings []poolIdleRoutedWorkFinding, skipped []string) {
 	if c.newStore == nil {
@@ -133,7 +134,9 @@ func (c *poolIdleRoutedWorkCheck) collect(ctx *doctor.CheckContext) (findings []
 	sort.Strings(templates)
 	for _, sc := range readable {
 		for _, template := range templates {
-			if sc.rig != "" && pools[template] != sc.rig {
+			// A rig store holds work routed to its own rig's pools and, because sling
+			// lets a rig bead route to a city-scope target, to city-scoped pools too.
+			if sc.rig != "" && pools[template] != "" && pools[template] != sc.rig {
 				continue
 			}
 			if ctx.Canceled() {

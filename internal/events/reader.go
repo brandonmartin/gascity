@@ -100,9 +100,15 @@ func ApplyFilter(evts []Event, filter Filter) []Event {
 // line containing none of the wanted types cannot match and is skipped without
 // paying for json.Unmarshal. It is deliberately a substring test on the type
 // value alone, not on `"type":"..."`, so it never depends on how the producer
-// spaces its JSON. False positives (a payload mentioning the type) are fine:
-// matchesFilter still runs on the decoded event.
+// spaces its JSON. A line containing a \u escape is always passed through,
+// since the escape can spell a type without its literal text. False positives
+// (a payload mentioning the type) are fine: matchesFilter still runs on the
+// decoded event.
 func lineMayMatchType(line []byte, f Filter) bool {
+	// A \u escape can spell a type without its literal text; decode such lines.
+	if bytes.Contains(line, []byte(`\u`)) {
+		return true
+	}
 	if f.Type != "" && !bytes.Contains(line, []byte(f.Type)) {
 		return false
 	}

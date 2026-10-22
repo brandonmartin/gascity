@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -545,7 +546,7 @@ func TestSendMailNotifyToHeldSessionQueuesWithoutPoke(t *testing.T) {
 	nudgePokeController = func(string, reconcilekey.Key) error { pokes++; return nil }
 	t.Cleanup(func() { nudgeCityUsesManagedReconciler, nudgePokeController = prevManaged, prevPoke })
 	target := nudgeTarget{cityPath: dir, cfg: &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}}, sessionID: info.ID, sessionName: info.SessionName, identity: "worker", agent: config.Agent{Name: "worker", Provider: "claude"}}
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	got, err := store.Get(info.ID)
@@ -611,7 +612,7 @@ func TestDeliverSessionNudgeToHeldSessionQueuesWithoutWake(t *testing.T) {
 			startsBefore := fake.CountCalls("Start", info.SessionName)
 
 			var stdout, stderr bytes.Buffer
-			if code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", tc.mode, false, &stdout, &stderr); code != 0 {
+			if code := deliverSessionNudgeWithWorker(target, store, fake, tc.mode, &stdout, &stderr); code != 0 {
 				t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 			}
 			if !strings.Contains(stdout.String(), "Queued nudge for "+info.ID) || !strings.Contains(stdout.String(), "held by an operator") {
@@ -658,7 +659,7 @@ func TestDeliverSessionNudgeWithWorkerImmediateResumesUnheldSession(t *testing.T
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -712,7 +713,7 @@ func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedInsteadOfFailing(t 
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0: a drained-but-unobserved submit is proven delivery, not a CLI failure; stderr: %s", code, stderr.String())
 	}
@@ -751,7 +752,7 @@ func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedFromRunningSession(
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0: a drained-but-unobserved submit is proven delivery, not a CLI failure; stderr: %s", code, stderr.String())
 	}
@@ -797,7 +798,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleResumesUnheldClaudeSession(t *test
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -876,7 +877,7 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 	beforeCalls := len(fake.Calls)
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -960,7 +961,7 @@ func TestDeliverSessionNudgeWithWorkerManagedQueueFailureDoesNotWake(t *testing.
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 1", code)
 	}
@@ -1042,7 +1043,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 1", code)
 	}
@@ -1123,7 +1124,7 @@ func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller
 	beforeCalls := len(fake.Calls)
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryImmediate, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 1", code)
 	}
@@ -1185,7 +1186,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResu
 	t.Cleanup(func() { startNudgePoller = prev })
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, false, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1679,7 +1680,7 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	}
 	beforeCalls := len(fake.Calls)
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	if pokes != 1 {
@@ -1757,7 +1758,7 @@ func TestSendMailNotifyWithWorkerCarriesMessageIDAsReference(t *testing.T) {
 		agent:       config.Agent{Name: "mayor", Provider: "claude"},
 	}
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", "gc-mail-42"); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, "gc-mail-42"); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 
@@ -1812,7 +1813,7 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 		agent:       config.Agent{Name: "worker", Provider: "claude"},
 	}
 
-	err = sendMailNotifyWithWorker(target, store, fake, "human", "")
+	err = sendMailNotifyWithWorker(target, store, fake, "")
 	if err == nil {
 		t.Fatal("sendMailNotifyWithWorker: expected queue error")
 	}
@@ -1886,7 +1887,7 @@ func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
 	// Two mails arrive back to back; the first reminder is still pending
 	// (unread) when the second arrives.
 	for i := 0; i < 2; i++ {
-		if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+		if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 			t.Fatalf("sendMailNotifyWithWorker(call %d): %v", i+1, err)
 		}
 	}
@@ -1945,7 +1946,7 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 		agent:       config.Agent{Name: "worker", Provider: "claude"},
 	}
 
-	err = sendMailNotifyWithWorker(target, store, fake, "human", "")
+	err = sendMailNotifyWithWorker(target, store, fake, "")
 	if err == nil {
 		t.Fatal("sendMailNotifyWithWorker: expected wake conflict")
 	}
@@ -2025,7 +2026,7 @@ func TestSendMailNotifyWithWorkerManagedWakePokeFailureIsNonFatal(t *testing.T) 
 	}
 	beforeCalls := len(fake.Calls)
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	if pokes != 1 {
@@ -2171,7 +2172,7 @@ func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *test
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	if !called {
@@ -2270,7 +2271,7 @@ func TestSendMailNotifyWithWorkerWaitIdlePreservesMailSource(t *testing.T) {
 		sessionName: info.SessionName,
 	}
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 
@@ -2317,7 +2318,7 @@ func TestSendMailNotifyWithWorkerAcksDeliveredUnobservedInsteadOfDuplicating(t *
 		sessionName: info.SessionName,
 	}
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 
@@ -2368,7 +2369,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenRuntimeIsGone(t *testing.T) {
 	}
 
 	startCalls := len(fake.Calls)
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 	for _, call := range fake.Calls[startCalls:] {
@@ -2417,7 +2418,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenDirectProviderMisses(t *testing.T) {
 		sessionName: info.SessionName,
 	}
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker: %v", err)
 	}
 
@@ -3326,6 +3327,65 @@ func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable
 	}
 }
 
+// busySessionNudgeProvider defers every Nudge with runtime.ErrSessionBusy,
+// typing nothing, as the tmux provider does for a Codex pane still running a
+// turn when its wait for idle runs out.
+type busySessionNudgeProvider struct {
+	*runtime.Fake
+	calls int
+}
+
+func (p *busySessionNudgeProvider) Nudge(name string, _ []runtime.ContentBlock) error {
+	p.calls++
+	return fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, name)
+}
+
+// A queued nudge the runtime defers because the session is mid-turn stays
+// queued, spends none of its bounded attempts, and is not claimed again until
+// the retry delay has passed.
+func TestTryDeliverQueuedNudgesByPollerKeepsABusyDeferralQueued(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "check hook output", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake := &busySessionNudgeProvider{Fake: runtime.NewFake()}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{"sess-worker": idleSince}
+	target := nudgeTarget{
+		cityPath:    dir,
+		transport:   "acp",
+		agent:       config.Agent{Name: "worker", Session: "acp"},
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: "sess-worker",
+	}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
+
+	for pass := 1; pass <= 2; pass++ {
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
+		if err != nil || delivered {
+			t.Fatalf("pass %d: delivered %t err %v, want the deferred nudge left queued", pass, delivered, err)
+		}
+	}
+	if fake.calls != 1 {
+		t.Fatalf("nudge calls = %d, want 1: the deferral waits out the retry delay before the next try", fake.calls)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	if item := state.Pending[0]; item.Attempts != 0 || !item.DeliverAfter.After(time.Now()) {
+		t.Fatalf("pending item attempts %d deliver_after %v, want 0 attempts and a retry in the future", item.Attempts, item.DeliverAfter)
+	}
+}
+
 func TestQueuedNudgeReleaseAfter(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	backoff := now.Add(defaultQueuedNudgeRetryDelay)
@@ -3341,7 +3401,9 @@ func TestQueuedNudgeReleaseAfter(t *testing.T) {
 		{"session mapping of the runtime refusal", fmt.Errorf("%w: %w", session.ErrPendingInteraction, runtimeRefusal), true, time.Time{}},
 		{"permission prompt the runtime would not type into", fmt.Errorf("sending message to session: %w: sess-worker", runtime.ErrPendingInteraction), true, backoff},
 		{"session pending-interaction refusal", session.ErrPendingInteraction, true, backoff},
+		{"runtime could not be observed", fmt.Errorf("sending message to session: %w: bridge down", runtime.ErrRuntimeUnavailable), true, backoff},
 		{"busy timeout", errors.New(`agent "sess-worker" busy, timed out waiting for idle`), false, time.Time{}},
+		{"runtime deferred a busy session", fmt.Errorf("sending message to session: %w: session %q is still running a turn", runtime.ErrSessionBusy, "sess-worker"), true, backoff},
 		{"submit delivered but unobserved", fmt.Errorf("nudging: %w", tmux.ErrNudgeSubmitDeliveredUnobserved), false, time.Time{}},
 	}
 	for _, tc := range cases {
@@ -5233,7 +5295,7 @@ start_command = "echo"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, true, &stdout, &stderr)
+	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNudge = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -5307,23 +5369,25 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 	}
 }
 
-func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
+func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) {
+	// A dead letter with no BeadID has no terminal shadow to confirm, so it
+	// ages out on DeadAt alone; a zero DeadAt gives no age and is kept. A
+	// shadow-backed item past retention is still kept when no store is
+	// available to confirm its terminal record.
 	dir := t.TempDir()
 	now := time.Now()
 
-	// Directly inject a dead item without a BeadID into the queue state.
 	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		state.Dead = append(state.Dead, queuedNudge{
-			ID:      "n-orphan",
-			Agent:   "worker",
-			Source:  "session",
-			Message: "no bead record",
-			DeadAt:  now.Add(-3 * time.Hour),
-		})
+		state.Dead = append(state.Dead,
+			queuedNudge{ID: "n-old", Agent: "worker", Source: "session", Message: "old", DeadAt: now.Add(-3 * time.Hour)},
+			queuedNudge{ID: "n-recent", Agent: "worker", Source: "session", Message: "recent", DeadAt: now.Add(-30 * time.Minute)},
+			queuedNudge{ID: "n-undated", Agent: "worker", Source: "session", Message: "undated"},
+			queuedNudge{ID: "n-shadowed", BeadID: "gc-shadow", Agent: "worker", Source: "session", Message: "shadowed", DeadAt: now.Add(-3 * time.Hour)},
+		)
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("seed dead item: %v", err)
+		t.Fatalf("seed dead items: %v", err)
 	}
 
 	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
@@ -5333,12 +5397,65 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
 	}
 
-	_, _, dead, err := listQueuedNudges(dir, "worker", now)
+	state, err := nudgequeue.LoadState(dir)
 	if err != nil {
-		t.Fatalf("listQueuedNudges: %v", err)
+		t.Fatalf("LoadState: %v", err)
 	}
-	if len(dead) != 1 || dead[0].ID != "n-orphan" {
-		t.Fatalf("dead = %v, want [n-orphan] retained (no bead record)", dead)
+	got := make([]string, 0, len(state.Dead))
+	for _, item := range state.Dead {
+		got = append(got, item.ID)
+	}
+	slices.Sort(got)
+	if want := []string{"n-recent", "n-shadowed", "n-undated"}; !slices.Equal(got, want) {
+		t.Fatalf("dead IDs = %v, want %v", got, want)
+	}
+}
+
+func TestRunNudgeQueueMaintenanceSweep_EmptiesQueueOfAgedShadowlessDeferredSubmit(t *testing.T) {
+	// A deferred submit (internal/session/submit.go) is queued without a
+	// bead shadow. Once dead past retention it must not hold the queue
+	// non-empty, or nudgeQueueIsEmpty's fast path is lost city-wide.
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	created := now.Add(-3 * time.Hour)
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		state.Dead = append(state.Dead, nudgequeue.Item{
+			ID:           "nudge-deferred1",
+			Agent:        "worker",
+			SessionID:    "gc-worker",
+			Source:       "session",
+			Message:      "deferred submit",
+			CreatedAt:    created,
+			DeliverAfter: created,
+			ExpiresAt:    created.Add(time.Hour),
+			DeadAt:       now.Add(-2 * time.Hour),
+			LastError:    "expired",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed queue state: %v", err)
+	}
+	if nudgeQueueIsEmpty(dir) {
+		t.Fatal("nudgeQueueIsEmpty before sweep = true, want false")
+	}
+
+	if err := runNudgeQueueMaintenanceSweep(dir, now); err != nil {
+		t.Fatalf("runNudgeQueueMaintenanceSweep: %v", err)
+	}
+
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 0 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("queue after sweep = pending %d, in-flight %d, dead %d; want all empty", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	if !nudgeQueueIsEmpty(dir) {
+		t.Fatal("nudgeQueueIsEmpty after sweep = false, want true")
 	}
 }
 
@@ -7217,7 +7334,7 @@ func TestNudgeOverACrashedAgentQueues(t *testing.T) {
 			dir, store, fake, target, info := crashed(t)
 			before := len(fake.Calls)
 			var stdout, stderr bytes.Buffer
-			code := deliverSessionNudgeWithWorker(target, store.Store, fake, "check deploy status", mode, false, &stdout, &stderr)
+			code := deliverSessionNudgeWithWorker(target, store.Store, fake, mode, &stdout, &stderr)
 			if code != 0 || typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 {
 				t.Fatalf("code %d, typed %d, queued %d; want 0, none typed, one queued; stderr=%q", code, typed(fake, info.SessionName, before), queued(t, dir, target), stderr.String())
 			}
@@ -7229,7 +7346,7 @@ func TestNudgeOverACrashedAgentQueues(t *testing.T) {
 	t.Run("mail notify", func(t *testing.T) {
 		dir, store, fake, target, info := crashed(t)
 		before := len(fake.Calls)
-		if err := sendMailNotifyWithWorker(target, store.Store, fake, "human", ""); err != nil {
+		if err := sendMailNotifyWithWorker(target, store.Store, fake, ""); err != nil {
 			t.Fatal(err)
 		}
 		if typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 {

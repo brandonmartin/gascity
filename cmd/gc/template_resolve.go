@@ -124,6 +124,12 @@ type TemplateParams struct {
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
+	// NamedCanonicalOnly marks an on_demand configured named session that is
+	// desired only because the tick's session snapshot held its canonical
+	// bead (no assigned work wants it). syncSessionBeads creates no row for
+	// it when its fresh read finds that bead gone: an operator close won
+	// the race (mc-58gr9).
+	NamedCanonicalOnly bool
 	// ManualSession marks a discovered root created outside pool scale logic
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
@@ -597,7 +603,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// is populated" and § "Stage 2 runtime gate"). Stage-2 eligible
 	// runtimes (tmux for v0.15.1) get a PreStart entry for per-session
 	// materialization into non-scope-root workdirs, and every eligible
-	// agent gets per-skill fingerprint entries so catalog edits drain.
+	// agent gets per-skill FingerprintExtra entries. Those are NextStart
+	// (runtime.FingerprintExtraChangePolicy): a skill edit, or a skill
+	// added or removed while another remains, reaches the next start's
+	// materialization without draining a running session. The PreStart
+	// entry is a Restart input present only while the agent has a skill,
+	// so a non-scope-root agent drains once when its first skill is added
+	// or its last removed, a shared catalog that loads empty included.
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.

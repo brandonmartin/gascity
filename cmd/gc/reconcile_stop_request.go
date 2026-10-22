@@ -37,6 +37,16 @@ func readStopKeys(meta map[string]string) rawStopKeys {
 	}
 }
 
+// v2SignaledUnacked reports a row whose stop request is v2's own: the
+// controller half at the row's generation, with no ack half at that
+// generation, an agent's or an operator's (an ack of another incarnation
+// acks nothing of this one's; mc-7i9i7). Legacy's rollback guard reads it (v2SignaledStopHeldForAttach,
+// CONTRACT v5.10v): the accessor's projection, so legacy names no key.
+func v2SignaledUnacked(meta map[string]string) bool {
+	k, gen := readStopKeys(meta), strings.TrimSpace(meta["generation"])
+	return k.rawIntentReason != "" && k.rawIntentIncarnation == gen && k.rawAckIncarnation != gen
+}
+
 // stopPhase is how far a stop request has come.
 type stopPhase uint8
 
@@ -182,4 +192,15 @@ func operatorUndrainPatch(meta map[string]string) session.MetadataPatch {
 func rowGeneration(meta map[string]string) int64 {
 	gen, _ := strconv.ParseInt(strings.TrimSpace(meta["generation"]), 10, 64)
 	return gen
+}
+
+// stopRequestStands reports an active stop request on a row read outside
+// the census (info, with its persisted metadata meta): the work ladder's
+// gate, which must not nudge a seat being stopped. It is activeStop's
+// answer, so the keys keep one reader.
+func stopRequestStands(info session.Info, meta map[string]string) bool {
+	row := newCensusRow(rowKey{ID: info.ID}, info)
+	row.StopKeys = readStopKeys(meta)
+	_, active := activeStop(row)
+	return active
 }

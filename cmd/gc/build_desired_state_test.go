@@ -4256,6 +4256,40 @@ func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) 
 	}
 }
 
+func TestBuildDesiredStateFreshNamepoolSkipsExcludedClaimants(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title: "independent review", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":                       "pack.worker",
+			beadmeta.ExcludeClaimantsMetadataKey: "pack.a,pack.b,pack.c,pack.d",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "worker", BindingName: "pack", StartCommand: "true",
+			NamepoolNames:     []string{"a", "b", "c", "d", "e"},
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
+		}},
+	}
+	var stderr bytes.Buffer
+	result := buildDesiredStateWithSessionBeads("test-city", t.TempDir(), time.Now().UTC(),
+		cfg, runtime.NewFake(), store, nil, &sessionBeadSnapshot{}, nil, &stderr)
+	if len(result.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1; stderr=%s", len(result.State), stderr.String())
+	}
+	for _, tp := range result.State {
+		if tp.Alias != "pack.e" || tp.Env["GC_TRIGGER_BEAD_ID"] != work.ID {
+			t.Fatalf("fresh session alias=%q trigger=%q, want pack.e serving %s; stderr=%s",
+				tp.Alias, tp.Env["GC_TRIGGER_BEAD_ID"], work.ID, stderr.String())
+		}
+	}
+}
+
 func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{

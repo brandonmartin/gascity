@@ -43,9 +43,9 @@ type SessionRequest struct {
 	// set: the parent session to fork this launch off of (warm-arm fork-launch).
 	BrainParentSID string
 	// WorkExcludeClaimants is the driving bead's raw gc.exclude_claimants
-	// value. Empty means the bead excludes nobody. Anonymous demand reuse
-	// skips a session named here so the request is not handed back to a seat
-	// that must not claim it.
+	// value. Empty means the bead excludes nobody. Anonymous demand reuse and
+	// fresh naming skip identities named here so the request is not handed
+	// to a seat that must not claim it.
 	WorkExcludeClaimants string
 	// FloorGuarantee marks a "new" request that satisfies an agent's
 	// min_active_sessions floor, whether reserveNestedCapFloors minted it for

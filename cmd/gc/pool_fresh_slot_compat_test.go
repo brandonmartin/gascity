@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -34,6 +35,79 @@ func freshSlotTestParams(cfg *config.City, infos ...sessionpkg.Info) *agentBuild
 		sessionOccupancyInfos:            infos,
 		sessionSnapshotComplete:          true,
 		sessionSnapshotCompletenessKnown: true,
+	}
+}
+
+// Fresh naming must respect the driving bead without reserving names that a
+// later, unrestricted request can still use.
+func TestSelectOrPlanPoolSessionBeadFreshExclusions(t *testing.T) {
+	for _, memo := range []bool{false, true} {
+		for _, tc := range []struct {
+			name      string
+			excluded  string
+			max       int
+			canonical bool
+			want      int
+			wantErr   bool
+		}{
+			{name: "skip excluded names", excluded: " repo/pack.a, ,repo/pack.b ", want: 3},
+			{name: "all names excluded", excluded: "repo/pack.a,repo/pack.b,repo/pack.c", wantErr: true},
+			{name: "in-cap names excluded", excluded: "repo/pack.a,repo/pack.b", max: 2, wantErr: true},
+			{name: "pool route is not a seat", excluded: "repo/pack.worker", want: 1},
+			{name: "identities are case sensitive", excluded: "repo/pack.A", want: 1},
+			{name: "canonical excluded", excluded: "repo/pack.worker", canonical: true, wantErr: true},
+			{name: "canonical allowed", excluded: "repo/pack.other", canonical: true, want: 0},
+		} {
+			t.Run(fmt.Sprintf("%s/memo=%t", tc.name, memo), func(t *testing.T) {
+				agent := config.Agent{
+					Name: "worker", Dir: "repo", BindingName: "pack",
+					NamepoolNames: []string{"a", "b", "c"}, MaxActiveSessions: intPtr(3),
+				}
+				if tc.max > 0 {
+					agent.MaxActiveSessions = intPtr(tc.max)
+				}
+				if tc.canonical {
+					agent.NamepoolNames = nil
+					agent.MaxActiveSessions = intPtr(1)
+				}
+				cfg := &config.City{Agents: []config.Agent{agent}}
+				cfgAgent := &cfg.Agents[0]
+				bp := freshSlotTestParams(cfg)
+				if memo {
+					bp.realizeMemo = &poolRealizeMemo{index: newPassIndex(), cfg: cfg, agent: cfgAgent}
+				}
+				usedSlots := map[int]bool{}
+				request := SessionRequest{Template: cfgAgent.QualifiedName(), Tier: "new", WorkExcludeClaimants: tc.excluded}
+				_, _, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, request.Template, nil, request, time.Time{}, map[string]bool{}, usedSlots)
+				if tc.wantErr {
+					if !errors.Is(err, errPoolSessionNameUnavailable) || plan != nil {
+						t.Fatalf("plan = %+v, err = %v, want unavailable", plan, err)
+					}
+					if len(usedSlots) != 0 {
+						t.Fatalf("excluded names leaked slots: %v", usedSlots)
+					}
+				} else {
+					if err != nil || plan == nil || plan.slot != tc.want {
+						t.Fatalf("plan = %+v, err = %v, want slot %d", plan, err, tc.want)
+					}
+					if len(usedSlots) != 1 || !usedSlots[tc.want] {
+						t.Fatalf("used slots = %v, want only slot %d", usedSlots, tc.want)
+					}
+					if tc.want <= 1 {
+						return
+					}
+				}
+				request.WorkExcludeClaimants = ""
+				_, _, plan, err = selectOrPlanPoolSessionBead(bp, cfgAgent, request.Template, nil, request, time.Time{}, map[string]bool{}, usedSlots)
+				want := 1
+				if tc.canonical {
+					want = 0
+				}
+				if err != nil || plan == nil || plan.slot != want {
+					t.Fatalf("unrestricted plan = %+v, err = %v, want unreserved slot %d", plan, err, want)
+				}
+			})
+		}
 	}
 }
 
@@ -129,7 +203,7 @@ func TestClaimFreshPoolSlotInfoCapacityMatrix(t *testing.T) {
 			for slot, value := range tc.used {
 				used[slot] = value
 			}
-			got, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], used)
+			got, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, used)
 			if tc.wantErr {
 				if !errors.Is(err, errPoolSessionNameUnavailable) {
 					t.Fatalf("claimFreshPoolSlotInfo error = %v, want errPoolSessionNameUnavailable", err)
@@ -156,7 +230,7 @@ func TestClaimFreshPoolSlotInfoHolderAttributionAndLowestGap(t *testing.T) {
 
 	t.Run("unrelated stray pool slot is ignored", func(t *testing.T) {
 		stray := freshSlotTestInfo("stray", "other", "other-1", 1)
-		got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg, stray), &cfg.Agents[0], map[int]bool{})
+		got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg, stray), &cfg.Agents[0], SessionRequest{}, map[int]bool{})
 		if err != nil || got != 1 {
 			t.Fatalf("slot = %d, err = %v, want free slot 1", got, err)
 		}
@@ -164,7 +238,7 @@ func TestClaimFreshPoolSlotInfoHolderAttributionAndLowestGap(t *testing.T) {
 
 	t.Run("foreign row holding exact concrete identity reserves it", func(t *testing.T) {
 		foreign := freshSlotTestInfo("foreign", "other", "worker-1", 1)
-		got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg, foreign), &cfg.Agents[0], map[int]bool{})
+		got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg, foreign), &cfg.Agents[0], SessionRequest{}, map[int]bool{})
 		if err != nil || got != 2 {
 			t.Fatalf("slot = %d, err = %v, want slot 2 after exact foreign holder", got, err)
 		}
@@ -174,7 +248,7 @@ func TestClaimFreshPoolSlotInfoHolderAttributionAndLowestGap(t *testing.T) {
 		legacyTemplate := freshSlotTestInfo("legacy-template", "worker", "", 1)
 		legacyAlias := sessionpkg.Info{ID: "legacy-alias", Template: "other", Alias: "worker-2", PoolManaged: true, MetadataState: "awake", SessionNameMetadata: "legacy-alias-runtime"}
 		legacySessionName := sessionpkg.Info{ID: "legacy-name", Template: "worker", PoolManaged: true, MetadataState: "awake", SessionNameMetadata: "worker-3"}
-		got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg, legacyTemplate, legacyAlias, legacySessionName), &cfg.Agents[0], map[int]bool{})
+		got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg, legacyTemplate, legacyAlias, legacySessionName), &cfg.Agents[0], SessionRequest{}, map[int]bool{})
 		if err != nil || got != 4 {
 			t.Fatalf("slot = %d, err = %v, want slot 4 after legacy holders", got, err)
 		}
@@ -190,15 +264,15 @@ func TestClaimFreshPoolSlotInfoHolderAttributionAndLowestGap(t *testing.T) {
 		quarantined.QuarantinedUntil = future
 		used := map[int]bool{}
 		bp := freshSlotTestParams(cfg, wait, held, quarantined)
-		got, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], used)
+		got, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, used)
 		if err != nil || got != 3 {
 			t.Fatalf("first slot = %d, err = %v, want lowest gap 3", got, err)
 		}
-		got, err = claimFreshPoolSlotInfo(bp, &cfg.Agents[0], used)
+		got, err = claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, used)
 		if err != nil || got != 5 {
 			t.Fatalf("second slot = %d, err = %v, want 5", got, err)
 		}
-		if _, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], used); !errors.Is(err, errPoolSessionNameUnavailable) {
+		if _, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, used); !errors.Is(err, errPoolSessionNameUnavailable) {
 			t.Fatalf("exhaustion error = %v, want errPoolSessionNameUnavailable", err)
 		}
 	})
@@ -211,11 +285,11 @@ func TestCanonicalSingletonFreshSelectionIsUnique(t *testing.T) {
 	bp := freshSlotTestParams(cfg)
 	usedSlots := map[int]bool{}
 
-	first, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], usedSlots)
+	first, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, usedSlots)
 	if err != nil || first != 0 || !usedSlots[0] {
 		t.Fatalf("first canonical selection = %d used=%#v err=%v, want reserved slot 0", first, usedSlots, err)
 	}
-	if _, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], usedSlots); !errors.Is(err, errPoolSessionNameUnavailable) {
+	if _, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, usedSlots); !errors.Is(err, errPoolSessionNameUnavailable) {
 		t.Fatalf("second canonical selection error = %v, want unavailable", err)
 	}
 
@@ -223,7 +297,7 @@ func TestCanonicalSingletonFreshSelectionIsUnique(t *testing.T) {
 	holder.PoolSlot = ""
 	holder.SessionNameMetadata = "worker"
 	bp = freshSlotTestParams(cfg, holder)
-	if _, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], map[int]bool{}); !errors.Is(err, errPoolSessionNameUnavailable) {
+	if _, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, map[int]bool{}); !errors.Is(err, errPoolSessionNameUnavailable) {
 		t.Fatalf("canonical holder error = %v, want unavailable", err)
 	}
 }
@@ -254,7 +328,7 @@ func TestFreshSlotIdentityIgnoresWorkspaceAndRigCaps(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig-a", MaxActiveSessions: &inheritedCap}},
 		Agents:    []config.Agent{agent},
 	}
-	got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg), &cfg.Agents[0], map[int]bool{1: true})
+	got, err := claimFreshPoolSlotInfo(freshSlotTestParams(cfg), &cfg.Agents[0], SessionRequest{}, map[int]bool{1: true})
 	if err != nil || got != 2 {
 		t.Fatalf("slot = %d, err = %v, want slot 2 despite inherited nested caps", got, err)
 	}
@@ -281,7 +355,7 @@ func TestSessionOccupancyInfosForRefreshPreservesCrossStoreOccupancy(t *testing.
 	createdThisBuild := freshSlotTestInfo("created", "worker", "worker-3", 3)
 	bp := freshSlotTestParams(cfg, primary, createdThisBuild)
 	bp.sessionOccupancyInfos = []sessionpkg.Info{primary, foreign}
-	got, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], map[int]bool{})
+	got, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, map[int]bool{})
 	if err != nil || got != 4 {
 		t.Fatalf("unioned refresh/current occupancy slot = %d err=%v, want 4", got, err)
 	}

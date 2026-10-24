@@ -3821,7 +3821,7 @@ func ensureDependencyOnlyTemplate(
 	}
 
 	if bp.beadStore == nil {
-		slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, make(map[int]bool))
+		slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, SessionRequest{}, make(map[int]bool))
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 			return
@@ -5351,7 +5351,7 @@ func selectOrPlanPoolSessionBead(
 	if !bp.hasCompleteSessionSnapshot() {
 		return session.Info{}, 0, nil, errPoolSessionCreatePartial
 	}
-	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, usedSlots)
+	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, request, usedSlots)
 	if err != nil {
 		return session.Info{}, 0, nil, err
 	}
@@ -5547,13 +5547,27 @@ func poolAliasCollisionFromInfos(infos []session.Info, alias string) error {
 // adding them to the shared request-order usedSlots map would let an anonymous
 // request processed first block a later concrete resume of that same holder.
 // Only the newly selected slot is published to usedSlots.
-func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool) (int, error) {
+// Excluded identities stay free for other requests in the same build.
+func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, request SessionRequest, usedSlots map[int]bool) (int, error) {
 	upper, unlimited, canonical, err := freshPoolSlotUpperBound(cfgAgent)
 	if err != nil {
 		return 0, err
 	}
+	excluded := func(slot int) bool {
+		if strings.TrimSpace(request.WorkExcludeClaimants) == "" {
+			return false
+		}
+		_, identity, _ := poolDesiredRequestIdentity(cfgAgent, slot)
+		// A fresh row has no bead ID, runtime name, or alias history yet.
+		// Check its concrete identity through the same assignee predicate as
+		// reuse, before publishing any reservation for this request.
+		return sessionExcludedFromDemandRequest(session.Info{Alias: identity}, request)
+	}
 	occupancyInfos := freshPoolOccupancyInfos(bp)
 	if canonical {
+		if excluded(0) {
+			return 0, fmt.Errorf("%w: canonical pool template %q is excluded from request", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+		}
 		if usedSlots[0] {
 			return 0, fmt.Errorf("%w: canonical pool template %q is already selected", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
 		}
@@ -5572,13 +5586,13 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		// The v2 realization memo counts its occupancy's slots once (A3).
 		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
 			for slot := 1; unlimited || slot <= upper; slot++ {
-				if usedSlots[slot] || held[slot] {
+				if usedSlots[slot] || held[slot] || excluded(slot) {
 					continue
 				}
 				usedSlots[slot] = true
 				return slot, nil
 			}
-			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot eligible for request", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
 		}
 	}
 	occupied := make(map[int]bool, len(usedSlots))
@@ -5604,13 +5618,13 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		}
 	}
 	for slot := 1; unlimited || slot <= upper; slot++ {
-		if occupied[slot] {
+		if occupied[slot] || excluded(slot) {
 			continue
 		}
 		usedSlots[slot] = true
 		return slot, nil
 	}
-	return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+	return 0, fmt.Errorf("%w: pool template %q has no free concrete slot eligible for request", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
 }
 
 func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (map[string]string, error) {
@@ -7306,7 +7320,7 @@ func selectOrPlanDependencyPoolSessionBead(
 		slot := existingPoolSlotWithConfigInfo(bp.city, cfgAgent, info)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			var err error
-			slot, err = claimFreshPoolSlotInfo(bp, cfgAgent, make(map[int]bool))
+			slot, err = claimFreshPoolSlotInfo(bp, cfgAgent, SessionRequest{}, make(map[int]bool))
 			if err != nil {
 				return session.Info{}, 0, nil, err
 			}
@@ -7317,7 +7331,7 @@ func selectOrPlanDependencyPoolSessionBead(
 	if !bp.hasCompleteSessionSnapshot() {
 		return session.Info{}, 0, nil, errPoolSessionCreatePartial
 	}
-	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, make(map[int]bool))
+	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, SessionRequest{}, make(map[int]bool))
 	if err != nil {
 		return session.Info{}, 0, nil, err
 	}

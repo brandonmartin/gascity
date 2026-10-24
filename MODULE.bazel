@@ -447,6 +447,16 @@ exports_files(["bd"])
 """,
 )
 
+# deps.env BD_CURRENT_VERSION, paired with the native library in go.mod.
+http_archive(
+    name = "bd_bin_v1_3_2",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.2/beads_1.3.2_linux_amd64.tar.gz"],
+    sha256 = "c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e",
+    build_file_content = """
+exports_files(["bd"])
+""",
+)
+
 # deps.env BD_PREV_VERSION, the minimum-supported bd: the "previous" cell of
 # the bd CLI contract (//test/acceptance:bd_cli_contract_prev_test).
 http_archive(

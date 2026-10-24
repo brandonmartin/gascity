@@ -64,6 +64,12 @@ new one, and files an audit event bead. It does **not** touch `status`,
 `owner`, or `metadata` — update those separately (or add a dependency edge)
 if they also need to change.
 
+The two values above remain the only supported values for `bd set-state`.
+Gas City's work-serving and route-recovery filters treat any label beginning
+with `hold:` as parked, including an unsupported or legacy suffix. That keeps a
+stray label in the reserved namespace from being counted or handed to a worker
+as actionable work; it does not make that suffix a third canonical hold value.
+
 ## Retired labels
 
 These labels are legacy. If you see one on a live bead, treat it as drift
@@ -97,13 +103,14 @@ different:**
   `ready-to-build`), not a pause-state label. It may legitimately co-occur
   with `hold:mayor`.
 
-## This is a data convention, not SDK behavior
+## Convention and dispatch behavior
 
 Nothing in this page requires or implies special-casing any role name in Go.
 `hold:mayor` and `hold:external` are plain label values in this project's own
-bd data, and *which* value to reach for is enforced by convention — this
-document, PR review, and `bd set-state`'s dimension semantics — not by SDK
-code.
+bd data, and *which* value to set is enforced by convention — this document, PR
+review, and `bd set-state`'s dimension semantics. The work-serving check is
+role-neutral: it recognizes the reserved prefix and does not interpret the
+suffix or name a required actor.
 
 Gas City's "ZERO hardcoded roles" invariant is unaffected. The dispatcher does
 read these two values, from the single shared definition in
@@ -125,11 +132,11 @@ Restoring a lost pool route is a **do** decision too. A pack that parks
 finished work on a hold usually clears its `gc.routed_to` at the same time,
 because the next actor is not the pool that worked it. The controller's
 route-restore lanes (the detached-orphan sweep and `gc.run_target` route
-recovery) leave a held bead's route empty. Once the hold lifts, the bead is
-recoverable again. These lanes know only the two canonical values. A pack
-that parks with a label of its own should also set a bd status (`blocked` or
-`deferred`) or a canonical hold, or the controller will treat the bead as
-detached and restore its route.
+recovery) leave a bead with any `hold:` label unrouted. Once the hold lifts,
+the bead is recoverable again. A pack that parks with a label outside the
+`hold:` namespace should also set a bd status (`blocked` or `deferred`) or a
+canonical hold, or the controller will treat the bead as detached and restore
+its route.
 
 ## See also
 

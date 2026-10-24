@@ -1617,7 +1617,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) ||
 			// Pre-assignment is a decision about what to DO with a bead, and a
-			// canonical dispatch hold (beadmeta.DispatchHoldLabels) means the
+			// hold:<reason> dispatch label means the
 			// sibling's required next actor is, by construction, not this
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).

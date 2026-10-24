@@ -227,6 +227,11 @@ becoming more useful as models improve — it becomes LESS useful instead.
 - Comments describe current behavior; don't narrate removed functionality.
 - Role names never appear in Go code. If you're writing `if role == "mayor"`,
   it's a design error.
+- **Dispatch holds use the reserved `hold:` namespace.** `hold:mayor` and
+  `hold:external` are the only supported values, but route-scoped demand,
+  hook serving, and route recovery must treat any `hold:<reason>` label as
+  parked. Keep the native predicates and generated query filters aligned;
+  assigned ownership accounting remains hold-transparent.
 - **Tmux safety:** Never run bare `tmux kill-server` as cleanup. Never kill the
   default tmux server. If tmux cleanup is required, target only the known
   city/test socket explicitly with `tmux -L <socket> ...`, or prefer `gc stop`

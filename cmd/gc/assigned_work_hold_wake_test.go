@@ -43,10 +43,10 @@ func heldAssignedOpenWorkCity() *config.City {
 	}
 }
 
-// heldLabelVariants is every canonical hold value plus a case/space variant the
-// hook's EqualFold filter also strips.
+// heldLabelVariants includes canonical holds and additional hold:<reason>
+// values, with case and whitespace variants for the prefix-aware filter.
 func heldLabelVariants() []string {
-	return append(append([]string(nil), beadmeta.DispatchHoldLabels...), " Hold:External ")
+	return append(append([]string(nil), beadmeta.DispatchHoldLabels...), " Hold:External ", "hold:mayor-go", " Hold:Mayor-Go ")
 }
 
 func TestBuildDesiredState_OnDemandNamedSession_HeldAssignedOpenWorkIsNotWakeDemand(t *testing.T) {

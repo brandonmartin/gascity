@@ -128,6 +128,18 @@ func agreementRows() []agreementRow {
 			wantServable: false,
 		},
 		{
+			// The hold namespace is open-ended. Pack routes can carry a more
+			// specific hold reason than the two canonical values, and demand must
+			// still agree with the hook's prefix-aware hold filter.
+			name: "routed bead with a namespaced hold reason",
+			bead: beads.Bead{
+				ID: "a-17", Status: "open", Type: "task",
+				Labels:   []string{"hold:mayor-go"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: false,
+		},
+		{
 			// The discriminating row for a label the worker's query excludes that is
 			// NOT a dispatch hold: bd's native human label, a bead parked for a
 			// person. beadmeta.DispatchHoldLabels names only the two canonical
@@ -606,7 +618,7 @@ func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
 	// query is compared with the sh -c single-quote escaping undone, so the pin
 	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true"))] | .[:1]'`
+	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true")) | select(([ (.labels // [])[] | select((if type == "string" then (ascii_downcase | startswith("hold:")) else false end)) ] | length) == 0)] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}

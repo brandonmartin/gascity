@@ -33,10 +33,13 @@ func TestHasDispatchHold(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"unrelated", []string{"mysql-cutover", "needs-mayor", "mpr-human-hold"}, false},
-		{"other hold value", []string{"hold:polecat"}, false},
+		{"other hold value", []string{"hold:polecat"}, true},
+		{"hold namespace suffix", []string{"hold:mayor-go"}, true},
+		{"case folded hold namespace", []string{" Hold:Mayor-Go "}, true},
 		{"hold external", []string{"x", HoldExternalLabel}, true},
 		{"hold mayor", []string{HoldMayorLabel}, true},
 		{"case and space folded", []string{"  Hold:External "}, true},
+		{"hold-like unrelated labels", []string{"holding-pattern", "hold", "needs-mayor"}, false},
 	}
 	for _, tc := range cases {
 		if got := HasDispatchHold(tc.labels); got != tc.want {

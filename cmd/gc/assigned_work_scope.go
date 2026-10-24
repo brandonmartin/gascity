@@ -489,7 +489,7 @@ func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadL
 }
 
 // assignedOpenWorkHeld reports whether b is OPEN assigned work the hook will
-// not serve because it is parked on a canonical dispatch hold or its
+// not serve because it is parked in the hold:<reason> namespace or its
 // gc.exclude_claimants metadata names the assignee. Such a row is not work for
 // that session, so it must not be wake demand: counting it wakes a session whose
 // hook immediately drain-acks no_work, and the controller re-wakes it on the

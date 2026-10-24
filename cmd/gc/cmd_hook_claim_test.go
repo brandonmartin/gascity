@@ -509,8 +509,8 @@ func TestDoHookClaimSkipsBudgetDeferredStaleAssigneeCandidate(t *testing.T) {
 }
 
 // TestPreassignHookContinuationGroupSkipsHeldSiblings is the #6026 regression:
-// a continuation sibling carrying a canonical dispatch hold label
-// (beadmeta.DispatchHoldLabels) must never be pre-assigned to the claimant,
+// a continuation sibling in the hold:<reason> namespace must never be
+// pre-assigned to the claimant,
 // even when otherwise eligible (open, unassigned, route-matching). Pinning an
 // agent's name onto a bead deliberately parked hold:mayor/hold:external
 // contradicts the hold contract: the required next actor is, by construction,
@@ -519,13 +519,14 @@ func TestDoHookClaimSkipsBudgetDeferredStaleAssigneeCandidate(t *testing.T) {
 // The case and padded variants pin the trimmed, case-insensitive comparison
 // that keeps this seam agreeing with the hook-serve filter
 // (isHeldHookCandidate); the lookalike sibling pins the other direction —
-// hold-ish labels that are not a canonical value are ordinary work and must
-// still be pre-assigned.
+// labels that only look hold-ish but do not start with hold: are ordinary work
+// and must still be pre-assigned.
 func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 	var heldLabels []string
 	for _, hold := range beadmeta.DispatchHoldLabels {
 		heldLabels = append(heldLabels, hold, strings.ToUpper(hold), " "+hold+" ")
 	}
+	heldLabels = append(heldLabels, "hold:mayor-go", " Hold:Mayor-Go ")
 	for _, label := range heldLabels {
 		t.Run(label, func(t *testing.T) {
 			claimed := beads.Bead{

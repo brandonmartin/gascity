@@ -11,8 +11,8 @@ import (
 // This file expresses the ga-x9kptu / ga-5736js acceptance criteria at the
 // shell-generator level: route-scoped, unassigned pool-demand queries (Tier
 // 3, and the reconciler's count-form) must exclude beads carrying a
-// beadmeta.DispatchHoldLabels value, while the assignee-scoped ephemeral
-// probe (Tier 1/2) stays hold-transparent.
+// beadmeta.DispatchHoldLabels value and the reserved hold:<reason> namespace,
+// while the assignee-scoped ephemeral probe (Tier 1/2) stays hold-transparent.
 
 func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
 	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
@@ -75,18 +75,52 @@ func TestPoolDemandCountShellInheritsDispatchHoldLabelExclusion(t *testing.T) {
 }
 
 // bd's native human label parks a bead for a person. It is not a dispatch hold:
-// beadmeta.DispatchHoldLabels names only the two canonical holds, and the hook's
-// held-candidate filter and the in_progress serve gate iterate that list, so the
-// exclusion rides the pool-demand serve rules alone. Every route-scoped query
-// renders from those rules and must carry it; the assignee-scoped probes must
-// stay transparent to it.
+// beadmeta.DispatchHoldLabels names the two canonical values for bd's exact
+// label flags. The hook also recognizes the hold:<reason> namespace, so each
+// route-scoped query renders from those rules. Assignee-scoped probes must stay
+// transparent to the separate human label.
 
 func TestPoolDemandServeRulesExcludeHumanLabelWithoutMakingItADispatchHold(t *testing.T) {
 	if rules := PoolDemandServeRulesForQuery(); !slices.Contains(rules.ExcludeLabels, "human") {
 		t.Errorf("PoolDemandServeRulesForQuery().ExcludeLabels = %v, missing the human label", rules.ExcludeLabels)
 	}
+	if rules := PoolDemandServeRulesForQuery(); !slices.Contains(rules.ExcludeLabelPrefixes, "hold:") {
+		t.Errorf("PoolDemandServeRulesForQuery().ExcludeLabelPrefixes = %v, missing the hold namespace", rules.ExcludeLabelPrefixes)
+	}
 	if slices.Contains(beadmeta.DispatchHoldLabels, "human") {
 		t.Errorf("beadmeta.DispatchHoldLabels = %v, must not name the human label: it is not a dispatch hold", beadmeta.DispatchHoldLabels)
+	}
+}
+
+func TestRoutedAndCountQueriesExcludeTheWholeHoldNamespace(t *testing.T) {
+	requireJQ(t)
+	a := &Agent{Name: "worker", Dir: "hello-world"}
+	fakeBD := `#!/bin/sh
+set -eu
+case "$1" in
+  ready)
+    case "$*" in
+      *"--metadata-field gc.routed_to=hello-world/worker"*)
+        printf '%s' '[{"id":"held","status":"open","labels":["hold:mayor-go"]},{"id":"ready","status":"open","labels":["task"]}]'
+        ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  query|list|show) printf '[]' ;;
+  *) printf '[]' ;;
+esac
+`
+
+	work := runShellWithFakeBd(t, a.EffectiveWorkQuery(), map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, fakeBD)
+	if got := workQueryOutputIDOrder(t, strings.TrimSpace(work)); len(got) != 1 || got[0] != "ready" {
+		t.Errorf("EffectiveWorkQuery() ids = %v, want only ready; a hold:mayor-go row must not be claimable", got)
+	}
+
+	demand := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, fakeBD)
+	if got := strings.TrimSpace(demand); got != "1" {
+		t.Errorf("EffectivePoolDemandQuery() count = %q, want 1 (only the unheld ready row)", got)
 	}
 }
 

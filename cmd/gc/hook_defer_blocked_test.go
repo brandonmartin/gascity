@@ -95,6 +95,28 @@ func TestDoHookFiltersStatusBlockedBeads(t *testing.T) {
 	}
 }
 
+func TestDoHookFiltersStatusDeferredBeads(t *testing.T) {
+	runner := func(_, _ string) (string, error) {
+		return `[
+			{"id":"status-deferred","status":"deferred"},
+			{"id":"clear-3","status":"open"}
+		]`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "status-deferred") {
+		t.Errorf("status=deferred bead surfaced in hook output: %s", out)
+	}
+	if !strings.Contains(out, "clear-3") {
+		t.Errorf("ready bead missing from hook output: %s", out)
+	}
+}
+
 func TestDoHookKeepsAbsentIsBlocked(t *testing.T) {
 	runner := func(_, _ string) (string, error) {
 		return `[{"id":"no-is-blocked-field","status":"open"}]`, nil

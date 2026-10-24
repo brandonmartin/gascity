@@ -141,12 +141,20 @@ func labelMatchCondsJQ(labels []string) string {
 	return strings.Join(conds, " or ")
 }
 
-// holdLabelMatchCondsJQ is labelMatchCondsJQ over the
-// beadmeta.DispatchHoldLabels values, e.g.
-// `. == "hold:mayor" or . == "hold:external"`. Shared by every jq-based hold
-// filter so the label set is spelled exactly once.
+// labelPrefixMatchCondsJQ renders a case-insensitive test for any prefix. bd's
+// --exclude-label accepts exact values only, so the hold namespace needs this
+// post-filter in generated query paths.
+func labelPrefixMatchCondsJQ(prefixes []string) string {
+	conds := make([]string, len(prefixes))
+	for i, prefix := range prefixes {
+		conds[i] = `(if type == "string" then (ascii_downcase | startswith(` + strconv.Quote(strings.ToLower(prefix)) + `)) else false end)`
+	}
+	return strings.Join(conds, " or ")
+}
+
+// holdLabelMatchCondsJQ recognizes the reserved hold:<reason> namespace.
 func holdLabelMatchCondsJQ() string {
-	return labelMatchCondsJQ(beadmeta.DispatchHoldLabels)
+	return labelPrefixMatchCondsJQ([]string{beadmeta.DispatchHoldLabelPrefix})
 }
 
 // excludeLabelsJQClause returns a jq select(...) clause dropping beads that
@@ -158,16 +166,26 @@ func excludeLabelsJQClause(labels []string) string {
 	return ` | select(([ (.labels // [])[] | select(` + labelMatchCondsJQ(labels) + `) ] | length) == 0)`
 }
 
-// excludeHoldLabelsJQClause is excludeLabelsJQClause over the
-// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped in_progress
-// probes: they must drop a held bead and nothing else, so they never take the
-// pool-demand serve rules' wider label set.
-func excludeHoldLabelsJQClause() string {
-	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
+// excludeLabelPrefixesJQClause drops rows carrying any case-insensitive label
+// prefix. It covers open-ended pack hold reasons that cannot be named with bd's
+// exact --exclude-label flags.
+func excludeLabelPrefixesJQClause(prefixes []string) string {
+	if len(prefixes) == 0 {
+		return ""
+	}
+	return ` | select(([ (.labels // [])[] | select(` + labelPrefixMatchCondsJQ(prefixes) + `) ] | length) == 0)`
 }
 
-// heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
-// row of a work-query result carries. The in_progress serve gate reads it off
+// excludeHoldLabelsJQClause excludes the reserved hold namespace in the
+// assignee-scoped in_progress work-serving probes. They must drop a held bead
+// and nothing else, so they never take the pool-demand serve rules' wider label
+// set.
+func excludeHoldLabelsJQClause() string {
+	return excludeLabelPrefixesJQClause([]string{beadmeta.DispatchHoldLabelPrefix})
+}
+
+// heldLabelCountJQ counts labels in the reserved hold namespace on the FIRST
+// row of a work-query result. The in_progress serve gate reads it off
 // the candidate row it already holds, so the hold check costs no extra bd call.
 // `.[0].labels // []` absorbs both an absent row and bd's null-valued labels
 // field; a non-JSON payload makes jq fail and the gate falls back to 0, which is
@@ -225,6 +243,25 @@ func excludeClaimantsFilterScript(shellVar string) string {
 		`fi; `
 }
 
+// excludeLabelPrefixesFilterScript removes rows carrying a configured label
+// prefix before a work-query tier selects its head. An unchanged or malformed
+// payload is left alone so the existing hook decoder retains its fail-open
+// behavior.
+func excludeLabelPrefixesFilterScript(shellVar string) string {
+	prefixes := PoolDemandServeRulesForQuery().ExcludeLabelPrefixes
+	if len(prefixes) == 0 {
+		return ""
+	}
+	pred := labelPrefixMatchCondsJQ(prefixes)
+	rowHasPrefix := `any((.labels // [])[]; ` + pred + `)`
+	filter := `if type == "array" and any(.[]; ` + rowHasPrefix + `) then [.[] | select((` + rowHasPrefix + `) | not)] else empty end`
+	v := `"$` + shellVar + `"`
+	return `if [ -n ` + v + ` ] && [ ` + v + ` != "[]" ]; then ` +
+		`gc_unheld=$(printf "%s" ` + v + ` | jq -c ` + shellquote.Quote(filter) + `); ` +
+		`[ -n "$gc_unheld" ] && ` + shellVar + `="$gc_unheld"; ` +
+		`fi; `
+}
+
 // PoolDemandServeRules names, in Go, exactly what the generated Tier-3
 // pool-demand query will and will not serve a worker for a template.
 //
@@ -235,19 +272,21 @@ func excludeClaimantsFilterScript(shellVar string) string {
 // forbidden to claim: a routed epic, or a bead parked on a dispatch hold, was
 // permanent demand and every worker it spawned saw an empty query.
 //
-// The shell builder below renders its flags FROM this value, so the descriptor
-// is not a description of the query — it is the query's source. A flag added
-// there without a field here cannot exist.
+// The builders render exact-value flags and prefix post-filters FROM this
+// value, so the descriptor is not a description of the query — it is the
+// query's source. An exclusion added there without a field here cannot exist.
 type PoolDemandServeRules struct {
 	// RequireUnassigned mirrors --unassigned: a row carrying any assignee is
 	// not routed pool demand.
 	RequireUnassigned bool
 	// ExcludeTypes mirrors --exclude-type: issue types the tier never serves.
 	ExcludeTypes []string
-	// ExcludeLabels mirrors the repeated --exclude-label flags: the dispatch
-	// holds, and bd's native human label, that a worker is deliberately
-	// forbidden to claim through.
+	// ExcludeLabels mirrors the repeated --exclude-label flags: canonical holds
+	// and bd's native human label, which a worker cannot claim through.
 	ExcludeLabels []string
+	// ExcludeLabelPrefixes are case-insensitive post-filters for label namespaces
+	// that bd's exact-match --exclude-label flags cannot express.
+	ExcludeLabelPrefixes []string
 }
 
 // PoolDemandServeRulesForQuery returns the serving rules of the generated
@@ -255,9 +294,10 @@ type PoolDemandServeRules struct {
 // query) consume this; see the controller demand loop in cmd/gc.
 func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 	return PoolDemandServeRules{
-		RequireUnassigned: true,
-		ExcludeTypes:      []string{"epic"},
-		ExcludeLabels:     append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
+		RequireUnassigned:    true,
+		ExcludeTypes:         []string{"epic"},
+		ExcludeLabels:        append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
+		ExcludeLabelPrefixes: []string{beadmeta.DispatchHoldLabelPrefix},
 	}
 }
 
@@ -298,7 +338,8 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))]`
+	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))` +
+		excludeLabelPrefixesJQClause(PoolDemandServeRulesForQuery().ExcludeLabelPrefixes) + `]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -355,6 +396,7 @@ func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) stri
 	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
 	if excludeServeLabels {
 		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
+		body += excludeLabelPrefixesJQClause(PoolDemandServeRulesForQuery().ExcludeLabelPrefixes)
 	}
 	return body
 }
@@ -457,21 +499,25 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`gc_routed_window="$r"; ` +
 		excludeClaimantsFilterScript("r") +
+		excludeLabelPrefixesFilterScript("r") +
 		// A full window that filtered to nothing may still have allowed work
 		// past it, so re-read the queue unbounded. Only this case pays for it.
 		`if [ "$r" = "[]" ] && [ "$gc_routed_window" != "[]" ] && ` +
 		`[ "$(printf "%s" "$gc_routed_window" | jq length 2>/dev/null)" = "` + strconv.Itoa(routedReadyWindow) + `" ]; then ` +
 		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		excludeClaimantsFilterScript("r") +
+		excludeLabelPrefixesFilterScript("r") +
 		`fi; ` +
 		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		excludeClaimantsFilterScript("legacy_candidates") +
+		excludeLabelPrefixesFilterScript("legacy_candidates") +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
 		excludeClaimantsFilterScript("legacy_ephemeral_candidates") +
+		excludeLabelPrefixesFilterScript("legacy_ephemeral_candidates") +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -530,6 +576,7 @@ const routedReadyWindow = 20
 func poolDemandCountShell(target string, topo QueryTopology) string {
 	script := `target="$1"; ` +
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
+		excludeLabelPrefixesFilterScript("ready_json") +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
@@ -674,7 +721,7 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // any non-closed blocker counts.
 //
 // When checkHold is true, the same serve gate also skips a candidate parked
-// on a canonical dispatch hold (beadmeta.DispatchHoldLabels), read off the
+// in the hold:<reason> namespace, read off the
 // candidate row this tier already holds — no extra bd call (gas-kg6). A held
 // bead has no blocking dependency, so the blocked_by gate alone let it
 // through and the tier re-served it on every tick; because the tier
@@ -874,8 +921,8 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 
 // ephemeralAssignedInProgressProbeScript is the ephemeral-store sibling of the
 // `bd list --status in_progress` crash-recovery query, in the same tier-1 slot.
-// It excludes candidates parked on a canonical dispatch hold
-// (beadmeta.DispatchHoldLabels) inside its own jq selection, the equivalent
+// It excludes candidates parked in the hold:<reason> namespace inside its own
+// jq selection, the equivalent
 // fall-through to the bd-list tier's nheld serve gate (gas-kg6, #5114 review):
 // without it a held ephemeral bead exited the script as the sole candidate, the
 // Go-side filter then stripped it, and the hook reported no_work while ready

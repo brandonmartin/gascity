@@ -196,7 +196,7 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if beadmeta.HasDispatchHold(b.Labels) {
 		// Parked, not detached: whoever parked it cleared the route because the
 		// next actor is not the pool that worked it. Restoring a route decides
-		// what to DO with the bead, which a hold answers (DispatchHoldLabels);
+		// what to DO with the bead, which a hold answers (HasDispatchHold);
 		// once the hold lifts the bead is a candidate again.
 		return false
 	}

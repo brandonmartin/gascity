@@ -55,7 +55,7 @@ esac
 // the ready-gated tier below still runs and serves the worker's other ready
 // work, instead of the script exiting with a bead the Go filter must discard.
 func TestEphemeralInProgressProbeFallsThroughWhenHeld(t *testing.T) {
-	for _, label := range beadmeta.DispatchHoldLabels {
+	for _, label := range append(append([]string(nil), beadmeta.DispatchHoldLabels...), "hold:mayor-go") {
 		t.Run(label, func(t *testing.T) {
 			if _, err := exec.LookPath("jq"); err != nil {
 				t.Skip("jq not available; the work-query shell requires it")

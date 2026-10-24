@@ -9,14 +9,15 @@ package main
 //
 // The controller's demand loop counted any ready, unassigned row whose route
 // normalized to T. The worker's Tier-3 query serves a strictly smaller set: it
-// passes --exclude-type=epic and one --exclude-label per dispatch hold, and it
-// matches the route by EXACT string. So three classes of row were permanent
+// excludes epics, the canonical hold labels and bd's human label, filters the
+// full hold:<reason> namespace, and matches the route by EXACT string. So three
+// classes of row were permanent
 // capacity demand that no worker could ever claim:
 //
 //   - a routed EPIC (an unassigned parent has no executable spec — the query
 //     excludes it deliberately, workquery.go),
-//   - a bead parked on hold:mayor / hold:external (parked precisely because the
-//     next actor is not this worker),
+//   - a bead parked in the hold:<reason> namespace (parked precisely because
+//     the next actor is not this worker),
 //   - a route stamped with a live slot suffix, "<base>-N", which the demand side
 //     normalizes to <base> and every raw consumer rejects.
 //
@@ -128,12 +129,16 @@ func demandRowServable(b beads.Bead) bool {
 		}
 	}
 	// LABEL: human is exact, case-sensitive, like the query's label filter;
-	// the hook does not apply a human post-filter. Dispatch holds are
-	// case-insensitive: the hook re-applies them with EqualFold
-	// (isHeldHookCandidate), so a "Hold:Mayor" bead is stripped even if the
-	// reader serves it. The worker never sees it, so it is not capacity demand.
+	// the hook does not apply a human post-filter. Dispatch holds match the
+	// reserved hold:<reason> namespace case-insensitively, so the demand
+	// predicate excludes every row the hook's post-filter will strip.
 	for _, label := range b.Labels {
 		label = strings.TrimSpace(label)
+		for _, prefix := range rules.ExcludeLabelPrefixes {
+			if strings.HasPrefix(strings.ToLower(label), strings.ToLower(prefix)) {
+				return false
+			}
+		}
 		for _, excluded := range rules.ExcludeLabels {
 			if label == excluded || (excluded != beadmeta.HumanLabel && strings.EqualFold(label, excluded)) {
 				return false
@@ -171,7 +176,7 @@ const (
 	// (beads.IsDeferred). Both are FRESH bead-local fields — never stale — so this
 	// is proof that no worker could have claimed the row.
 	demandRowDeferred demandRowClaimability = "deferred"
-	// demandRowHeld: the row carries a canonical dispatch hold
+	// demandRowHeld: the row carries a hold:<reason> dispatch label
 	// (beadmeta.HasDispatchHold). The hook never serves a held row to anyone
 	// (isHeldHookCandidate), so this is PROOF of non-claimability, read off a
 	// fresh bead-local field exactly like a deferral. A seat that drained past

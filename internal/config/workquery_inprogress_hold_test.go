@@ -54,7 +54,7 @@ esac
 // the shell layer: a parked candidate must not swallow the tick — the
 // ready-gated tier still runs and serves the worker's other ready work.
 func TestInProgressTierFallsThroughWhenHeld(t *testing.T) {
-	for _, label := range beadmeta.DispatchHoldLabels {
+	for _, label := range append(append([]string(nil), beadmeta.DispatchHoldLabels...), "hold:mayor-go") {
 		t.Run(label, func(t *testing.T) {
 			if _, err := exec.LookPath("jq"); err != nil {
 				t.Skip("jq not available; the work-query shell requires it")

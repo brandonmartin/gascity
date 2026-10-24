@@ -4,6 +4,7 @@ import (
 	"io"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -103,6 +104,108 @@ func TestPoolScaleCheckCountsRoutedWorkInTheCityWorkLedger(t *testing.T) {
 		seedRoutedWork(t, e.binding, "worker", "binding row"),
 	}
 	assertPoolDemandMatchesClaim(t, e, "worker", seeded)
+}
+
+func TestPoolScaleCheckExcludesRoutedBlockedAndHeldWorkPreservingRouteProvenance(t *testing.T) {
+	e := newLegAgreementEnv(t, true)
+	e.cfg.Agents = []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(5)}}
+
+	blocker, err := e.work.Create(beads.Bead{Title: "blocking prerequisite", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	routeMetadata := map[string]string{
+		beadmeta.RoutedToMetadataKey: "worker",
+		"gc.route.target":            "gascity/gasburger.solcats",
+		"gc.route.lane":              "S",
+		"gc.route.pool":              "lunacats",
+	}
+	blocked, err := e.work.Create(beads.Bead{
+		Title:    "blocked routed work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: routeMetadata,
+	})
+	if err != nil {
+		t.Fatalf("create blocked routed bead: %v", err)
+	}
+	if err := e.work.DepAdd(blocked.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("add blocking prerequisite: %v", err)
+	}
+	statusBlocked, err := e.work.Create(beads.Bead{
+		Title:    "status-blocked routed work",
+		Type:     "task",
+		Status:   "blocked",
+		Metadata: routeMetadata,
+	})
+	if err != nil {
+		t.Fatalf("create status-blocked routed bead: %v", err)
+	}
+	blockedStatus := "blocked"
+	if err := e.work.Update(statusBlocked.ID, beads.UpdateOpts{Status: &blockedStatus}); err != nil {
+		t.Fatalf("set routed bead status to blocked: %v", err)
+	}
+	statusDeferred, err := e.work.Create(beads.Bead{
+		Title:    "status-deferred routed work",
+		Type:     "task",
+		Status:   "deferred",
+		Metadata: routeMetadata,
+	})
+	if err != nil {
+		t.Fatalf("create status-deferred routed bead: %v", err)
+	}
+	deferredStatus := "deferred"
+	if err := e.work.Update(statusDeferred.ID, beads.UpdateOpts{Status: &deferredStatus}); err != nil {
+		t.Fatalf("set routed bead status to deferred: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	deferred, err := e.work.Create(beads.Bead{
+		Title:      "deferred routed work",
+		Type:       "task",
+		Status:     "open",
+		DeferUntil: &future,
+		Metadata:   routeMetadata,
+	})
+	if err != nil {
+		t.Fatalf("create deferred routed bead: %v", err)
+	}
+	// This row is otherwise ready. Its non-canonical hold label must keep it
+	// out of demand even though bd's exact --exclude-label flags cannot name
+	// every value in the hold namespace.
+	held, err := e.work.Create(beads.Bead{
+		Title:    "held routed work",
+		Type:     "task",
+		Status:   "open",
+		Labels:   []string{"hold:mayor-go"},
+		Metadata: routeMetadata,
+	})
+	if err != nil {
+		t.Fatalf("create held routed bead: %v", err)
+	}
+	ready := seedRoutedWork(t, e.work, "worker", "ready routed work")
+
+	_, counts, demand, partials, errs := poolDemandForEnv(t, e)
+	if len(errs) != 0 || len(partials) != 0 {
+		t.Fatalf("pool demand errors=%v partials=%v", errs, partials)
+	}
+	if counts["worker"] != 1 {
+		t.Fatalf("pool demand count = %d, want only the ready routed bead (blocked=%s status-blocked=%s status-deferred=%s held=%s)", counts["worker"], blocked.ID, statusBlocked.ID, statusDeferred.ID, held.ID)
+	}
+	if got := demand["worker"].WorkBeadIDs; len(got) != 1 || got[0] != ready.ID {
+		t.Fatalf("pool demand work IDs = %v, want [%s] (blocked, deferred and held rows are not claimable)", got, ready.ID)
+	}
+
+	for _, id := range []string{blocked.ID, statusBlocked.ID, statusDeferred.ID, deferred.ID, held.ID} {
+		persisted, err := e.work.Get(id)
+		if err != nil {
+			t.Fatalf("read parked bead %s: %v", id, err)
+		}
+		for key, want := range routeMetadata {
+			if got := persisted.Metadata[key]; got != want {
+				t.Errorf("bead %s metadata[%q] = %q, want preserved route provenance %q", id, key, got, want)
+			}
+		}
+	}
 }
 
 func TestRigPoolScaleCheckCountsRoutedWorkInTheCityWorkLedger(t *testing.T) {

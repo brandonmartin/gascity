@@ -12,7 +12,7 @@ import (
 )
 
 // Regression coverage for gas-kg6: `gc hook --claim` handed back a bead parked
-// on a canonical dispatch hold (beadmeta.DispatchHoldLabels) as action=work.
+// in the hold:<reason> namespace as action=work.
 //
 // A hold:external / hold:mayor bead is one whose required next actor is, by
 // construction, not this session. The existing/ready-assignment paths keyed off
@@ -93,7 +93,7 @@ func TestHookClaimSkipsHeldAssignmentAndClaimsReadyWork(t *testing.T) {
 	)
 	runner := func(string, string) (string, error) {
 		return `[
-			` + heldWorkQueryRow(heldID, "in_progress", holdTestIdentity, beadmeta.HoldExternalLabel) + `,
+			` + heldWorkQueryRow(heldID, "in_progress", holdTestIdentity, "hold:mayor-go") + `,
 			{"id":"` + readyID + `","status":"open","issue_type":"task","assignee":"","metadata":{"gc.routed_to":"` + holdTestIdentity + `"}}
 		]`, nil
 	}
@@ -159,6 +159,7 @@ func TestFilterUnreadyHookCandidatesDropsHeldBeads(t *testing.T) {
 	in := `[
 		{"id":"held-mayor","status":"in_progress","labels":["` + beadmeta.HoldMayorLabel + `"]},
 		{"id":"held-external","status":"in_progress","labels":["` + beadmeta.HoldExternalLabel + `"]},
+		{"id":"held-mayor-go","status":"open","labels":["hold:mayor-go"]},
 		{"id":"held-both","status":"open","labels":["` + beadmeta.HoldMayorLabel + `","` + beadmeta.HoldExternalLabel + `"]},
 		{"id":"plain","status":"open","labels":["mysql-cutover"]},
 		{"id":"nolabels","status":"open"},
@@ -193,7 +194,6 @@ func TestFilterUnreadyHookCandidatesKeepsNonHoldLabels(t *testing.T) {
 		t.Fatalf("filtered output is not a JSON array: %v (output %q)", err, got)
 	}
 	if len(rows) != 1 || rows[0]["id"] != "wk-1" {
-		t.Fatalf("non-canonical hold-ish labels were filtered; only %v are holds. got %s",
-			beadmeta.DispatchHoldLabels, got)
+		t.Fatalf("labels outside the hold: namespace were filtered. got %s", got)
 	}
 }

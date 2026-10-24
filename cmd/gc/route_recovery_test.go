@@ -388,13 +388,13 @@ func TestRouteRecoveryBackstopLegSkipsBlockedBead(t *testing.T) {
 
 // TestRouteRecoveryBackstopLegSkipsHeldBead is the run_target twin of the
 // detached-orphan hold gate: open, unassigned work that carries gc.run_target
-// but sits on a canonical dispatch hold is parked, not lost, so the lane must
+// but sits in the hold:<reason> namespace is parked, not lost, so the lane must
 // not re-stamp gc.routed_to onto it. An unheld sibling in the same scan is
 // still restored, so the assertion cannot pass because the scan saw nothing.
 func TestRouteRecoveryBackstopLegSkipsHeldBead(t *testing.T) {
 	const pool = "repo/pack.worker"
 	var rows []beads.Bead
-	for i, hold := range beadmeta.DispatchHoldLabels {
+	for i, hold := range append(append([]string(nil), beadmeta.DispatchHoldLabels...), "hold:mayor-go") {
 		rows = append(rows, beads.Bead{
 			ID: "HELD-" + string(rune('a'+i)), Title: "parked", Type: "task", Status: "open",
 			Labels:   []string{hold},

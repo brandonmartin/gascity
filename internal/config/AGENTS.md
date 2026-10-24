@@ -15,6 +15,13 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+## Dispatch holds use the reserved `hold:` namespace
+
+`hold:mayor` and `hold:external` are the only supported values, but
+route-scoped demand, hook serving, and route recovery must treat any
+`hold:<reason>` label as parked. Keep the native predicates and generated query
+filters aligned; assigned ownership accounting remains hold-transparent.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

@@ -5787,7 +5787,7 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 //   - deferred — a future defer_until and bd's deferred status (dated or not)
 //     are fresh bead-local fields, never stale, so this is PROOF: no worker
 //     could have claimed the row and draining past it was correct pull.
-//   - held or excluded — a canonical dispatch hold label or matching
+//   - held or excluded — a hold:<reason> dispatch label or matching
 //     gc.exclude_claimants identity is a fresh bead-local field, and the hook
 //     refuses to serve such a row to this session on every path, so this is
 //     PROOF as well: draining past it was correct pull.

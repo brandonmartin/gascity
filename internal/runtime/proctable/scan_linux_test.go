@@ -967,7 +967,11 @@ func TestScanWithRootReportsStartIdentity(t *testing.T) {
 // cannot be read adds no error, while a candidate's unreadable parent is
 // the entry's error (fail-closed). The id-scoped scan is unchanged.
 func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
-	root := t.TempDir()
+	// A PID-like path component must not be mistaken for an entry error's PID.
+	root := filepath.Join(t.TempDir(), "proc-103")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeFakeBootTime(t, root, time.Unix(1700000000, 0))
 	const subreaper = 50
 	buildFakeProcUnder(t, root, subreaper, 1, "systemd", nil)
@@ -996,8 +1000,10 @@ func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
 	if strings.Join(ids, ",") != "gc-init,gc-sub" {
 		t.Fatalf("orphan candidates %v, want gc-init and gc-sub only", ids)
 	}
-	var entry *EntryError
-	if !errors.As(err, &entry) || entry.PID != 104 || HasWholeScanFailure(err) || strings.Contains(err.Error(), "103") {
+	var entries []*EntryError
+	var other []string
+	collectScanErrors(err, &entries, &other)
+	if len(entries) != 1 || entries[0].PID != 104 || !errors.Is(entries[0], fs.ErrPermission) || len(other) != 0 {
 		t.Fatalf("scan error %v, want only pid 104's unreadable parent, as an entry error", err)
 	}
 	all, _ := scanWithRoot(root, "gc-paned")

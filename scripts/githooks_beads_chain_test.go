@@ -394,6 +394,97 @@ func runHooksOwnerCheck(t *testing.T, hooksPath string) (int, string) {
 	return exitErr.ExitCode(), string(out)
 }
 
+// runHooksOwnerCheckWithIdentityDispatcher models git-identity.sh --apply:
+// core.hooksPath points at a private directory whose dispatcher chains to the
+// repo's .githooks directory, with one shim per hook.
+func runHooksOwnerCheckWithIdentityDispatcher(t *testing.T, shimFault, chainDirectory string) (int, string) {
+	t.Helper()
+	root := repoRoot(t)
+	repo := t.TempDir()
+	hooksDir := filepath.Join(repo, ".githooks")
+	identityHooksDir := filepath.Join(repo, ".git", "gc-identity-hooks")
+	chainDir := hooksDir
+	if chainDirectory != "" {
+		chainDir = filepath.Join(repo, chainDirectory)
+		if err := os.MkdirAll(chainDir, 0o755); err != nil {
+			t.Fatalf("mkdir alternate chain directory: %v", err)
+		}
+	}
+	env := append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_SYSTEM="+filepath.Join(t.TempDir(), "gitconfig-system"),
+		"GC_TEST_CHAIN_DIR="+chainDir,
+	)
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := testCommand("git", args...)
+		cmd.Dir = repo
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir .githooks: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".githooks"))
+	if err != nil {
+		t.Fatalf("read repo .githooks: %v", err)
+	}
+	var hooks []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		hooks = append(hooks, entry.Name())
+		if err := os.WriteFile(filepath.Join(hooksDir, entry.Name()), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write .githooks/%s: %v", entry.Name(), err)
+		}
+	}
+	if len(hooks) == 0 {
+		t.Fatal("repo .githooks has no hook files")
+	}
+	if err := os.MkdirAll(identityHooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir gc-identity-hooks: %v", err)
+	}
+	dispatcher := "#!/bin/sh\nif [ \"${1:-}\" != \"--chain-dir\" ]; then exit 2; fi\nprintf '%s\\n' \"$GC_TEST_CHAIN_DIR\"\n"
+	dispatcherPath := filepath.Join(identityHooksDir, "gc-identity-dispatch")
+	if err := os.WriteFile(dispatcherPath, []byte(dispatcher), 0o755); err != nil {
+		t.Fatalf("write gc-identity-dispatch: %v", err)
+	}
+	for _, hook := range hooks {
+		if shimFault == "missing:"+hook {
+			continue
+		}
+		shim := "#!/bin/sh\nexec \"$(dirname -- \"$0\")/gc-identity-dispatch\" \"$(basename -- \"$0\")\" \"$@\"\n"
+		shimPath := filepath.Join(identityHooksDir, hook)
+		if err := os.WriteFile(shimPath, []byte(shim), 0o755); err != nil {
+			t.Fatalf("write gc-identity-hooks/%s: %v", hook, err)
+		}
+		if shimFault == "non-executable:"+hook {
+			if err := os.Chmod(shimPath, 0o644); err != nil {
+				t.Fatalf("chmod gc-identity-hooks/%s: %v", hook, err)
+			}
+		}
+	}
+	git("config", "core.hooksPath", identityHooksDir)
+
+	cmd := testCommand(filepath.Join(root, "scripts", "check-githooks-owner.sh"))
+	cmd.Dir = repo
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(out)
+	}
+	var exitErr *exec.ExitError
+	if !asExitError(err, &exitErr) {
+		t.Fatalf("run check-githooks-owner.sh: %v\n%s", err, out)
+	}
+	return exitErr.ExitCode(), string(out)
+}
+
 // TestCheckGitHooksOwnerAcceptsGitHooks accepts both spellings a clone can hold:
 // the relative path `make setup` writes and an absolute path pointing at the
 // same directory.
@@ -425,6 +516,40 @@ func TestCheckGitHooksOwnerRejectsForeignHooksPath(t *testing.T) {
 				t.Fatalf("check output = %q, want the `make setup` remediation", out)
 			}
 		})
+	}
+}
+
+func TestCheckGitHooksOwnerAcceptsIdentityDispatcher(t *testing.T) {
+	code, out := runHooksOwnerCheckWithIdentityDispatcher(t, "", "")
+	if code != 0 {
+		t.Fatalf("check exit = %d, want 0 for identity dispatcher chained to .githooks\n%s", code, out)
+	}
+}
+
+func TestCheckGitHooksOwnerRejectsIdentityDispatcherWithoutExecutableShim(t *testing.T) {
+	for _, fault := range []string{"missing:pre-push", "non-executable:pre-push"} {
+		t.Run(fault, func(t *testing.T) {
+			code, out := runHooksOwnerCheckWithIdentityDispatcher(t, fault, "")
+			if code == 0 {
+				t.Fatalf("check exit = 0 for %s identity shim, want failure\n%s", fault, out)
+			}
+			if !strings.Contains(out, "pre-push") {
+				t.Fatalf("check output = %q, want missing hook name", out)
+			}
+			if !strings.Contains(out, "git-identity.sh --apply") {
+				t.Fatalf("check output = %q, want identity-safe remediation", out)
+			}
+		})
+	}
+}
+
+func TestCheckGitHooksOwnerRejectsIdentityDispatcherChainedElsewhere(t *testing.T) {
+	code, out := runHooksOwnerCheckWithIdentityDispatcher(t, "", "other-hooks")
+	if code == 0 {
+		t.Fatalf("check exit = 0 for identity dispatcher chained outside .githooks, want failure\n%s", out)
+	}
+	if !strings.Contains(out, "git-identity.sh --apply") {
+		t.Fatalf("check output = %q, want identity-safe remediation", out)
 	}
 }
 

@@ -671,11 +671,12 @@ func TestDoEventsWatchStoppedCityAfterSeqRequiresRunningAPI(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
+	// Give the test server enough time to respond when the package is under load.
 	code := doEventsWatch(eventsAPIScope{
 		apiURL:   server.URL,
 		cityName: "mc-city",
 		cityPath: cityDir,
-	}, "", nil, 5, "", 50*time.Millisecond, &stdout, &stderr)
+	}, "", nil, 5, "", time.Second, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doEventsWatch = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

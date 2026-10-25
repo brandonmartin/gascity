@@ -283,12 +283,14 @@ func (p *shutdownWaitProvider) ListRunning(prefix string) ([]string, error) {
 
 type lateAsyncStartListProvider struct {
 	*gatedStartProvider
-	listCalls int
+	listCalls       int
+	awaitAsyncStart func()
 }
 
-func newLateAsyncStartListProvider() *lateAsyncStartListProvider {
+func newLateAsyncStartListProvider(awaitAsyncStart func()) *lateAsyncStartListProvider {
 	return &lateAsyncStartListProvider{
 		gatedStartProvider: newGatedStartProvider(),
+		awaitAsyncStart:    awaitAsyncStart,
 	}
 }
 
@@ -298,13 +300,13 @@ func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error
 	call := p.listCalls
 	p.mu.Unlock()
 
+	// Keep the first snapshot empty so shutdown needs its late-start sweep.
 	running, err := p.Fake.ListRunning(prefix)
 	if call == 1 {
 		p.release("worker")
-		deadline := time.Now().Add(2 * time.Second)
-		for !p.IsRunning("worker") && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
+		// A running provider can still have a session in creating. Wait for
+		// the tracked state commit so the second sweep can stop it.
+		p.awaitAsyncStart()
 	}
 	return running, err
 }
@@ -2811,7 +2813,6 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp := newLateAsyncStartListProvider()
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
 		Agents: []config.Agent{{Name: "worker"}},
@@ -2820,7 +2821,6 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 	forceStop.Store(true)
 	cr := &CityRuntime{
 		cfg:                 cfg,
-		sp:                  sp,
 		rec:                 events.Discard,
 		standaloneCityStore: store,
 		asyncStartLimiter:   newAsyncStartLimiter(maxParallelStartsPerTick(cfg)),
@@ -2829,6 +2829,12 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
+	sp := newLateAsyncStartListProvider(func() {
+		if !cr.asyncStarts.wait(hangBudget) {
+			t.Fatalf("late async start did not complete within the hang budget (%s)", hangBudget)
+		}
+	})
+	cr.sp = sp
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(
 		context.Background(),

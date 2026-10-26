@@ -30,6 +30,7 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 #                                  run on remote workers without docker.
 ACCEPTANCE_ENV = {
     "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
+    "GC_ACCEPTANCE_FILE_BD_SHIM": "$(rootpath //test/integration/filebdshim)",
     "GC_ACCEPTANCE_TOPOLOGY_MATRIX": "1",
     "GC_REQUIRE_ACCEPTANCE_TOOLING": "1",
     "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
@@ -203,6 +204,7 @@ go_test(
     args = ["-test.skip=^(%s)$$" % "|".join(SOLO_TESTS.values())],
     data = [
         "//cmd/gc",
+        "//test/integration/filebdshim",
         "//examples/bd",
         "//:go.mod",
         "//examples:all_examples",
@@ -217,6 +219,7 @@ go_test(
     # in heavy_tests.txt in separate shards.
     shard_count = 18,
     deps = [
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",

@@ -5,10 +5,12 @@ package acceptance_test
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -22,6 +24,28 @@ func TestSlingOnGraphExcludedAuthorAndEligiblePeer(t *testing.T) {
 	env := testEnv.Clone()
 	c := helpers.NewCity(t, env)
 	c.InitNoStart("claude")
+	// Hook mutations probe the bd work leg before escalating a missing graph
+	// bead to the class binding. Use the existing file-store bd adapter so that
+	// the work leg answers real bead misses without requiring a Dolt server.
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := bazeltest.DataPath(t, "GC_ACCEPTANCE_FILE_BD_SHIM")
+	if shim == "" {
+		shim = filepath.Join(binDir, "filebdshim")
+		cmd := exec.CommandContext(t.Context(), "go", "build", "-o", shim, "./test/integration/filebdshim")
+		cmd.Dir = helpers.FindModuleRoot()
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("building file-store bd adapter: %v\n%s", err, out)
+		}
+	}
+	if err := os.Symlink(shim, filepath.Join(binDir, "bd")); err != nil {
+		t.Fatal(err)
+	}
+	env.With("PATH", binDir+string(os.PathListSeparator)+env.Get("PATH"))
+	env.With("GC_INTEGRATION_REAL_BD", filepath.Join(env.Get("GC_HOME"), "beads-bin", "bd"))
 	c.WriteConfig(`[workspace]
 name = "review-exclusions"
 
@@ -40,8 +64,7 @@ nudges = "infra"
 provider = "sqlite-beads"
 path = ".gc/infra"
 `)
-	c.WriteV2AgentDir("review", `start_command = "true"`,
-		`work_query = "gc ready --json --metadata-field gc.routed_to=review"`)
+	c.WriteV2AgentDir("review", `start_command = "true"`)
 	formulaDir := filepath.Join(c.Dir, "formulas")
 	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -125,7 +148,11 @@ needs = ["inspect"]
 			Action string `json:"action"`
 			BeadID string `json:"bead_id"`
 		}
-		if err := json.Unmarshal([]byte(run("hook", "review", "--claim", "--json")), &claim); err != nil {
+		raw, stderr, err := helpers.RunGCStreams(env, c.Dir, "hook", "review", "--claim", "--json")
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+			t.Fatalf("excluded author's hook: %v\n%s\n%s", err, raw, stderr)
+		}
+		if err := json.Unmarshal([]byte(raw), &claim); err != nil {
 			t.Fatal(err)
 		}
 		if claim.Action != "drain" || claim.BeadID != "" {

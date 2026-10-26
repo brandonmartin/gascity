@@ -227,6 +227,13 @@ becoming more useful as models improve — it becomes LESS useful instead.
 - Comments describe current behavior; don't narrate removed functionality.
 - Role names never appear in Go code. If you're writing `if role == "mayor"`,
   it's a design error.
+- **Claimant exclusions survive graph materialization.** Sling unions
+  `gc.exclude_claimants` from the input convoy and its tracked beads onto the
+  workflow root before creation. Every authored or synthesized step inherits
+  the root's exclusions; attachments, fan-out fragments, and drain item roots
+  inherit them before creation too. Preserve additional step-local exclusions.
+  Both sequential and batch writes must carry exclusions at creation, and
+  metadata decoders reject non-string `gc.exclude_claimants` values.
 - **Dispatch holds use the reserved `hold:` namespace.** `hold:mayor` and
   `hold:external` are the only supported values, but route-scoped demand,
   hook serving, and route recovery must treat any `hold:<reason>` label as

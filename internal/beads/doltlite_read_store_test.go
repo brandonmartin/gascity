@@ -76,6 +76,28 @@ func TestDoltliteReadStoreHydratesParent(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreRejectsNonStringClaimantExclusions(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	if _, err := writer.Exec(`UPDATE issues SET metadata = ? WHERE id = 'gc-child'`, `{"gc.exclude_claimants":["review.author"]}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get("gc-child"); err == nil || !strings.Contains(err.Error(), "gc.exclude_claimants") {
+		t.Fatalf("Get accepted a non-string exclusion: %v", err)
+	}
+	if _, err := writer.Exec(`UPDATE issues SET metadata = ? WHERE id = 'gc-child'`, `{"gc.exclude_claimants":"review.author"}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get("gc-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["gc.exclude_claimants"] != "review.author" {
+		t.Fatalf("Get lost string exclusions: %v", got.Metadata)
+	}
+}
+
 func TestDoltliteReadStoreTypeFallbackCanSkipLabels(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

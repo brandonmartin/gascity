@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -1430,6 +1431,11 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 // atomic across processes.
 func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	graphStore := deps.graphStore()
+	if graphWorkflow {
+		if err := inheritGraphInputExclusions(recipe, deps); err != nil {
+			return nil, err
+		}
+	}
 	if err := graphroute.ApplyGraphRouting(recipe, &a, agentutil.RoutedToIdentity(&a), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
@@ -1486,6 +1492,36 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 		emitCurrentExecutionFacts(deps, graphStore, result.RootID, a.QualifiedName(), formulaName)
 	}
 	return result, nil
+}
+
+// inheritGraphInputExclusions runs before any graph bead is created or routed.
+// The convoy and its tracked work stay in the work store even when the graph
+// is relocated; molecule creation carries the root's union onto every step.
+func inheritGraphInputExclusions(recipe *formula.Recipe, deps SlingDeps) error {
+	root := &recipe.Steps[0]
+	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	if convoyID == "" {
+		return nil
+	}
+	convoy, err := deps.Store.Get(convoyID)
+	if err != nil {
+		return fmt.Errorf("loading input convoy %s for claimant exclusions: %w", convoyID, err)
+	}
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: deps.Store}, convoyID, true)
+	if err != nil {
+		return fmt.Errorf("loading input convoy %s claimant exclusions: %w", convoyID, err)
+	}
+	values := []string{root.Metadata[beadmeta.ExcludeClaimantsMetadataKey], convoy.Metadata[beadmeta.ExcludeClaimantsMetadataKey]}
+	for _, member := range members {
+		if member.Status == "unknown" {
+			return fmt.Errorf("loading input convoy %s claimant exclusions: unresolved member %s", convoyID, member.ID)
+		}
+		values = append(values, member.Metadata[beadmeta.ExcludeClaimantsMetadataKey])
+	}
+	if excluded := beadmeta.MergeExcludedClaimants(values...); excluded != "" {
+		root.Metadata[beadmeta.ExcludeClaimantsMetadataKey] = excluded
+	}
+	return nil
 }
 
 func emitCurrentExecutionFacts(deps SlingDeps, graphStore beads.Store, rootID, actor, formulaName string) {

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -31,16 +30,7 @@ func TestSlingOnGraphExcludedAuthorAndEligiblePeer(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	shim := bazeltest.DataPath(t, "GC_ACCEPTANCE_FILE_BD_SHIM")
-	if shim == "" {
-		shim = filepath.Join(binDir, "filebdshim")
-		cmd := exec.CommandContext(t.Context(), "go", "build", "-o", shim, "./test/integration/filebdshim")
-		cmd.Dir = helpers.FindModuleRoot()
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("building file-store bd adapter: %v\n%s", err, out)
-		}
-	}
+	shim := helpers.BuildFileBDShim(t, binDir)
 	if err := os.Symlink(shim, filepath.Join(binDir, "bd")); err != nil {
 		t.Fatal(err)
 	}

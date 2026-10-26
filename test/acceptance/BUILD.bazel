@@ -219,7 +219,6 @@ go_test(
     # in heavy_tests.txt in separate shards.
     shard_count = 18,
     deps = [
-        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",

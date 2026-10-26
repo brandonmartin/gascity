@@ -494,15 +494,27 @@ var bdRelocatedClassMintPaths = map[string]string{
 
 // bdRelocatedClassCreateShapeFlags are the create-dialect flags that state a
 // prospective bead's CLASS, and how each lands on the bead the classifier
-// judges. Title, priority, description and assignee are absent because
+// judges, given the scope root bd runs in (an `@file` metadata path resolves
+// against it). Title, priority, description and assignee are absent because
 // classification does not read them — they are stepped over, not modeled.
-var bdRelocatedClassCreateShapeFlags = map[string]func(*beads.Bead, string) error{
-	"--type":     bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType),
-	"-t":         bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType),
-	"--labels":   bdRelocatedClassCreateAddLabels,
-	"-l":         bdRelocatedClassCreateAddLabels,
-	"--label":    bdRelocatedClassCreateAddLabels,
-	"--metadata": bdRelocatedClassCreateInfallible(bdRelocatedClassCreateAddMetadata),
+var bdRelocatedClassCreateShapeFlags = map[string]func(shape *beads.Bead, scopeRoot, value string) error{
+	"--type":   bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType)),
+	"-t":       bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType)),
+	"--labels": bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
+	"-l":       bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
+	"--label":  bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
+	"--metadata": func(shape *beads.Bead, scopeRoot, value string) error {
+		bdRelocatedClassCreateAddMetadata(shape, scopeRoot, value)
+		return nil
+	},
+}
+
+// bdRelocatedClassCreateIgnoringScope adapts a shape recorder that reads only
+// argv to the table's signature.
+func bdRelocatedClassCreateIgnoringScope(apply func(*beads.Bead, string) error) func(*beads.Bead, string, string) error {
+	return func(shape *beads.Bead, _, value string) error {
+		return apply(shape, value)
+	}
 }
 
 // bdRelocatedClassCreateInfallible adapts a shape recorder that cannot fail to
@@ -538,23 +550,30 @@ func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) error {
 // as a JSON object. It decodes through beads.StringMap so a value bd stores as
 // a JSON number or boolean reads here exactly as it reads back off the wire.
 //
-// A body this cannot decode — malformed JSON, or the `@file.json` spelling
-// whose object is not in argv at all — contributes nothing to the shape. Under
-// `gc bd` that is not a swallowed error, but the shield is a gc guard rather
-// than bd: bdRigQualifiedMetadataRefusal (cmd_bd.go) runs unconditionally ahead
-// of this one and refuses both spellings on every verb it admits — create, its
-// `new` alias, and update. `q`, the third mint verb here, has no --metadata
-// flag at all (bd q --help), so every mint verb that can carry one is refused
-// before this function is reached.
+// An `@file` body is read through readBdMetadataFile — relative to scopeRoot,
+// the directory bd runs in — the same reader bdRigQualifiedMetadataRefusal
+// (cmd_bd.go) validates it with, so a class-stating document in a file is
+// refused exactly like the same document inline. That earlier guard refuses a
+// file it cannot read or parse before this classifier is reached; a body this
+// decoder cannot interpret contributes nothing to the shape. `q`, the third
+// mint verb here, has no --metadata flag at all (bd q --help).
 //
 // Attributing that to bd instead would be wrong, because bd's own behavior
 // differs by spelling: it rejects a malformed inline body (identical parse,
 // exit non-zero, no write) but it RESOLVES `@file.json` — that spelling states
 // its object in a file, so a token unreadable here is one bd would read and
 // mint from.
-func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
+func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, scopeRoot, value string) {
+	metadataJSON := strings.TrimSpace(value)
+	if strings.HasPrefix(metadataJSON, "@") {
+		content, err := readBdMetadataFile(scopeRoot, value)
+		if err != nil {
+			return
+		}
+		metadataJSON = strings.TrimSpace(content)
+	}
 	var fields beads.StringMap
-	if err := json.Unmarshal([]byte(value), &fields); err != nil {
+	if err := json.Unmarshal([]byte(metadataJSON), &fields); err != nil {
 		return
 	}
 	if shape.Metadata == nil {
@@ -604,7 +623,7 @@ func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
 // the file-backed forms above close the two highest-value doors on the create
 // verbs it covers, and the migration's containment check only REPORTS strays
 // already on disk — it detects them, it does not move them.
-func bdRelocatedClassCreateShape(manifest string, verbArgs []string) (beads.Bead, error) {
+func bdRelocatedClassCreateShape(manifest, scopeRoot string, verbArgs []string) (beads.Bead, error) {
 	values := bdflags.ValueFlags(manifest)
 	var shape beads.Bead
 	for i := 0; i < len(verbArgs); i++ {
@@ -617,10 +636,10 @@ func bdRelocatedClassCreateShape(manifest string, verbArgs []string) (beads.Bead
 				i++
 			}
 		case stated:
-			err = apply(&shape, value)
+			err = apply(&shape, scopeRoot, value)
 		case i+1 < len(verbArgs):
 			i++
-			err = apply(&shape, verbArgs[i])
+			err = apply(&shape, scopeRoot, verbArgs[i])
 		}
 		if err != nil {
 			return beads.Bead{}, fmt.Errorf("%s: %w", name, err)
@@ -853,7 +872,7 @@ func bdRelocatedClassCreateRefusal(cfg *config.City, scopeRoot string, bdArgs []
 	}
 	// A work-class shape matches nothing: relocatedBeadClasses never names the
 	// work class, which is the residual one and the one bd's ledger holds.
-	shape, err := bdRelocatedClassCreateShape(manifest, verbArgs)
+	shape, err := bdRelocatedClassCreateShape(manifest, scopeRoot, verbArgs)
 	if err != nil {
 		return fmt.Sprintf("bd %s: refused on this split city: gc cannot read %v the way bd does, so it cannot tell which storage class the bead would have. Nothing was written.", verb, err), true
 	}

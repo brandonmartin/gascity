@@ -435,18 +435,12 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []
 		}
 
 		metadataJSON := strings.TrimSpace(value)
-		if path, isFile := strings.CutPrefix(metadataJSON, "@"); isFile {
-			if exact, ok := strings.CutPrefix(value, "@"); ok {
-				path = exact
-			}
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(scopeRoot, path)
-			}
-			data, err := os.ReadFile(path)
+		if strings.HasPrefix(metadataJSON, "@") {
+			data, err := readBdMetadataFile(scopeRoot, value)
 			if err != nil {
 				return fmt.Sprintf("gc bd: refusing --metadata %q: @file input could not be read to validate it before write: %v\n", value, err), true
 			}
-			metadataJSON = string(data)
+			metadataJSON = data
 		}
 		var metadata map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
@@ -466,6 +460,26 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []
 		}
 	}
 	return "", false
+}
+
+// readBdMetadataFile reads the body of a `--metadata @file` value the way bd
+// does: bd reads a file only for a value that starts with "@", and reads the
+// path after it as written, spaces included, so that is the path read here; a
+// space-padded "@", which bd rejects as JSON, is read with the spaces trimmed.
+// A relative path is resolved against scopeRoot, the directory bd runs in.
+func readBdMetadataFile(scopeRoot, value string) (string, error) {
+	path, _ := strings.CutPrefix(strings.TrimSpace(value), "@")
+	if exact, ok := strings.CutPrefix(value, "@"); ok {
+		path = exact
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(scopeRoot, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {

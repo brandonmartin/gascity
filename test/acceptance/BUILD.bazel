@@ -195,6 +195,7 @@ go_test(
         "rig_test.go",
         "session_test.go",
         "skill_test.go",
+        "sling_exclude_claimants_test.go",
         "sling_test.go",
         "start_dry_run_test.go",
         "status_test.go",
@@ -222,6 +223,7 @@ go_test(
     # in heavy_tests.txt in separate shards.
     shard_count = 18,
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
@@ -239,6 +241,7 @@ go_test(
         "//internal/packregistry",
         "//internal/remotesource",
         "//internal/session",
+        "//internal/storebinding/sqlite",
         "//internal/testenv",
         "//internal/testutil",
         "//test/acceptance/helpers",

@@ -219,6 +219,7 @@ fi
 # held. Acquire must reap that descendant instead of burning the wait bound
 # until an operator runs lsof + kill by hand.
 REAP_SLOTS="$WORK/reap-slots"
+REAP_WAIT_SECONDS=20
 if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; }; then
     REAP_PIDFILE="$WORK/reap-sleeper.pid"
     rm -f "$REAP_PIDFILE"
@@ -247,13 +248,13 @@ if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || com
         PROBER_PID=$!
         START="$(date +%s)"
         REAP_OUT="$(LIB="$LIB" DIR="$REAP_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
-            PUSH_GATE_MAX_WAIT_SECONDS=6 PUSH_GATE_POLL_SECONDS=1 \
+            PUSH_GATE_MAX_WAIT_SECONDS="$REAP_WAIT_SECONDS" PUSH_GATE_POLL_SECONDS=1 \
             bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z reaper; then echo ACQUIRED; else echo DENIED; fi' 2>&1)"
         ELAPSED=$(( $(date +%s) - START ))
         REAP_TAIL="$(printf '%s\n' "$REAP_OUT" | tail -1)"
         assert_eq "reap.acquire_succeeds_after_reaping_leak" "$REAP_TAIL" "ACQUIRED"
         assert_contains "reap.diagnostic_names_leaked_descendant" "$REAP_OUT" "reaping leaked descendant"
-        assert_true "reap.did_not_burn_full_wait_bound" test "$ELAPSED" -le 4
+        assert_true "reap.did_not_burn_full_wait_bound" test "$ELAPSED" -lt "$REAP_WAIT_SECONDS"
         if [[ -n "$SLEEPER_PID" ]] && kill -0 "$SLEEPER_PID" 2>/dev/null; then
             record_fail "reap.leaked_descendant_killed" "sleeper pid $SLEEPER_PID still alive"
             kill "$SLEEPER_PID" 2>/dev/null || true

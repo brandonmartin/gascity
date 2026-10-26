@@ -42,7 +42,6 @@ func BuildGC(dir string) string {
 		return link
 	}
 
-	bin := filepath.Join(dir, "gc")
 	// Under bazel the pre-built gc binary ships in runfiles (declared as
 	// a data dep); use it instead of shelling out to `go build`.
 	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
@@ -53,11 +52,27 @@ func BuildGC(dir string) string {
 			return filepath.Join(rf, "_main", "cmd", "gc", "gc_", "gc")
 		}
 	}
-	cmd := exec.Command("go", "build", "-o", bin, "./cmd/gc")
+	return buildGoBinary(dir, "gc", "./cmd/gc")
+}
+
+// BuildFileBDShim returns the prebuilt file-store bd adapter under Bazel, or
+// compiles it into dir for Go-native acceptance runs.
+func BuildFileBDShim(t *testing.T, dir string) string {
+	t.Helper()
+	if bin := bazeltest.DataPath(t, "GC_ACCEPTANCE_FILE_BD_SHIM"); bin != "" {
+		return bin
+	}
+	return buildGoBinary(dir, "filebdshim", "./test/integration/filebdshim")
+}
+
+// buildGoBinary is the Go-native fallback shared by acceptance tool binaries.
+func buildGoBinary(dir, name, pkg string) string {
+	bin := filepath.Join(dir, name)
+	cmd := exec.Command("go", "build", "-o", bin, pkg)
 	cmd.Dir = FindModuleRoot()
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		panic("acceptance: building gc binary: " + err.Error() + "\n" + string(out))
+		panic("acceptance: building " + name + " binary: " + err.Error() + "\n" + string(out))
 	}
 	return bin
 }

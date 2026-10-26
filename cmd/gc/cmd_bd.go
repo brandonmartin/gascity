@@ -333,13 +333,12 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 //
 // Actor names without a slash remain compatible: historic dotted identities
 // are provenance, not rig-qualified routes. Both bd metadata spellings are
-// examined so --metadata cannot bypass the --set-metadata guard. On update, a
-// `--metadata @file` value is read here and its content checked exactly like an
-// inline document; the argument itself still reaches bd unchanged, which is
-// what lets a document past the argv size limit through. create and its `new`
-// alias refuse @file: the relocated-class create guard classifies the bead
-// from argv alone and cannot see a file's content. Inputs this preflight cannot
-// interpret exactly are refused before bd can mutate state.
+// examined so --metadata cannot bypass the --set-metadata guard. On create, its
+// `new` alias, and update, a `--metadata @file` value is read here and its
+// content checked exactly like an inline document; the argument itself still
+// reaches bd unchanged, which lets a document past the argv size limit through.
+// Inputs this preflight cannot interpret exactly are refused before bd can
+// mutate state.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
 	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
@@ -413,9 +412,6 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 
 		metadataJSON := strings.TrimSpace(value)
 		if strings.HasPrefix(metadataJSON, "@") {
-			if verb != "update" {
-				return fmt.Sprintf("gc bd: refusing --metadata %q: @file input is accepted by gc bd update only; %s classifies the new bead from its arguments and cannot read a file\n", value, verb), true
-			}
 			content, msg := readBdMetadataFile(metadataJSON)
 			if msg != "" {
 				return msg, true

@@ -1542,6 +1542,82 @@ func TestBdCreateForwardsAWorkShapedCreateOnASplitCity(t *testing.T) {
 	}
 }
 
+func TestBdCreateClassifiesMetadataFileOnSplitCity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	const graphMetadata = `{"gc.kind":"wisp"}`
+	if err := os.WriteFile(path, []byte(graphMetadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, verb := range []string{"create", "new"} {
+		t.Run(verb, func(t *testing.T) {
+			inlineArgs := []string{verb, "--metadata", graphMetadata, "x"}
+			fileArgs := []string{verb, "--metadata", "@" + path, "x"}
+			inlineMsg, inlineRefused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", inlineArgs)
+			if !inlineRefused {
+				t.Fatalf("inline metadata was not refused; args=%q", inlineArgs)
+			}
+			fileMsg, fileRefused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", fileArgs)
+			if !fileRefused {
+				t.Fatalf("metadata file was not classified; args=%q", fileArgs)
+			}
+			if fileMsg != inlineMsg {
+				t.Fatalf("file refusal = %q, want inline refusal %q", fileMsg, inlineMsg)
+			}
+		})
+	}
+
+	if err := os.WriteFile(path, []byte(`{"attempts":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg, refused := bdRelocatedClassCreateRefusal(splitCityConfig(), "", []string{"create", "--metadata", "@" + path, "x"}); refused {
+		t.Fatalf("work-class metadata file was refused: %q", msg)
+	}
+}
+
+func TestGcBdCreateRefusesInfraMetadataFileOnSplitCity(t *testing.T) {
+	capture := bdSQLRefusalCity(t, bdSQLRefusalSplitStorage)
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	const graphMetadata = `{"gc.kind":"wisp"}`
+	if err := os.WriteFile(path, []byte(graphMetadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, verb := range []string{"create", "new"} {
+		t.Run(verb, func(t *testing.T) {
+			run := func(metadata string) (int, string) {
+				t.Helper()
+				var stdout, stderr bytes.Buffer
+				code := doBd([]string{verb, "--metadata", metadata, "x"}, &stdout, &stderr)
+				return code, stderr.String()
+			}
+
+			inlineCode, inlineStderr := run(graphMetadata)
+			if inlineCode == 0 {
+				t.Fatalf("inline metadata create succeeded; stderr=%q", inlineStderr)
+			}
+			fileCode, fileStderr := run("@" + path)
+			if fileCode == 0 {
+				t.Fatalf("metadata file create succeeded; stderr=%q", fileStderr)
+			}
+			refusal := func(stderr string) string {
+				t.Helper()
+				index := strings.Index(stderr, "gc bd: ")
+				if index < 0 {
+					t.Fatalf("missing gc bd refusal in stderr %q", stderr)
+				}
+				return stderr[index:]
+			}
+			if got, want := refusal(fileStderr), refusal(inlineStderr); got != want {
+				t.Fatalf("file refusal = %q, want inline refusal %q", got, want)
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatalf("bd was invoked for a stranded metadata-file create: %v", err)
+			}
+		})
+	}
+}
+
 // TestGcBdCreateRefusesAnInfraShapedCreateOnASplitCity drives the refusal
 // through the real command: the exit code is non-zero and bd is never spawned,
 // so nothing is written anywhere.

@@ -1742,6 +1742,9 @@ func TestGcBdForwardsValidatedMetadataFile(t *testing.T) {
 		{name: "surrounding whitespace", verb: "update", content: "\n  {\"attempts\":2}\n"},
 		{name: "equals form", verb: "update", content: `{"attempts":2}`, inline: true},
 		{name: "larger than the argv limit", verb: "update", content: string(large)},
+		{name: "plain create", verb: "create", content: `{"attempts":2}`},
+		{name: "plain create equals form", verb: "create", content: `{"attempts":2}`, inline: true},
+		{name: "plain new alias", verb: "new", content: `{"attempts":2}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
@@ -1803,12 +1806,11 @@ func TestGcBdRejectsMetadataFileItCannotValidateBeforeWrite(t *testing.T) {
 		{name: "lease owner on an unconfigured rig", verb: "update", arg: "@%s", file: `{"gc.lease_owner":"ghostrig/polecat-01"}`, want: []string{"not configured", "ghostrig/polecat-01"}},
 		{name: "unconfigured rig beside valid keys", verb: "update", arg: "@%s", file: `{"attempts":2,"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured"}},
 		{name: "equals form", verb: "update", arg: "=@%s", file: `{"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured"}},
-		// create classifies the new bead from argv, so it cannot see a file's
-		// content; it is refused even when the file would validate.
-		{name: "create with a valid file", verb: "create", arg: "@%s", file: `{"gc.routed_to":"saitoc/polecat-01"}`, want: []string{"update only"}},
-		{name: "create with an equals form", verb: "create", arg: "=@%s", file: `{"attempts":2}`, want: []string{"update only"}},
-		{name: "new alias with a valid file", verb: "new", arg: "@%s", file: `{"gc.routed_to":"saitoc/polecat-01"}`, want: []string{"update only"}},
-		{name: "create with a missing file", verb: "create", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"update only"}},
+		// create/new validate metadata files before forwarding, including
+		// unconfigured route targets that would otherwise be written by bd.
+		{name: "create with route to an unconfigured rig", verb: "create", arg: "@%s", file: `{"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured", "ghostrig/polecat-01"}},
+		{name: "new alias with route to an unconfigured rig", verb: "new", arg: "@%s", file: `{"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured", "ghostrig/polecat-01"}},
+		{name: "create with a missing file", verb: "create", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"cannot read @file"}},
 		{name: "non-string guarded value", verb: "update", arg: "@%s", file: `{"gc.routed_to":true}`, want: []string{"non-string gc.routed_to"}},
 		{name: "malformed JSON", verb: "update", arg: "@%s", file: `{not-json}`, want: []string{"malformed --metadata"}},
 		{name: "empty file", verb: "update", arg: "@%s", file: "\n", want: []string{"malformed --metadata"}},

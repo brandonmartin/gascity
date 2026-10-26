@@ -520,15 +520,11 @@ func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) {
 // as a JSON object. It decodes through beads.StringMap so a value bd stores as
 // a JSON number or boolean reads here exactly as it reads back off the wire.
 //
-// A body this cannot decode — malformed JSON, or the `@file.json` spelling
-// whose object is not in argv at all — contributes nothing to the shape. Under
-// `gc bd` that is not a swallowed error, but the shield is a gc guard rather
-// than bd: bdRigQualifiedMetadataRefusal (cmd_bd.go) runs unconditionally ahead
-// of this one and refuses both spellings on the mint verbs it admits — create
-// and its `new` alias. (It reads an `@file` only for update, which is not a mint
-// verb.) `q`, the third mint verb here, has no --metadata flag at all
-// (bd q --help), so every mint verb that can carry one is refused before this
-// function is reached.
+// An @file body is read through readBdMetadataFile, the same reader used by
+// bdRigQualifiedMetadataRefusal (cmd_bd.go). That earlier guard refuses files
+// it cannot read or parse before this classifier is reached; a body this
+// decoder cannot interpret contributes nothing to the shape. `q`, the third
+// mint verb here, has no --metadata flag at all (bd q --help).
 //
 // Attributing that to bd instead would be wrong, because bd's own behavior
 // differs by spelling: it rejects a malformed inline body (identical parse,
@@ -536,8 +532,16 @@ func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) {
 // its object in a file, so a token unreadable here is one bd would read and
 // mint from.
 func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
+	metadataJSON := strings.TrimSpace(value)
+	if strings.HasPrefix(metadataJSON, "@") {
+		content, refusal := readBdMetadataFile(metadataJSON)
+		if refusal != "" {
+			return
+		}
+		metadataJSON = strings.TrimSpace(content)
+	}
 	var fields beads.StringMap
-	if err := json.Unmarshal([]byte(value), &fields); err != nil {
+	if err := json.Unmarshal([]byte(metadataJSON), &fields); err != nil {
 		return
 	}
 	if shape.Metadata == nil {

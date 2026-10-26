@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -5129,50 +5130,55 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
-	closer := &closerSpy{}
-	forceStop := &atomic.Bool{}
-	mc := &managedCity{
-		name:   "bright-lights",
-		cancel: func() {},
-		done:   make(chan struct{}),
-		closer: closer,
-		cr: &CityRuntime{
-			cfg: &config.City{
-				Session: config.SessionConfig{StartupTimeout: "20ms"},
-				Daemon: config.DaemonConfig{
-					ShutdownTimeout:   "20ms",
-					DriftDrainTimeout: "20ms",
+	synctest.Test(t, func(t *testing.T) {
+		closer := &closerSpy{}
+		forceStop := &atomic.Bool{}
+		mc := &managedCity{
+			name:   "bright-lights",
+			cancel: func() {},
+			done:   make(chan struct{}),
+			closer: closer,
+			cr: &CityRuntime{
+				cfg: &config.City{
+					Session: config.SessionConfig{StartupTimeout: "20ms"},
+					Daemon: config.DaemonConfig{
+						ShutdownTimeout:   "20ms",
+						DriftDrainTimeout: "20ms",
+					},
 				},
+				sp:                runtime.NewFake(),
+				rec:               events.Discard,
+				stdout:            io.Discard,
+				stderr:            io.Discard,
+				forceStopShutdown: forceStop,
 			},
-			sp:                runtime.NewFake(),
-			rec:               events.Discard,
-			stdout:            io.Discard,
-			stderr:            io.Discard,
-			forceStopShutdown: forceStop,
-		},
-	}
+		}
 
-	var stderr bytes.Buffer
-	start := time.Now()
-	err := stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("stopManagedCity took %s, want bounded timeout", elapsed)
-	}
-	if err == nil {
-		t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
-	}
-	if !strings.Contains(err.Error(), "did not exit") {
-		t.Fatalf("stopManagedCity err = %q, want 'did not exit' detail", err.Error())
-	}
-	if !strings.Contains(stderr.String(), "did not exit within") {
-		t.Fatalf("stderr = %q, want forced-timeout warning", stderr.String())
-	}
-	if !closer.closed {
-		t.Fatal("expected closer to be closed after forced cleanup")
-	}
-	if !forceStop.Load() {
-		t.Fatal("expected forced cleanup to request force-stop shutdown")
-	}
+		var stderr bytes.Buffer
+		start := time.Now()
+		err := stopManagedCity(mc, cityPath, &stderr)
+		// The city never exits: it must consume the 20ms grace and exactly one
+		// 100ms forced wait. Virtual time excludes host scheduling and the real
+		// bead-provider subprocess, whose stop operation is checked below.
+		if elapsed := time.Since(start); elapsed != 120*time.Millisecond {
+			t.Fatalf("stopManagedCity waited %s, want 20ms grace + 100ms forced wait", elapsed)
+		}
+		if err == nil {
+			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited")
+		}
+		if !strings.Contains(err.Error(), "did not exit") {
+			t.Fatalf("stopManagedCity err = %q, want 'did not exit' detail", err.Error())
+		}
+		if !strings.Contains(stderr.String(), "did not exit within") {
+			t.Fatalf("stderr = %q, want forced-timeout warning", stderr.String())
+		}
+		if !closer.closed {
+			t.Fatal("expected closer to be closed after forced cleanup")
+		}
+		if !forceStop.Load() {
+			t.Fatal("expected forced cleanup to request force-stop shutdown")
+		}
+	})
 
 	ops := readOpLog(t, logFile)
 	assertSingleStopWithBenignNoise(t, ops)

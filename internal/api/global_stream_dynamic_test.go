@@ -96,6 +96,38 @@ func newWatchSignalProvider() *watchSignalProvider {
 	return &watchSignalProvider{Fake: events.NewFake(), watched: make(chan struct{}), closed: make(chan struct{})}
 }
 
+// gatedWatchProvider pauses Watch after the provider has resolved its resume
+// cursor, letting tests exercise events from other cities during that attach.
+type gatedWatchProvider struct {
+	*events.Fake
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newGatedWatchProvider() *gatedWatchProvider {
+	return &gatedWatchProvider{
+		Fake:    events.NewFake(),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (p *gatedWatchProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	watcher, err := p.Fake.Watch(ctx, afterSeq)
+	if err != nil {
+		return nil, err
+	}
+	p.startOnce.Do(func() { close(p.started) })
+	<-p.release
+	return watcher, nil
+}
+
+func (p *gatedWatchProvider) releaseWatch() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
 func (p *watchSignalProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
 	inner, err := p.Fake.Watch(ctx, afterSeq)
 	if err != nil {
@@ -341,6 +373,27 @@ func TestSupervisorGlobalEventStreamAttachesCityStartedMidStream(t *testing.T) {
 	betaProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "beta-new"})
 	frame, data = stream.nextTaggedEvent(t)
 	assertTaggedEvent(t, frame, data, "beta", "beta-new", "alpha:1,beta:3")
+}
+
+// The attach cursor must reach the composite position before Watch can block:
+// the stream continues delivering events from already attached cities while
+// a new provider is connecting.
+func TestSupervisorGlobalEventStreamRecordsAttachCursorBeforeWatchReturns(t *testing.T) {
+	alpha := newNamedFakeState(t, "alpha", events.NewFake())
+	resolver := newDynamicCityResolver(map[string]*fakeState{"alpha": alpha})
+	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
+	stream := openLiveGlobalStream(t, sm, "", "")
+
+	betaProv := newGatedWatchProvider()
+	betaProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "beta-old-1"})
+	betaProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "beta-old-2"})
+	resolver.addCity(newNamedFakeState(t, "beta", betaProv))
+	t.Cleanup(betaProv.releaseWatch)
+	waitSignal(t, betaProv.started, "the stream to begin attaching city beta")
+
+	alpha.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "alpha-1"})
+	frame, data := stream.nextTaggedEvent(t)
+	assertTaggedEvent(t, frame, data, "alpha", "alpha-1", "alpha:1,beta:2")
 }
 
 // A resume cursor that names a city which was not running at connect time

@@ -22,6 +22,14 @@ route-scoped demand, hook serving, and route recovery must treat any
 `hold:<reason>` label as parked. Keep the native predicates and generated query
 filters aligned; assigned ownership accounting remains hold-transparent.
 
+## Generated prompt queries stay compact
+
+Prompt renderers emit `gc hook query <tier>` for generated work queries; routing
+policy stays in the shared query builders behind that command. Custom
+`work_query` commands remain caller-owned. Query discovery is read-only;
+`gc hook --claim --json` owns atomic acquisition. Keep prime, startup and lint
+rendering aligned.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

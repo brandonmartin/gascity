@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
@@ -370,7 +371,7 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 	st := NewStore(beads.OrdersStore{Store: mem})
 
 	// cutoff after the bead's creation → stale.
-	stale, err := st.StaleOpenRuns(old.CreatedAt.Add(time.Hour))
+	stale, err := st.StaleOpenRuns(old.CreatedAt.Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -378,7 +379,7 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 		t.Fatalf("StaleOpenRuns(after) = %+v, want the old run", stale)
 	}
 	// cutoff before the bead's creation → not stale.
-	fresh, err := st.StaleOpenRuns(old.CreatedAt.Add(-time.Hour))
+	fresh, err := st.StaleOpenRuns(old.CreatedAt.Add(-time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -397,12 +398,54 @@ func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {
 	if _, err := mem.Create(beads.Bead{Title: "order:b", Labels: []string{"order-run:b", "order-tracking", "trigger-env-failed"}}); err != nil {
 		t.Fatal(err)
 	}
-	runs, err := NewStore(beads.OrdersStore{Store: mem}).OrphanedOpenRuns()
+	runs, err := NewStore(beads.OrdersStore{Store: mem}).OrphanedOpenRuns(time.Now())
 	if err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}
 	if len(runs) != 1 || runs[0].Scoped != "a" {
 		t.Fatalf("OrphanedOpenRuns() = %+v, want only a (trigger-env-failed excluded)", runs)
+	}
+}
+
+func TestTrackingSweepRespectsDispatchDeadline(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		deadline string
+		outcome  RunOutcome
+		wantRuns int
+		wantErr  bool
+	}{
+		{name: "live", deadline: now.Add(time.Hour).Format(time.RFC3339Nano)},
+		{name: "cleanup grace", deadline: now.Add(-30 * time.Second).Format(time.RFC3339Nano)},
+		{name: "grace boundary", deadline: now.Add(-dispatchCompletionGrace).Format(time.RFC3339Nano), wantRuns: 1},
+		{name: "expired", deadline: now.Add(-time.Hour).Format(time.RFC3339Nano), wantRuns: 1},
+		{name: "legacy", wantRuns: 1},
+		{name: "outcome persisted", deadline: now.Add(time.Hour).Format(time.RFC3339Nano), outcome: RunOutcomeExec, wantRuns: 1},
+		{name: "malformed", deadline: "not-a-deadline", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{
+				Title: "order:long-suite", Labels: baseLabels("long-suite", tc.outcome),
+				Metadata: map[string]string{beadmeta.OrderDispatchDeadlineMetadataKey: tc.deadline},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A fresh front door models a sweep in a different process: only the
+			// persisted record can protect the run, not an in-memory dispatch map.
+			st := NewStore(beads.OrdersStore{Store: mem})
+			for name, read := range map[string]func() ([]OrderRun, error){
+				"stale":    func() ([]OrderRun, error) { return st.StaleOpenRuns(b.CreatedAt, now) },
+				"orphaned": func() ([]OrderRun, error) { return st.OrphanedOpenRuns(now) },
+			} {
+				runs, err := read()
+				if (err != nil) != tc.wantErr || len(runs) != tc.wantRuns {
+					t.Errorf("%s sweep = (%+v, %v), want %d runs, error=%t", name, runs, err, tc.wantRuns, tc.wantErr)
+				}
+			}
+		})
 	}
 }
 

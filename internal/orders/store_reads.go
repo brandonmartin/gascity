@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
@@ -141,8 +142,9 @@ func (s *Store) OpenRuns() ([]OrderRun, error) {
 // sweep-vocabulary metadata close. Names are resolved best-effort (Scoped is ""
 // for a tracking bead that carries neither an order-run label nor an order:
 // title), matching the sweep's "when no order filter is set, close every stale
-// tracking bead" behavior.
-func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
+// tracking bead" behavior. Unfinished dispatches are excluded until their
+// persisted deadline plus completion grace, measured against now.
+func (s *Store) StaleOpenRuns(cutoff, now time.Time) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
@@ -155,6 +157,13 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 		if b.CreatedAt.IsZero() || b.CreatedAt.After(cutoff) {
 			continue
 		}
+		protected, err := dispatchProtectedFromSweep(b, now)
+		if err != nil {
+			return nil, err
+		}
+		if protected {
+			continue
+		}
 		name, _ := NameFromTrackingBead(b)
 		out = append(out, decodeRun(name, b))
 	}
@@ -165,9 +174,10 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 // trigger-env-failure markers (which the open-work gate intentionally keeps open
 // until the normal stale sweep), decoded into OrderRun across both tiers. It is
 // the typed read half of the orphaned-order-tracking startup sweep; the caller
-// closes the returned runs via CloseRuns. Names are best-effort (the sweep closes
-// by ID and does not resolve names).
-func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
+// closes the returned runs via CloseRuns. A dispatch with an unexpired deadline
+// is preserved across controller reloads and restarts. Names are best-effort
+// (the sweep closes by ID and does not resolve names).
+func (s *Store) OrphanedOpenRuns(now time.Time) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
@@ -180,10 +190,32 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 		if beadLabelsContain(b.Labels, labelTriggerEnvFail) {
 			continue
 		}
+		protected, err := dispatchProtectedFromSweep(b, now)
+		if err != nil {
+			return nil, err
+		}
+		if protected {
+			continue
+		}
 		name, _ := NameFromTrackingBead(b)
 		out = append(out, decodeRun(name, b))
 	}
 	return out, nil
+}
+
+func dispatchProtectedFromSweep(b beads.Bead, now time.Time) (bool, error) {
+	raw := b.Metadata[beadmeta.OrderDispatchDeadlineMetadataKey]
+	if raw == "" {
+		return false, nil
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return false, fmt.Errorf("order run %q has invalid dispatch deadline %q: %w", b.ID, raw, err)
+	}
+	if outcomeFromLabels(b.Labels) != RunOutcomeNone {
+		return false, nil
+	}
+	return now.Before(deadline.Add(dispatchCompletionGrace)), nil
 }
 
 // ClosedRunsForRetention lists the CLOSED tracking beads across every order

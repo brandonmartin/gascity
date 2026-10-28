@@ -1095,12 +1095,23 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
-	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{})
+	// Bound execution and recovery by the same absolute deadline, including the
+	// time spent creating the run. A separate CLI sweep sees this reservation
+	// even before the goroutine starts, and after a dispatcher reload.
+	ctx, cancel := context.WithTimeout(ctx, effectiveTimeout(a, m.maxTimeout))
+	deadline, _ := ctx.Deadline()
+	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{Deadline: deadline})
 	if err != nil {
+		cancel()
 		return orders.OrderRun{}, err
 	}
 	m.addInflight()
-	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
+	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, func() {
+		cancel()
+		if onDone != nil {
+			onDone()
+		}
+	})
 	return trackingRun, nil
 }
 
@@ -1698,7 +1709,9 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		// address that store: closing through the target scope on a split city
 		// finds nothing, and the marker that suppresses re-dispatch stays open
 		// forever.
-		if err := closeOrderTrackingBead(ctx, m.ordersStoreFor(store), trackingID); err != nil {
+		// Execution cancellation must not cancel the bounded close-verification
+		// retries: timed-out runs still need their terminal record closed.
+		if err := closeOrderTrackingBead(context.WithoutCancel(ctx), m.ordersStoreFor(store), trackingID); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()
@@ -2966,7 +2979,7 @@ func sweepOrphanedOrderTrackingLimit(store beads.Store, limit int) (int, error) 
 	// + legacy issues) and excludes the trigger-env-failure markers the open-work
 	// gate intentionally keeps open.
 	front := orders.NewStore(beads.OrdersStore{Store: store})
-	runs, err := front.OrphanedOpenRuns()
+	runs, err := front.OrphanedOpenRuns(time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -3182,7 +3195,7 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	// close (below) stays raw because it stamps sweep audit metadata that the
 	// domain object deliberately omits, and the wisp-subtree recovery is graph
 	// residual.
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(cutoff)
+	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(cutoff, now)
 	if err != nil {
 		return orderTrackingSweepResult{}, fmt.Errorf("listing order-tracking beads: %w", err)
 	}

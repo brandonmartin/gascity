@@ -234,6 +234,11 @@ becoming more useful as models improve — it becomes LESS useful instead.
   inherit them before creation too. Preserve additional step-local exclusions.
   Both sequential and batch writes must carry exclusions at creation, and
   metadata decoders reject non-string `gc.exclude_claimants` values.
+- **Generated prompt queries stay compact.** Prompt renderers emit `gc hook
+  query <tier>` for generated work queries; routing policy stays in the shared
+  query builders behind that command. Custom `work_query` commands remain
+  caller-owned. Query discovery is read-only; `gc hook --claim --json` owns
+  atomic acquisition. Keep prime, startup and lint rendering aligned.
 - **Dispatch holds use the reserved `hold:` namespace.** `hold:mayor` and
   `hold:external` are the only supported values, but route-scoped demand,
   hook serving, and route recovery must treat any `hold:<reason>` label as

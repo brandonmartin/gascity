@@ -1620,6 +1620,7 @@ go_test(
         "productmetrics_service_child_env_test.go",
         "productmetrics_testhook_test.go",
         "prompt_delivery_test.go",
+        "prompt_hook_query_test.go",
         "prompt_meta_test.go",
         "prompt_missing_template_test.go",
         "prompt_rollout_boundary_test.go",

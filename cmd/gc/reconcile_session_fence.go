@@ -352,6 +352,10 @@ func boundedProbe[T any](ctx context.Context, probe func() T) (T, bool) {
 func boundedProbeCtx[T any](ctx context.Context, probe func(context.Context) T) (T, bool) {
 	ctx, cancel := context.WithTimeout(ctx, fenceProbeTimeout)
 	defer cancel()
+	var zero T
+	if ctx.Err() != nil {
+		return zero, false
+	}
 	out, failed := make(chan T, 1), make(chan struct{})
 	go func() {
 		defer func() {
@@ -361,9 +365,11 @@ func boundedProbeCtx[T any](ctx context.Context, probe func(context.Context) T) 
 		}()
 		out <- probe(ctx)
 	}()
-	var zero T
 	select {
 	case v := <-out:
+		if ctx.Err() != nil {
+			return zero, false
+		}
 		return v, true
 	case <-failed:
 		return zero, false

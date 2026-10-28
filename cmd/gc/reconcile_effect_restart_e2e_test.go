@@ -372,8 +372,10 @@ func TestReadLegsActivity(t *testing.T) {
 	startRuntime(t, leaf.Fake, "s-gc-1", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if f := readLegs(ctx, leaf.P, "s-gc-1", needs{Activity: true}, gatherNow, gatherNow, nil); f.Activity == nil || f.Activity.Reportable && !errors.Is(f.Activity.Err, errProbeExpired) {
-		t.Fatalf("a read past its bound: %+v, want expired", f.Activity)
+	for i := 0; i < 20; i++ {
+		if f := readLegs(ctx, leaf.P, "s-gc-1", needs{Activity: true}, gatherNow, gatherNow, nil); f.Activity == nil || f.Activity.Reportable && !errors.Is(f.Activity.Err, errProbeExpired) {
+			t.Fatalf("canceled read %d: %+v, want expired", i, f.Activity)
+		}
 	}
 	if f := readLegs(context.Background(), noActivityLeaf{leaf.P}, "s-gc-1", needs{Activity: true}, gatherNow, gatherNow, nil); f.Activity == nil || f.Activity.Reportable {
 		t.Fatalf("a leaf that cannot report activity: %+v, want unreportable", f.Activity)

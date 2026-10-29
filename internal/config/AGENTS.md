@@ -62,3 +62,16 @@ release ownership. A singleton keeps its assignee on reopened work so its
 stable identity can reclaim it through the assigned-ready query. Never
 invent a pool route from a singleton's qualified name. This applies to both
 durable and ephemeral work.
+
+## Generated work queries
+
+- **Generated prompt queries stay compact.** Prompt renderers emit `gc hook
+  query <tier>` for generated work queries; routing policy stays in the shared
+  query builders behind that command. Custom `work_query` commands remain
+  caller-owned. Query discovery is read-only; `gc hook --claim --json` owns
+  atomic acquisition. Keep prime, startup and lint rendering aligned.
+- **Dispatch holds use the reserved `hold:` namespace.** `hold:mayor` and
+  `hold:external` are the only supported values, but route-scoped demand,
+  hook serving, and route recovery must treat any `hold:<reason>` label as
+  parked. Keep the native predicates and generated query filters aligned;
+  assigned ownership accounting remains hold-transparent.

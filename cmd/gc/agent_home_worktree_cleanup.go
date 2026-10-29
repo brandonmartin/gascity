@@ -174,9 +174,13 @@ func beadIDFromBranch(cfg *config.City, branch string) string {
 // agentHomeWorkDirs returns the set of resolved work_dir paths of the
 // configured agents, normalized with pathutil.NormalizePathForCompare. An
 // agent whose work_dir template does not expand is skipped and reported on
-// stderr.
+// stderr. A home under the city's default worktrees directory is also
+// recorded under the configured worktrees root (workdir.WorktreesRoot), the
+// directory the cleanup enumerates when GC_WORKTREES_DIR relocates it.
 func agentHomeWorkDirs(cityPath string, cfg *config.City, stderr io.Writer) map[string]bool {
 	cityName := workdir.CityName(cityPath, cfg)
+	defaultRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	configuredRoot := workdir.WorktreesRoot(cityPath)
 	homes := make(map[string]bool, len(cfg.Agents))
 	for i := range cfg.Agents {
 		a := cfg.Agents[i]
@@ -186,6 +190,9 @@ func agentHomeWorkDirs(cityPath string, cfg *config.City, stderr io.Writer) map[
 			continue
 		}
 		homes[pathutil.NormalizePathForCompare(dir)] = true
+		if rel, err := filepath.Rel(defaultRoot, dir); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			homes[pathutil.NormalizePathForCompare(filepath.Join(configuredRoot, rel))] = true
+		}
 	}
 	return homes
 }

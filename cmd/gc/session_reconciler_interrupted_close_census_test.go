@@ -44,7 +44,7 @@ var interruptedCloseCensusArgs = map[string]closeCodeArg{
 	`cmd/gc/session_reconciler.go#reconcileSessionBeadsTracedWithNamedDemand#closeReason`: {
 		codes: []string{"drained"}, poolSlot: true,
 	},
-	`cmd/gc/session_beads.go#closeBeadPreservingAssignees#reason`: {
+	`cmd/gc/session_beads.go#closeSessionBead#reason`: {
 		forwarded: "closeSeat's closeWhy reason; every closeWhy literal is censused",
 	},
 	`cmd/gc/session_reconciler_interrupted_close.go#finishInterruptedClose#info.MetadataState`: {

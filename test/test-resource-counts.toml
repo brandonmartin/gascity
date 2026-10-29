@@ -1460,13 +1460,13 @@ calls = 11
 [[count]]
 path = "examples/gastown/maintenance_bd_integration_test.go"
 resource = "fixed_sleep"
-calls = 3
+calls = 1
 tagged = true
 
 [[count]]
 path = "examples/gastown/maintenance_bd_integration_test.go"
 resource = "subprocess"
-calls = 9
+calls = 3
 tagged = true
 
 [[count]]
@@ -2493,7 +2493,7 @@ tagged = true
 [[count]]
 path = "internal/runtime/tmux/nudge_submit_key_sequence_integration_test.go"
 resource = "fixed_sleep"
-calls = 15
+calls = 5
 tagged = true
 
 [[count]]

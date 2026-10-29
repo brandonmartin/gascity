@@ -1132,7 +1132,7 @@ func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, stor
 	// Bound execution and recovery by the same absolute deadline, including the
 	// time spent creating the run. A separate CLI sweep sees this reservation
 	// even before the goroutine starts, and after a dispatcher reload.
-	ctx, cancel := context.WithTimeout(ctx, effectiveTimeout(a, m.maxTimeout))
+	ctx, cancel := withOrderTimeout(ctx, effectiveTimeout(a, m.maxTimeout))
 	deadline, _ := ctx.Deadline()
 	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{Deadline: deadline})
 	if err != nil {

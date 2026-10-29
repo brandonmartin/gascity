@@ -306,6 +306,15 @@ func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, 
 		case "assignee":
 			query.Assignee = v
 		default:
+			// BdStore pushes portable metadata filters into the wisp query as
+			// metadata.<key>="<value>" clauses (appendBdQueryMetadataClauses).
+			if key, ok := strings.CutPrefix(k, "metadata."); ok && key != "" {
+				if query.Metadata == nil {
+					query.Metadata = map[string]string{}
+				}
+				query.Metadata[key] = v
+				continue
+			}
 			return nil, fmt.Errorf("fake bd query: unsupported key %q", k)
 		}
 	}

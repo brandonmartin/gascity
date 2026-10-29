@@ -108,7 +108,6 @@ func TestPromptQueriesUnchangedOutsideCityScopedAgentsOnRigCities(t *testing.T) 
 		assertQueriesEqualBase(t, f, "prime", prime)
 		assertQueriesEqualBase(t, f, "controller", controller)
 	})
-
 }
 
 // TestPromptQueriesUserWorkQueryOverridesVerbatim pins AC-5 of issue #1689: a

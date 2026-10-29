@@ -329,15 +329,24 @@ func (m *poolRealizeMemo) claimFreshSlot(held, usedSlots map[int]bool, upper int
 	if m.cursor.resumes(usedSlots) {
 		start = m.cursor.slot + 1
 	}
+	skippedExcluded := false
 	for slot := start; unlimited || slot <= upper; slot++ {
 		if m.index != nil {
 			m.index.probes++
 		}
-		if usedSlots[slot] || held[slot] || (excluded != nil && excluded(slot)) {
+		if usedSlots[slot] || held[slot] {
+			continue
+		}
+		if excluded != nil && excluded(slot) {
+			// The slot stays free for another request, so the cursor cannot
+			// claim every slot below it is taken.
+			skippedExcluded = true
 			continue
 		}
 		usedSlots[slot] = true
-		m.cursor = freshCursor{used: usedSlots, slot: slot}
+		if !skippedExcluded {
+			m.cursor = freshCursor{used: usedSlots, slot: slot}
+		}
 		return slot, true
 	}
 	return 0, false

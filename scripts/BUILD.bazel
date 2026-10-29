@@ -8,6 +8,14 @@ exports_files([
     "gc-session-docker",
 ])
 
+sh_test(
+    name = "lint_cache_test",
+    size = "small",
+    srcs = ["lint_cache_test.py"],
+    data = ["lint-with-cache"],
+    env = {"PYTHONDONTWRITEBYTECODE": "1"},
+)
+
 # The repo's shell guards (formerly preflight-static steps), each with
 # exactly the inputs it reads.
 

@@ -392,6 +392,9 @@ func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool)
 	return raw, committedAt, true
 }
 
+// recordResetStallIfDue reports a continuation reset that is still waiting on a
+// start more than startupTimeout after the reconciler could first have made it,
+// and evicts the stale runtime a wedged reset leaves running (#5355).
 func recordResetStallIfDue(
 	cityPath string,
 	store beads.Store,
@@ -420,7 +423,20 @@ func recordResetStallIfDue(
 		return
 	}
 	elapsed := now.Sub(committedAt)
-	if elapsed <= startupTimeout {
+	// With the runtime gone the reset waits only on a start, and a start can
+	// come only on a pass over this session after the commit. A fresh-mode
+	// cycle kills the runtime in one tick and restarts it in the next, so a
+	// tick longer than startup_timeout leaves the first pass after the commit
+	// already past it; that pass has not yet had its chance to start the
+	// session. Measure the wait from that first pass. A runtime still running
+	// is the stale occupant evicted below, and its wait counts from the commit.
+	waited := elapsed
+	if !running {
+		if firstPass, ok := dt.resetFirstPass(info.ID, resetCommittedAt, now); ok {
+			waited = now.Sub(firstPass)
+		}
+	}
+	if waited <= startupTimeout {
 		return
 	}
 	// The dedup mark gates the DIAGNOSTIC and the event, not the eviction:

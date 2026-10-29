@@ -2248,10 +2248,37 @@ go_variant_test(
     test = ":gc_test",
 )
 
+# Every corpus below runs its 1024 seeds in SIM_RANGE_COUNT ranges of
+# SIM_RANGE_SEEDS, range i in SIM_RANGE_ENV[i], all at once beside gc_test's
+# shards. A range's seeds run in series, so its wall time is its CPU time
+# stretched by contention, and on a local-exec host the contention is the
+# invocation's own: its actions share one cgroup's fair share of the CPU (a
+# login session's scope, weighted like every other busy one), so ~100 concurrent
+# ranges ran at ~8% of a core each and a range's wall time followed the whole
+# corpus's CPU (ga-22wr1: 64-seed ranges ran 216-312 s at host load 157-400,
+# against go_test_run's 280 s -test.timeout and a medium test's 300 s). Each
+# range therefore runs lean: GOGC=400 (a third of a seed's CPU was the collector
+# over a small live heap) and GOMAXPROCS=2 (the sim is one goroutine at a time;
+# 96 Ps spent the rest spinning) cut a 32-seed range's CPU from 38 s to 21 s,
+# its unloaded wall time ~24-28 s either way, for ~13% more peak RSS (292 -> 329
+# MB). Ranges of 32 halve each action where executors are not the bottleneck. A
+# range of fewer than simCISeeds skips TestSimCorpus's admission checks;
+# gc_test's TestSimCorpus still runs them over seeds 1-64.
+SIM_RANGE_SEEDS = 32
+
+SIM_RANGE_COUNT = 1024 // SIM_RANGE_SEEDS
+
+SIM_RANGE_ENV = [{
+    "GC_V2_SIM_SEEDS": str(SIM_RANGE_SEEDS),
+    "GC_V2_SIM_SEED_FIRST": str(1 + SIM_RANGE_SEEDS * i),
+    "GOGC": "400",
+    "GOMAXPROCS": "2",
+} for i in range(SIM_RANGE_COUNT)]
+
 # The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
-# runs the first simCISeeds; these run all 1024 of each corpus in sixteen
-# ranges of 64, the plain corpus and the floored one with pending creates
-# seeded (TestSimCorpusFlooredPending, mc-cjtkj). Each range runs once as an
+# runs the first simCISeeds; these run all 1024 of each corpus in ranges, the
+# plain corpus and the floored one with pending creates seeded
+# (TestSimCorpusFlooredPending, mc-cjtkj). Each range runs once as an
 # action (go_test_run: the same binary, no extra compile), in parallel beside
 # gc_test's shards, writing its coverage census, and
 # gc_sim_coverage_gate_test sums the censuses (architecture item C), which
@@ -2271,19 +2298,16 @@ SIM_CORPORA = {
     "gc_sim_corpus_floored_pending": "TestSimCorpusFlooredPending",
 }
 
-SIM_RANGES = ["%s_%d" % (name, i) for name in SIM_CORPORA for i in range(16)]
+SIM_RANGES = ["%s_%d" % (name, i) for name in SIM_CORPORA for i in range(SIM_RANGE_COUNT)]
 
 [go_test_run(
     name = "%s_%d_run" % (name, i),
     testonly = True,
     outs = {"GC_V2_SIM_COVERAGE": "%s_%d.census.json" % (name, i)},
     args = ["-test.run=^%s$" % test],
-    env = {
-        "GC_V2_SIM_SEEDS": "64",
-        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
-    },
+    env = SIM_RANGE_ENV[i],
     test = ":gc_test",
-) for name, test in SIM_CORPORA.items() for i in range(16)]
+) for name, test in SIM_CORPORA.items() for i in range(SIM_RANGE_COUNT)]
 
 # Fails on a registered arm, effect kind or settle outcome no range reaches,
 # unless simCoverageAllowlist names its generator bead (mc-i7efm), or when a
@@ -2302,22 +2326,19 @@ go_variant_test(
 
 # The corpus on the shifted stream (TestSimCorpusShiftedRNG, mc-946b6): one
 # extra RNG draw per step, so 1024 schedules main's stream never takes, in
-# sixteen ranges of 64. Ordinary test targets, outside SIM_CORPORA (the #7765
-# review): a failure is never cached, a retry reruns it, and --runs_per_test
-# and --test_env reach it.
+# ranges. Ordinary test targets, outside SIM_CORPORA (the #7765 review): a
+# failure is never cached, a retry reruns it, and --runs_per_test and
+# --test_env reach it.
 [go_variant_test(
     name = "gc_sim_corpus_shifted_%d_test" % i,
     size = "medium",
     args = ["-test.run=^TestSimCorpusShiftedRNG$$"],
-    env = {
-        "GC_V2_SIM_SEEDS": "64",
-        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
-    },
+    env = SIM_RANGE_ENV[i],
     test = ":gc_test",
-) for i in range(16)]
+) for i in range(SIM_RANGE_COUNT)]
 
 # The floored corpus (TestSimCorpusFloored: a min_active_sessions floor, no
-# pending creates), all 1024 seeds in sixteen ranges of 64 (CONTRACT v5.10l,
+# pending creates), all 1024 seeds in ranges (CONTRACT v5.10l,
 # mc-su7hv); gc_test runs only its first 64. Ordinary test targets outside
 # SIM_CORPORA, as the shifted ranges are. Replay one seed with
 #   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpusFloored$' ./cmd/gc/
@@ -2325,12 +2346,9 @@ go_variant_test(
     name = "gc_sim_corpus_floored_%d_test" % i,
     size = "medium",
     args = ["-test.run=^TestSimCorpusFloored$$"],
-    env = {
-        "GC_V2_SIM_SEEDS": "64",
-        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
-    },
+    env = SIM_RANGE_ENV[i],
     test = ":gc_test",
-) for i in range(16)]
+) for i in range(SIM_RANGE_COUNT)]
 
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.

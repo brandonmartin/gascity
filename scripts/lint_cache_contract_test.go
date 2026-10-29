@@ -12,8 +12,9 @@ import (
 // cache shared across sibling or throwaway checkouts therefore replays paths
 // into a tree that may no longer exist, and once it is gone the nolint and
 // generated-file processors cannot read the source: every suppressed finding
-// leaks and a clean tree lints red. The Makefile keeps the cache inside the
-// checkout unless the caller chooses one.
+// leaks and a clean tree lints red. The Makefile keeps the fallback cache
+// inside the checkout unless the caller chooses one; lint-with-cache uses
+// private seed copies.
 func TestLintCacheDefaultsToTheCheckout(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
@@ -41,9 +42,8 @@ func TestLintCacheDefaultsToTheCheckout(t *testing.T) {
 	}
 }
 
-// Two checkouts of the same content must not share a cache by default, and an
-// explicit GOLANGCI_LINT_CACHE still wins so CI and deliberate sharing keep
-// working.
+// When scratch seeding is off, checkouts have independent defaults and an
+// explicit GOLANGCI_LINT_CACHE still wins.
 func TestLintCacheIsScopedPerCheckout(t *testing.T) {
 	fixture := newPRStaticScopeFixture(t, map[string]string{
 		"example.go": "package example\n\nfunc Value() int { return 1 }\n",
@@ -74,7 +74,7 @@ printf '%s\n' "${GOLANGCI_LINT_CACHE-unset}" >> "$LINT_CACHE_LOG"
 			}
 			env = append(env, entry)
 		}
-		cmd.Env = append(append(env, "LINT_CACHE_LOG="+cacheLog), extraEnv...)
+		cmd.Env = append(append(env, "LINT_CACHE_ROOT=off", "LINT_CACHE_LOG="+cacheLog), extraEnv...)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("lint-golangci failed: %v\n%s", err, output)
 		}

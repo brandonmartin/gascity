@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Run golangci-lint with immutable bounded seeds and disposable private caches.
+
+LINT_CACHE_ROOT defaults to /mnt/data1/gc-lint-cache/<uid>. Set it to 'off'
+to use the caller's caches unchanged. Hosts without /mnt/data1 also run
+directly. LINT_CACHE_MAX_BYTES bounds retained seeds (default 16 GiB); active
+runs have private copies, removed on exit. Seed misses serialize per lock
+stripe; warm runs only hold the store lock while copying their seed.
+"""
+
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+
+class InterruptedBySignal(BaseException):
+    """Unwind cache copies and kernel locks when terminated outside lint."""
+
+    def __init__(self, signum):
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def directory_lock(path):
+    """Lock an open directory, so no PID, lockfile or stale-owner state exists."""
+    path.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def cache_identity(lint, args, env, cwd):
+    """Fingerprint effective tools, module resolution, config and arguments."""
+    version = subprocess.check_output([lint, "version"], env=env, text=True).strip()
+    goenv = json.loads(subprocess.check_output(["go", "env", "-json"], env=env, text=True))
+    module = Path(goenv.get("GOMOD") or cwd / "go.mod")
+    # GOGCCFLAGS includes a new go-build scratch prefix on every query;
+    # its compiler/target inputs (CC, CGO_*FLAGS, GOOS, GOARCH) remain keyed.
+    for name in ("GOCACHE", "GOTMPDIR", "GOMOD", "GOGCCFLAGS"):
+        goenv.pop(name, None)
+    digest = hashlib.sha256()
+
+    def add(value):
+        digest.update(value)
+        digest.update(b"\0")
+
+    add(b"gascity-lint-seed-v1")
+    add(version.encode())
+    add(Path(lint).read_bytes())
+    add(json.dumps(goenv, sort_keys=True).encode())
+    add(json.dumps(args).encode())
+    for name, path in (("go.mod", module), ("go.sum", module.with_suffix(".sum"))):
+        add(name.encode())
+        add(path.read_bytes() if path.exists() else b"missing")
+    workspace = goenv.get("GOWORK", "")
+    if workspace and workspace != "off":
+        for path in (Path(workspace), Path(workspace + ".sum")):
+            add(path.read_bytes() if path.exists() else b"missing")
+
+    config_args = []
+    for index, arg in enumerate(args):
+        if arg in ("-c", "--config"):
+            config_args.extend((arg, args[index + 1]))
+        elif arg == "--no-config" or arg.startswith(("--config=", "-c=")):
+            config_args.append(arg)
+    if "--no-config" not in config_args:
+        config = subprocess.check_output(
+            [lint, "config", "path", *config_args], env=env, text=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+        add((cwd / config).read_bytes())
+    else:
+        add(b"no-config")
+
+    # v2.14.0 stores module-relative positions (runners_cache.go), unlike
+    # v2.12.0. Keep this an audited allowlist: an unknown binary version can
+    # reuse Go build objects but never another checkout's lint issue paths.
+    share_results = re.search(r"\bversion 2\.14\.0\s", version) is not None
+    return digest.hexdigest(), share_results
+
+
+def tree_size(path):
+    return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
+
+
+def copy_cache(source, destination):
+    if source.is_dir():
+        # copy2 creates new writable inodes; hard links would let a gate
+        # mutate the seed and every other gate's cache simultaneously.
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
+def trim_seeds(seeds, max_bytes):
+    entries = sorted(seeds.iterdir(), key=lambda path: path.stat().st_mtime_ns)
+    sizes = [(path, tree_size(path)) for path in entries]
+    total = sum(value for _, value in sizes)
+    for path, value in sizes:
+        if total <= max_bytes:
+            break
+        shutil.rmtree(path)
+        total -= value
+
+
+def publish(root, key, private, share_results, max_bytes):
+    seeds = root / "seeds"
+    seed = seeds / key
+    size = tree_size(private / "go")
+    if share_results:
+        size += tree_size(private / "lint")
+    if size > max_bytes:
+        print(f"lint-cache: seed too large ({size} > {max_bytes} bytes); not retained", file=sys.stderr)
+        return
+    trim_seeds(seeds, max_bytes - size)
+    # Rename completed private caches into the store under the store lock.
+    # Nothing ever runs against seed paths, and a seed is never updated.
+    if not share_results:
+        shutil.rmtree(private / "lint")
+    private.rename(seed)
+
+
+def run_cached(root, key, share_results, command, env, run, max_bytes):
+    """Give each invocation independent caches; publish only completed lint."""
+    (root / "seeds").mkdir(parents=True, exist_ok=True)
+    (root / "runs").mkdir(exist_ok=True)
+    # Fixed stripes bound the number of lock directories across key churn.
+    # Locks live in the kernel; no process identity is persisted on disk.
+    with tempfile.TemporaryDirectory(prefix="gate-", dir=root / "runs") as temp:
+        private = Path(temp) / "cache"
+        (private / "go").mkdir(parents=True)
+        (private / "lint").mkdir()
+        seed = root / "seeds" / key
+        lock = contextlib.ExitStack()
+        with lock:
+            lock.enter_context(directory_lock(root / "locks" / key[:2]))
+            with directory_lock(root):
+                trim_seeds(root / "seeds", max_bytes)
+                hit = seed.is_dir()
+                if hit:
+                    copy_cache(seed / "go", private / "go")
+                    if share_results:
+                        copy_cache(seed / "lint", private / "lint")
+                    os.utime(seed, None)
+            if hit:
+                # Warm runs lint concurrently after copying their seed.
+                lock.close()
+            print(f"lint-cache: {'hit' if hit else 'miss'} key={key} "
+                  f"results={'portable' if share_results else 'private'}", file=sys.stderr)
+            child_env = dict(env, GOCACHE=str(private / "go"),
+                             GOLANGCI_LINT_CACHE=str(private / "lint"), GOCACHEPROG="")
+            code = run(command, child_env)
+            # 0 = clean, 1 = findings. Other statuses can mean partial
+            # analysis, invalid config or interruption and never seed.
+            if not hit and code in (0, 1):
+                with directory_lock(root):
+                    publish(root, key, private, share_results, max_bytes)
+            return code
+
+
+def run_command(command, env):
+    """Forward termination to the complete lint process group, then reap it."""
+    with subprocess.Popen(command, env=env, start_new_session=True) as child:
+        def interrupted(signum, frame):
+            os.killpg(child.pid, signum)
+
+        previous = {}
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.signal(signum, interrupted)
+        try:
+            code = child.wait()
+            return code if code >= 0 else 128 - code
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("usage: lint-with-cache <golangci-lint> run [args...]", file=sys.stderr)
+        return 2
+    lint = shutil.which(sys.argv[1]) or sys.argv[1]
+    args = sys.argv[2:]
+    command = [lint, *args]
+    env = dict(os.environ)
+    configured = env.get("LINT_CACHE_ROOT")
+    if configured == "off" or (configured is None and not Path("/mnt/data1").is_dir()):
+        return run_command(command, env)
+    root = Path(configured or f"/mnt/data1/gc-lint-cache/{os.getuid()}").resolve()
+    try:
+        max_bytes = int(env.get("LINT_CACHE_MAX_BYTES", str(16 * 1024**3)))
+        if max_bytes <= 0:
+            raise ValueError("LINT_CACHE_MAX_BYTES must be positive")
+        key, share_results = cache_identity(lint, args, env, Path.cwd())
+    except (OSError, ValueError, IndexError, subprocess.CalledProcessError) as error:
+        # Cache identity must be complete; an uncached real lint still owns
+        # its verdict and reports its own config/tool errors as usual.
+        print(f"lint-cache: cannot fingerprint; running directly: {error}", file=sys.stderr)
+        return run_command(command, env)
+    started = time.monotonic()
+    code = run_cached(root, key, share_results, command, env, run_command, max_bytes)
+    print(f"lint-cache: wall={time.monotonic() - started:.3f}s exit={code}", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    def interrupt(signum, frame):
+        raise InterruptedBySignal(signum)
+
+    for termination in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(termination, interrupt)
+    try:
+        sys.exit(main())
+    except InterruptedBySignal as error:
+        sys.exit(128 + error.signum)

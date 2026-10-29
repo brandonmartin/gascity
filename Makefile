@@ -365,17 +365,20 @@ LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
 LINT_GOMEMLIMIT ?= 6GiB
-# golangci-lint's result cache is keyed by module-relative content, but a
+# Legacy golangci-lint's result cache is keyed by module-relative content, but a
 # cached issue keeps the absolute path of the checkout that produced it. Shared
 # across sibling or throwaway checkouts (gate scratch trees, per-bead
 # worktrees) it replays paths into a tree that may already be gone, and then
 # the nolint and generated-file processors cannot read the source: every
 # suppressed finding leaks and a clean tree lints red (ga-3w9i, gp-to2zr). Keep
-# the cache inside the checkout; a caller that wants one shared sets its own.
+# fallback cache inside the checkout. lint-golangci uses lint-with-cache on
+# scratch hosts: immutable versioned seeds, private copies, and result reuse
+# only for audited lint versions with module-relative issue positions.
 GOLANGCI_LINT_CACHE ?= $(CURDIR)/.cache/golangci-lint
 LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)"
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
+LINT_CACHE_RUNNER := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lint-with-cache
 
 # Lint and vet run as nogo (//tools/nogo): go vet's analyzers plus the
 # linters .golangci.yml enables, validated beside every Go compile, so
@@ -447,7 +450,7 @@ lint-affected lint-full: lint
 
 ## lint-golangci: golangci-lint outside Bazel, for hosts nogo does not cover (macOS jobs: darwin-only files)
 lint-golangci: $(GOLANGCI_LINT)
-	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	$(LINT_ENV) python3 "$(LINT_CACHE_RUNNER)" "$(GOLANGCI_LINT)" run $(LINT_FLAGS) ./...
 
 ## vet-go: plain `go vet` outside Bazel, for hosts nogo does not cover (macOS jobs)
 vet-go:

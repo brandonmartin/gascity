@@ -211,6 +211,7 @@ const (
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
 	TraceReasonWakeBudget            TraceReasonCode = "wake_budget"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
+	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
 )
 
 type TraceOutcomeCode string
@@ -305,6 +306,9 @@ const (
 	// TraceOutcomeDeferredByOnDeathHook marks a start deferred before any
 	// write because the name's on_death hook is queued or running.
 	TraceOutcomeDeferredByOnDeathHook TraceOutcomeCode = "deferred_by_on_death_hook"
+	// TraceOutcomeDeferredByPrepareBudget marks a start deferred before any
+	// write because the planner call's cumulative prepare time spent its budget.
+	TraceOutcomeDeferredByPrepareBudget TraceOutcomeCode = "deferred_by_prepare_budget"
 	// TraceOutcomeSkippedPresent marks an on_death hook skipped because its
 	// name was listed again when the hook was due.
 	TraceOutcomeSkippedPresent TraceOutcomeCode = "skipped_present"

@@ -3379,6 +3379,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withWakeBudgetDeferrals(&cr.wakeBudgetDeferrals),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		withScaleDemandExcludes(scaleDemandExcludesByTemplate(result.ScaleCheckDemand)),
 		// The legs this tick read the surviving assigned work through. The
@@ -4246,6 +4247,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		withWakeBudgetDeferrals(&cr.wakeBudgetDeferrals),
 		withPartialWakeBudgetView(),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }

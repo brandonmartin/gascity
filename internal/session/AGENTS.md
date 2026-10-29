@@ -140,6 +140,14 @@ see `SESSION-HISTORY-EXACT-KEY`. OpenCode and ZCode still prefer a keyed hit
 model-usage paths in `internal/worker` resolve OpenCode by key only and never
 take the fallback.
 
+## Wake-budget pending creates
+
+A never-started pending create deferred by the wake budget in the last
+completed start pass must survive both the stale-create reaper and the desired
+reconciler's rollback and heal. The process-local hold is fenced to the row's
+incarnation and replaced by the next complete, non-partial pass; unheld or undesired rows
+retain their normal cleanup. Keep the trace and both cleanup paths aligned.
+
 ## Manual Close During Reconciliation
 
 A desired manual entry retains a previously discovered conversation; it is not

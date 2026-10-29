@@ -266,7 +266,8 @@ type CityRuntime struct {
 	// capacityGuard is the per-endpoint capacity breaker, built on first use
 	// by ensureEndpointCapacityGuard. It is process-local and survives config
 	// reload, like asyncStartLimiter.
-	capacityGuard *endpointCapacityGuard
+	capacityGuard       *endpointCapacityGuard
+	wakeBudgetDeferrals wakeBudgetDeferrals
 
 	// strandedAlerts raises session.stranded_claims across ticks
 	// (work_release.go); built on first use (strandedClaimAlerter).
@@ -3489,6 +3490,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withWakeBudgetDeferrals(&cr.wakeBudgetDeferrals),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
@@ -3913,9 +3915,9 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 }
 
 // reapStaleSessionBeads reaps stale creating session beads, keeping rows the
-// endpoint capacity breaker holds.
+// endpoint capacity breaker or wake budget holds.
 func (cr *CityRuntime) reapStaleSessionBeads(sw *SeatWork) int {
-	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
+	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, pendingCreateHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard(), &cr.wakeBudgetDeferrals), clock.Real{}, cr.stderr)
 }
 
 // ensureEndpointCapacityGuard returns the city's endpoint capacity guard,
@@ -4352,9 +4354,11 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout,
 		cr.stderr,
-		// The dispatcher's starts hit the same endpoints; without the guard
-		// this path would bypass the capacity breaker.
+		// The dispatcher's filtered reconcile shares the holds, but cannot
+		// clear entries for sessions outside its view.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
+		withWakeBudgetDeferrals(&cr.wakeBudgetDeferrals),
+		withPartialWakeBudgetView(),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
 	)

@@ -388,6 +388,14 @@ func endpointHoldForRows(cfg *config.City, g *endpointCapacityGuard) func(sessio
 	}
 }
 
+// pendingCreateHoldForRows combines the reaper's endpoint and wake-queue holds.
+func pendingCreateHoldForRows(cfg *config.City, capacity *endpointCapacityGuard, budget *wakeBudgetDeferrals) func(sessionpkg.Info) bool {
+	endpointHold := endpointHoldForRows(cfg, capacity)
+	return func(info sessionpkg.Info) bool {
+		return endpointHold(info) || (info.PendingCreateClaim && budget.holds(info))
+	}
+}
+
 // refusalsInEpisode is how many times sessionID was refused during k's
 // current open episode. Probe rotation ranks by it, fewest first.
 func (g *endpointCapacityGuard) refusalsInEpisode(k endpointKey, sessionID string) int {

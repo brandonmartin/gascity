@@ -45,6 +45,8 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 
 type sessionWakeDeps struct {
 	store                     beads.Store
+	resolveSessionID          func(string, *config.City, beads.Store, string) (string, error)
+	willNotStart              func(session.Info, wakeVerdictDeps, time.Time) (string, bool)
 	cfg                       *config.City
 	cityPath                  string
 	cityResolved              bool
@@ -87,6 +89,8 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
 		sp:                        wakeVerdictProvider(),
 		store:                     store,
+		resolveSessionID:          resolveSessionIDMaterializingNamed,
+		willNotStart:              wakeWillNotStart,
 		cfg:                       cfg,
 		cityPath:                  cityPath,
 		cityResolved:              cityErr == nil,
@@ -102,7 +106,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 
 func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
 	sessStore := cliSessionStore(deps.store, deps.cfg, deps.cityPath)
-	id, err := resolveSessionIDMaterializingNamed(deps.cityPath, deps.cfg, sessStore, target)
+	id, err := deps.resolveSessionID(deps.cityPath, deps.cfg, sessStore, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
@@ -172,7 +176,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		if info, err := sessFront.Get(id); err == nil {
 			woken = info
 		}
-		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
+		if why, _ := deps.willNotStart(woken, wakeVerdictDeps{
 			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, work: cityWorkLegOf(beads.WorkStore{Store: deps.store}), rigStores: rigStores,
 		}, deps.now()); why != "" {
 			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck

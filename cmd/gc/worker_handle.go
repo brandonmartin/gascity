@@ -298,7 +298,10 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	// project the workspace environment here before handing the runtime to the
 	// worker factory. In particular, workspace.env BD_BIN must follow the same
 	// schema-compatible executable as the controller and resumed sessions.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionEnv, err := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, template, alias)
+	if err != nil {
+		return nil, err
+	}
 	sessionCfg.Runtime.SessionEnv = sessionEnv
 	sessionCfg.Runtime.Hints.Env = sessionEnv
 	// Stage provider-overlay hooks on the CLI create path the same way the
@@ -356,8 +359,8 @@ func resolvedWorkerSessionConfigWithConfig(
 	// for the CLI create-mode path. Without this, `gc session` /
 	// `gc session start` style direct creates land with SessionEnv
 	// lacking GC_CITY / GC_CITY_PATH / GC_CITY_RUNTIME_DIR, and the
-	// spawned shell cannot locate its city. Rig-scoped env remains a
-	// create-time contract owned by template_resolve.go. Matches the resume-path
+	// spawned shell cannot locate its city. Scope is projected by the caller
+	// once the configured template and rig are known. Matches the resume-path
 	// reseed at resolvedWorkerRuntimeWithConfigAndMetadata and the
 	// API-side seeding in internal/api/session_resolved_config.go.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
@@ -403,24 +406,37 @@ func resolvedWorkerSessionConfigWithConfig(
 // provider process context and provider-authored values, matching the
 // canonical resolveTemplate layering. Identity and controller-only overlays
 // remain authoritative at the end.
-func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider) map[string]string {
+func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider, template, qualifiedName string) (map[string]string, error) {
 	if resolved == nil {
-		return nil
+		return nil, nil
 	}
-	var workspaceEnv map[string]string
+	var workspaceEnv, agentEnv, scopeEnv map[string]string
 	if cfg != nil {
 		workspaceEnv = cfg.Workspace.Env
+		if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil && strings.TrimSpace(cityPath) != "" {
+			agentEnv = agentCfg.Env
+			qualifiedName = firstNonEmptyGCString(qualifiedName, agentCfg.QualifiedName(), template)
+			ctx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
+			var err error
+			scopeEnv, err = sessionScopeEnv(cityPath, ctx.Rig, ctx.RigRoot, cfg.Rigs)
+			if err != nil {
+				return nil, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
+			}
+		}
 	}
 	sessionEnv := mergeEnv(
 		providerProcessPassthroughEnv(),
 		expandEnvMap(workspaceEnv),
 		expandEnvMap(resolved.Env),
+		expandEnvMap(agentEnv),
+		scopeEnv,
 		processenv.ControllerOnlyEnvOverlay(),
 	)
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
-	return sessionEnv
+	processenv.PrependGCBinDirToPATH(sessionEnv, sessionEnv["GC_BIN"])
+	return sessionEnv, nil
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
@@ -704,15 +720,18 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// Reseed the city-anchored identity vars (GC_CITY, GC_CITY_PATH,
 	// GC_CITY_RUNTIME_DIR) on top of the provider env. Without this,
 	// session restart paths drop the city anchor and the spawned shell
-	// cannot locate its city. Rig-scoped env remains a create-time
-	// contract owned by template_resolve.go.
+	// cannot locate its city. Restore the same storage scope as template
+	// creation so a fresh runtime routes to the correct bead store.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
 	//
 	// Identity-only (no GC_CONTROL_DISPATCHER_TRACE_DEFAULT): the
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionEnv, err := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, info.Template, firstNonEmptyGCString(info.AgentName, info.Template))
+	if err != nil {
+		return nil, err
+	}
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty

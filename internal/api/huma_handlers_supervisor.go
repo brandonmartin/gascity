@@ -910,20 +910,19 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			// the city set) resumes there without a gap. Otherwise it starts
 			// from "now", like a head-start connection, unless the client
 			// asked for replay from zero.
-			var seq uint64
-			if resumed, ok := position.Resume(city); ok {
-				seq = resumed
-			} else if replayNewCitiesFromZero {
-				seq = 0
-			} else {
+			seq, ok := position.Resume(city)
+			if !ok && !replayNewCitiesFromZero {
 				var err error
-				seq, err = p.LatestSeq()
-				if err != nil {
+				if seq, err = p.LatestSeq(); err != nil {
 					return 0, err
 				}
 			}
-			// Watch can block while the stream continues sending events from
-			// attached cities, so expose this resume point before Watch starts.
+			// Record the city's start seq before its watcher exists, so the
+			// composite SSE id carries it and a reconnect resumes the city from
+			// where this stream attached. Sync starts delivering a city's events
+			// as soon as its watcher attaches, before Sync returns: recording
+			// the start seq afterwards would let the city's first frames go out
+			// with an id that omits the city.
 			position.Attach(map[string]uint64{city: seq})
 			return seq, nil
 		})

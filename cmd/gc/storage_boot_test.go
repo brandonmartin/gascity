@@ -1062,6 +1062,56 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 		"a migrator that refused must record no convergence")
 }
 
+// TestStorageMigrateClearsAConvergedCityDespiteRigResidue covers the re-run
+// the upgrade order ends with: a converged city whose work store still holds
+// retained copies, beside a rig scope holding pre-split infrastructure rows.
+// The re-run copies nothing, so the census that guards a copy does not run:
+// the clear proceeds, `gc storage status` exits 0, and the rig row is
+// untouched. Refused, as it was, the city kept the retained copies boot
+// refuses over, and every seat's drain fence stayed closed on them.
+func TestStorageMigrateClearsAConvergedCityDespiteRigResidue(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	source := stubStrandedRecoverySource(t)
+	stubInfraControllerPing(t, 0)
+	carried := mustCreateInfraBead(t, source, beads.Bead{Title: "a delivered mail", Type: "message"})
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s, want converged: %s", got.Outcome, log.String())
+	}
+
+	cfg.Rigs = []config.Rig{{Name: "packs", Prefix: "gp", Path: rigPath}}
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "gp"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a pre-split workflow step", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": "gp-root", "gc.kind": "task"}})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+	if err := censusRigInfraResidue(request.CityPath, cfg); err == nil || !strings.Contains(err.Error(), stray.ID) {
+		t.Fatalf("precondition: the census = %v, want a refusal naming %s", err, stray.ID)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 {
+		t.Fatalf("precondition: status exits 0 with the retained copy %s in the work store: %s", carried.ID, stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the clear-only re-run = %d, want 0: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := source.Get(carried.ID); err == nil {
+		t.Errorf("the re-run left the retained copy %s", carried.ID)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageStatus(request, &stdout, &stderr); code != 0 {
+		t.Errorf("status after the clear = %d, want 0: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the re-run touched the rig row %s: %v", stray.ID, err)
+	}
+}
+
 // TestStorageMigrateAcceptsRigSharingTheCityStore covers a rig whose binding
 // is the city's own work store (a unified city whose rig .beads carries a copy
 // of the city's remote binding, or resolves to the same database). Its rows
@@ -1103,12 +1153,12 @@ func TestStorageMigrateAcceptsRigSharingTheCityStore(t *testing.T) {
 // TestStorageMigrateRefusesRigRowHeldInAnotherState covers a rig store that
 // holds a city id in a state the city work store does not. The copy carries
 // the city's version, so the rig's would be dropped: each is refused by name,
-// on whichever field differs, because a listing has no version stamp to notice
-// the change by (the native store clears Revision and never fills UpdatedAt).
-// A token or a timestamp only one side publishes is no evidence either way,
-// whichever side that is, and neither is bd's readiness projection or the order
-// labels and edges come back in, so those rows are judged on the rest of the
-// row and accepted.
+// on whichever field differs, because no version stamp is comparable across
+// the two stores (a revision is each store's own token, bd lists none, and the
+// native store never fills UpdatedAt). A revision on either side, a timestamp
+// only one side publishes, bd's readiness projection and the order labels and
+// edges come back in are no evidence either way, so those rows are judged on
+// the rest of the row and accepted.
 func TestStorageMigrateRefusesRigRowHeldInAnotherState(t *testing.T) {
 	rigPath := t.TempDir()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
@@ -1147,10 +1197,10 @@ func TestStorageMigrateRefusesRigRowHeldInAnotherState(t *testing.T) {
 			b.Dependencies = []beads.Dep{b.Dependencies[0], {DependsOnID: "gc-other", Type: "blocks"}}
 			return b
 		}, true},
-		{"a published revision", func(b beads.Bead) beads.Bead { b.Revision = shared.Revision + 1; return b }, true},
+		{"another store's revision", func(b beads.Bead) beads.Bead { b.Revision = shared.Revision + 7919; return b }, false},
 		{"a published create time", func(b beads.Bead) beads.Bead { b.CreatedAt = b.CreatedAt.Add(-time.Hour); return b }, true},
 		{"a published update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = b.UpdatedAt.Add(time.Hour); return b }, true},
-		{"an unpublished revision", func(b beads.Bead) beads.Bead { b.Revision = 0; return b }, false},
+		{"a legacy revision", func(b beads.Bead) beads.Bead { b.Revision = 0; return b }, false},
 		{"an unpublished create time", func(b beads.Bead) beads.Bead { b.CreatedAt = time.Time{}; return b }, false},
 		{"an unpublished update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = time.Time{}; return b }, false},
 		{"label order", func(b beads.Bead) beads.Bead { b.Labels = []string{"beta", "alpha"}; return b }, false},

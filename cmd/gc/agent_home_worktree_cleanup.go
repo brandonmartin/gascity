@@ -70,7 +70,7 @@ func cleanupClosedBeadAgentHomeWorktrees(
 
 	sessionHomes := agentHomeWorkDirs(cityPath, cfg, stderr)
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 	cleaned := 0
 
 	for rigName, store := range rigStores {

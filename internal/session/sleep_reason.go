@@ -49,6 +49,7 @@ const (
 // "suspended" is a rig-suspend drain (gc rig suspend): an explicit operator
 // stop, distinct from idle / assigned-work-exhausted so operators can see
 // that suspend actually quiesced the session.
+// "killed" is the gc session kill operator stop (SleepReasonKilled, kill_fence.go).
 // "provider-terminal-error" is a classified, non-retryable provider failure
 // (set by markProviderTerminalError); it is suppressed here so a session
 // already parked terminal cannot also accrue a spurious wake failure, making
@@ -62,9 +63,9 @@ func IsDeliberateSleepReason(reason string) bool {
 	switch SleepReason(strings.TrimSpace(reason)) {
 	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
 		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
-		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
-		SleepReasonFailedCreate, SleepReasonProviderTerminalError,
-		SleepReasonSuspended:
+		SleepReasonKilled, SleepReasonUserHold, SleepReasonWaitHold,
+		SleepReasonRateLimit, SleepReasonFailedCreate,
+		SleepReasonProviderTerminalError, SleepReasonSuspended:
 		return true
 	default:
 		return false

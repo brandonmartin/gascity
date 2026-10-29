@@ -343,6 +343,7 @@ func runCompactScriptForRealDoltTest(t *testing.T, doltPath, root, cityPath, dat
 		"GC_DOLT_COMPACT_SKIP_FETCH",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS",
+		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
 	),
 		"PATH="+filepath.Dir(doltPath)+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -355,6 +356,7 @@ func runCompactScriptForRealDoltTest(t *testing.T, doltPath, root, cityPath, dat
 		"GC_DOLT_MANAGED_LOCAL=1",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=30",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=30",
+		"GC_DOLT_COMPACT_MIN_FREE_BYTES=0",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()

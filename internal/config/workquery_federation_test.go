@@ -15,8 +15,9 @@ import (
 // with a non-zero exit naming the rig, because a short array is
 // indistinguishable from an empty queue (cmd/gc/ready_federation.go). If the
 // generated shell captured that exit into an empty $r and fell through to the
-// next tier — which is exactly what the single-store tiers do, on purpose — the
-// query would print "[]" and exit 0, and the whole slice would buy nothing.
+// next tier, the query would print "[]" and exit 0, and the whole slice would
+// buy nothing. The single-store tiers hold the same property against a failing
+// `bd` (workquery_fails_loudly_test.go).
 //
 // So each case runs the real generated script against a fake `gc` that fails the
 // way a dead rig makes it fail, and asserts the script's own exit status and
@@ -112,30 +113,25 @@ func TestFederatedPoolDemandPropagatesADeadLeg(t *testing.T) {
 // unreadable store makes the real one fail. A single-store city shells `bd`, not
 // `gc`, so this — not fakeGCReadyFails — is what actually exercises its tiers.
 //
-// It appends each invocation to $FAKE_BD_LOG because the single-store tiers
-// redirect bd's stderr to /dev/null: without the log there is no evidence the
-// failure injection was reached at all, which is how the case used to pass
-// vacuously.
+// It appends each invocation to $FAKE_BD_LOG so a case can prove the failure
+// injection was reached at all, not merely that the script exited somewhere.
 const fakeBDFails = `#!/bin/sh
 [ -n "$FAKE_BD_LOG" ] && printf '%s\n' "$*" >> "$FAKE_BD_LOG"
 printf 'bd: store unreadable\n' >&2
 exit 1
 `
 
-// TestSingleStoreWorkQueryKeepsItsFallThrough is the other half of the byte
-// identity claim, stated as behavior rather than as bytes: a non-relocated city
-// still swallows `bd ready`'s failure PER TIER and falls through to the next
-// tier — the invocation log proves the script walked past the failing ready
-// read instead of aborting on it. What the fall-through no longer reaches is a
-// quiet "[]": a broken bd (schema skew after a store migration) would empty
-// every hook in the city, so the terminal empty answer must be
-// certified by a working bd, so a bd that fails every tier ends in a non-zero
-// exit that surfaces bd's own error rather than an idle signal.
+// TestSingleStoreRoutedReadFailureFailsTheWorkQuery is the single-store mirror
+// of TestFederatedWorkQueryPropagatesADeadLeg. It used to pin the opposite —
+// that a single-store city swallowed `bd ready`'s failure and fell through to
+// "[]" — and that fall-through is what drained live seats as idle while bd was
+// missing from their PATH. With no session identity only the routed tier reads,
+// so the failure under test is `bd ready`'s.
 //
 // The failing binary is `bd`, and it has to be: a single-store work query never
 // invokes `gc`, so installing the failure as `gc` would leave every tier reading
 // a healthy stub and the case would pass no matter what the tiers did.
-func TestSingleStoreWorkQueryKeepsItsFallThrough(t *testing.T) {
+func TestSingleStoreRoutedReadFailureFailsTheWorkQuery(t *testing.T) {
 	a := &Agent{Name: "worker"}
 	command := a.EffectiveWorkQueryFor(singleStoreTopology())
 	if strings.Contains(command, "gc ready") {
@@ -148,19 +144,18 @@ func TestSingleStoreWorkQueryKeepsItsFallThrough(t *testing.T) {
 	}, fakeGCReadyFails, fakeBDFails)
 	invocations, err := os.ReadFile(bdLog)
 	if err != nil || !strings.Contains(string(invocations), "ready") {
-		t.Fatalf("the failing `bd` was never asked for `ready` (log=%q, err=%v); a case whose failure injection is not invoked proves nothing about the fall-through", invocations, err)
-	}
-	if !strings.Contains(string(invocations), "list --limit=1 --json") {
-		t.Fatalf("the terminal certification probe never ran (log=%q); the script aborted mid-tier instead of falling through to the certified-empty clause", invocations)
+		t.Fatalf("the failing `bd` was never asked for `ready` (log=%q, err=%v); a case whose failure injection is not invoked proves nothing", invocations, err)
 	}
 	if res.exit == 0 {
-		t.Fatalf("the single-store work_query exited 0 over a bd that failed every tier (stdout=%q); a broken bd must not certify an empty hook", res.stdout)
+		t.Fatalf("the single-store work_query exited 0 over a failing `bd ready` and printed %q; that is the answer an idle queue gives", res.stdout)
 	}
-	if strings.TrimSpace(res.stdout) == "[]" {
-		t.Errorf("single-store work_query reported an empty hook over a failing bd; that is the silent standdown")
+	if strings.Contains(res.stdout, "[]") {
+		t.Errorf("single-store work_query printed %q over a failing `bd ready`", res.stdout)
 	}
-	if !strings.Contains(res.stderr, "bd: store unreadable") {
-		t.Errorf("bd's own error was swallowed; stderr = %q", res.stderr)
+	for _, want := range []string{"gc work query: bd ready failed (exit 1)", "bd: store unreadable"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("single-store work_query stderr = %q, want %q", res.stderr, want)
+		}
 	}
 }
 

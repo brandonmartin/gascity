@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // These tests drive the shipped maintenance orders against REAL bd scopes of
@@ -86,6 +86,9 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 			t.Fatal(err)
 		}
 	}
+	if err := testutil.SeedDoltGlobalConfig(home); err != nil {
+		t.Fatal(err)
+	}
 	for _, entry := range os.Environ() {
 		key := entry[:strings.IndexByte(entry, '=')]
 		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") || strings.HasPrefix(key, "GC_") ||
@@ -111,6 +114,12 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 		"DOLT_ESCALATE_SCRIPT="+filepath.Join(c.binDir, "escalate.sh"),
 		"GC_CALL_LOG="+c.gcLog,
 	)
+	// Every HTTPS request a child makes goes to a normally unroutable proxy. A
+	// proxied scope's `bd init` probes `dolt version`, whose update check is a
+	// network call unless HOME's dolt config disables it; on a healthy network
+	// that call returns in 0.2 s and hides a missing config, so on most hosts
+	// the slow network is reproduced instead of waited for.
+	c.env = append(c.env, testutil.UnroutableHTTPSProxyEnv()...)
 	writeExecutable(t, filepath.Join(c.binDir, "escalate.sh"), "#!/bin/sh\nprintf 'ESCALATION %s\\n' \"$*\" >> \""+c.gcLog+"\"\n")
 	t.Cleanup(c.stopProcesses)
 	return c
@@ -300,30 +309,12 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-// bdStopTermGrace and bdStopKillGrace bound how long the fixture waits for its
-// bd proxies and Dolt backends to exit after TERM and, for any that outlast it,
-// after KILL. They only cap a wedged process; a normal shutdown returns as soon
-// as the processes are gone.
-const (
-	bdStopTermGrace = 30 * time.Second
-	bdStopKillGrace = 10 * time.Second
-)
-
-// scopeProcess is a process a proxied scope's pid records name, pinned to the
-// start time it had when its ownership was verified, so a pid recycled by an
-// unrelated process is neither awaited nor signaled.
-type scopeProcess struct {
-	pid       int
-	startTime string
-}
-
-func (p scopeProcess) alive() bool { return pidutil.AliveWithStartTime(p.pid, p.startTime) }
-
-// stopProcesses terminates the bd proxies and Dolt backends this fixture's
-// proxied scopes started, found through their own pidfiles, and returns only
-// once they have exited. t.TempDir removes the fixture right after this runs,
-// and a Dolt backend still shutting down keeps writing noms files into the tree
-// being removed, which fails the removal with "directory not empty".
+// stopProcesses stops the bd proxies and Dolt children this fixture's proxied
+// scopes started, found through their own pidfiles, and waits for each to
+// exit. It runs before t.TempDir's removal (cleanups run last-in, first-out),
+// so no process may outlive it: a Dolt still shutting down writes into
+// .beads/dolt/.dolt/noms while the removal walks it, and the removal fails
+// with "directory not empty" (ga-urgs30).
 func (c *bdTopologyCity) stopProcesses() {
 	var procs []scopeProcess
 	for _, s := range c.scopes {
@@ -336,20 +327,14 @@ func (c *bdTopologyCity) stopProcesses() {
 	}
 }
 
-// ownedScopeProcesses returns the live processes a proxied scope's pid records
-// name -- the proxy (proxy.pid) and its dolt backend (proxy-child.pid) -- that
-// are verifiably the scope's own: a record outlives its process, so a pid whose
-// argv does not carry the scope's proxy root belongs to someone else and is
-// left alone.
-func (c *bdTopologyCity) ownedScopeProcesses(s bdTopologyScope) []scopeProcess {
-	root := filepath.Join(s.dir, ".beads", "dolt")
-	roots := []string{root}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil && resolved != root {
-		roots = append(roots, resolved)
-	}
-	var procs []scopeProcess
-	for _, name := range []string{"proxy.pid", "proxy-child.pid"} {
-		data, err := os.ReadFile(filepath.Join(root, name))
+// signalScopeProcesses signals the processes a proxied scope's pid records
+// name, its dolt backend (proxy-child.pid) and then the proxy (proxy.pid),
+// and waits for each to exit before the next: a proxy signaled first shuts
+// its backend down itself, which can take it many seconds. A process still
+// alive after scopeProcessExitWait is killed.
+func (c *bdTopologyCity) signalScopeProcesses(s bdTopologyScope, sig syscall.Signal) {
+	for _, name := range []string{"proxy-child.pid", "proxy.pid"} {
+		data, err := os.ReadFile(filepath.Join(s.dir, ".beads", "dolt", name))
 		if err != nil {
 			continue
 		}
@@ -364,81 +349,35 @@ func (c *bdTopologyCity) ownedScopeProcesses(s bdTopologyScope) []scopeProcess {
 			c.t.Logf("%s names pid %d, which is not a process of %s (argv %q, err %v); leaving it alone", name, rec.PID, root, argv, err)
 			continue
 		}
-		startTime, err := pidutil.StartTime(rec.PID)
-		if err != nil {
+		if syscall.Kill(rec.PID, sig) != nil {
 			continue
 		}
-		procs = append(procs, scopeProcess{pid: rec.PID, startTime: startTime})
-	}
-	return procs
-}
-
-// argvMentionsAnyDir reports whether an argument of argv names one of dirs or
-// a path beneath it (`--root <dir>`, `--config=<dir>/config.yaml`).
-func argvMentionsAnyDir(argv, dirs []string) bool {
-	for _, arg := range argv {
-		for _, dir := range dirs {
-			if strings.Contains(arg+"/", dir+"/") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// terminateProcesses sends TERM to procs and waits up to termGrace for them to
-// exit, then sends KILL to those still running and waits up to killGrace. It
-// returns the processes that outlived both.
-func terminateProcesses(procs []scopeProcess, termGrace, killGrace time.Duration) []scopeProcess {
-	running := signalAndWait(procs, syscall.SIGTERM, termGrace)
-	if len(running) == 0 {
-		return nil
-	}
-	return signalAndWait(running, syscall.SIGKILL, killGrace)
-}
-
-// signalAndWait sends sig to every running process in procs and waits up to
-// grace for all of them to exit. It returns the ones still running. The
-// processes are not this one's children, so their exit is observed by polling.
-func signalAndWait(procs []scopeProcess, sig syscall.Signal, grace time.Duration) []scopeProcess {
-	for _, p := range procs {
-		if p.alive() {
-			_ = syscall.Kill(p.pid, sig)
-		}
-	}
-	running := func() []scopeProcess {
-		var alive []scopeProcess
-		for _, p := range procs {
-			if p.alive() {
-				alive = append(alive, p)
-			}
-		}
-		return alive
-	}
-	poll := time.NewTicker(25 * time.Millisecond)
-	defer poll.Stop()
-	deadline := time.NewTimer(grace)
-	defer deadline.Stop()
-	for {
-		alive := running()
-		if len(alive) == 0 {
-			return nil
-		}
-		select {
-		case <-poll.C:
-		case <-deadline.C:
-			return running()
+		if !waitProcessExit(rec.PID, scopeProcessExitWait) {
+			c.t.Logf("%s %d did not exit within %s of %s; killing it", name, rec.PID, scopeProcessExitWait, sig)
+			_ = syscall.Kill(rec.PID, syscall.SIGKILL)
+			_ = waitProcessExit(rec.PID, scopeProcessExitWait)
 		}
 	}
 }
 
-// scopePIDs lists the pids of procs for failure messages.
-func scopePIDs(procs []scopeProcess) []int {
-	pids := make([]int, len(procs))
-	for i, p := range procs {
-		pids[i] = p.pid
+// scopeProcessExitWait bounds the wait for a signaled scope process to exit.
+const scopeProcessExitWait = 30 * time.Second
+
+// waitProcessExit polls until pid no longer exists, for at most bound, and
+// reports whether it exited. The processes are bd's daemons, not this test's
+// children, so there is no Wait to call; once their parent has exited they
+// are reaped by init, and kill(pid, 0) then fails.
+func waitProcessExit(pid int, bound time.Duration) bool {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.Now().Add(bound)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			return false
+		}
+		<-tick.C
 	}
-	return pids
+	return true
 }
 
 // bdProxyStartTimeout is how bd reports a proxied first start that missed its
@@ -584,6 +523,27 @@ func (c *bdTopologyCity) seedScope(t *testing.T, s bdTopologyScope) map[string]s
 	return ids
 }
 
+// seedSessionPruneCandidates adds two closed beads the reaper's session prune
+// selects with its default gm-* pattern, one in each table bd prune reads: a
+// durable issue and a no-history bead, which bd stores in the wisps table.
+// Both closed 100h ago: past a GC_REAPER_SESSION_PURGE_AGE of 48h, and inside
+// the 168h wisp purge age, so Step 3 leaves the no-history row to Step 6.
+func (c *bdTopologyCity) seedSessionPruneCandidates(t *testing.T, s bdTopologyScope) {
+	t.Helper()
+	c.bdIn(t, s, "create", "--silent", "--id", "gm-prd1", "--force", "-t", "task", "closed durable gm bead")
+	c.bdIn(t, s, "create", "--silent", "--id", "gm-pnh1", "--force", "--no-history", "-t", "task", "closed no-history gm bead")
+	c.bdIn(t, s, "close", "gm-prd1", "gm-pnh1", "--force", "--reason", "seed")
+	if got := c.sqlValue(t, s, "SELECT COUNT(*) FROM wisps WHERE id = 'gm-pnh1'"); got != "1" {
+		t.Fatalf("bd did not store the no-history bead in the wisps table (rows: %s)", got)
+	}
+	for _, table := range []string{"issues", "wisps"} {
+		c.bdIn(t, s, "sql", fmt.Sprintf("UPDATE %s SET closed_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 100 HOUR) WHERE id IN ('gm-prd1', 'gm-pnh1')", table))
+	}
+	if !s.proxied {
+		c.bdIn(t, s, "dolt", "commit", "-m", "seed session prune candidates")
+	}
+}
+
 func (c *bdTopologyCity) status(t *testing.T, s bdTopologyScope, id string) string {
 	t.Helper()
 	return c.sqlValue(t, s, fmt.Sprintf(
@@ -634,13 +594,21 @@ func checkMaintenanceOrdersOnRealBdTopology(t *testing.T, cityProx bool, rigProx
 	for _, rig := range rigs {
 		seeds[rig.name] = c.seedScope(t, rig)
 	}
+	c.seedSessionPruneCandidates(t, city)
 
 	// Reaper. Each workflow-root census starts at its second root, so the
 	// start lookup and the wrapped page run through real bd too.
-	out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"), "GC_REAPER_WORKFLOW_ROOT_CENSUS_START=1")
+	out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"), "GC_REAPER_WORKFLOW_ROOT_CENSUS_START=1", "GC_REAPER_SESSION_PURGE_AGE=48h")
 	scopes := 1 + len(rigs)
 	if want := fmt.Sprintf("workflow_roots:%d, workflow_root_census:%d/%d,", scopes, 3*scopes, 3*scopes); !strings.Contains(out, want) {
 		t.Errorf("reaper summary does not report a complete workflow-root census (%s):\n%s", want, out)
+	}
+	// Step 6 counts the session prune's candidates through real bd before it
+	// checks the backup (#6284). The count finds the seeded candidates, so
+	// the backup gate decides; no backup has run yet, so it holds the prune.
+	if strings.Contains(out, "session prune: nothing to prune") ||
+		!(strings.Contains(outcome, "session prune skipped: no fresh backup") || strings.Contains(outcome, "session prune skipped: bd-backup-unsupported")) {
+		t.Errorf("reaper did not find the session prune's candidates through bd and hold the prune at its backup gate:\n%s\noutcome: %s", out, outcome)
 	}
 	for _, s := range append([]bdTopologyScope{city}, rigs...) {
 		ids := seeds[s.name]

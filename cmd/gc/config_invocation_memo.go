@@ -69,12 +69,58 @@ import (
 //   - any file the load reported as a source, packs.lock or .gc/site.toml no
 //     longer has the size and mtime it had when the load ran, which catches a
 //     rewrite by a writer that does not call the hook.
+//
+// The scope also carries the builtin readiness deferral: the cities whose
+// readiness pass the gc bd passthrough loader skipped
+// (deferBuiltinReadinessForInvocation). It lives here so it dies with the
+// scope and can never leak into a long-lived process.
+//
+// The scope also answers the city.toml [beads] peek (peekCityTOMLBeads): the
+// first peek of a file decodes it and later peeks in the scope get that answer.
+// A peek that could not read or parse the file, or decode one of its fields, is
+// not remembered.
 type invocationConfigMemo struct {
 	mu      sync.Mutex
 	entries map[string]invocationConfigMemoEntry
 	// refreshed holds the city.toml paths whose builtin-pack refresh has run
 	// in this scope.
 	refreshed map[string]bool
+	// readinessDeferred holds normalized city paths whose builtin readiness
+	// pass the passthrough loader deferred in this invocation.
+	readinessDeferred map[string]struct{}
+	// beadsPeeks are the decoded [beads] tables of the city.toml files this
+	// scope peeked (peekCityTOMLBeads), by normalized path.
+	beadsPeeks map[string]cityTOMLBeadsPeek
+}
+
+// deferBuiltinReadinessForInvocation records that this invocation composed
+// cityPath's config without the builtin readiness pass and does not want one
+// for the rest of the scope. It is a no-op outside a scope.
+func deferBuiltinReadinessForInvocation(cityPath string) {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if memo.readinessDeferred == nil {
+		memo.readinessDeferred = map[string]struct{}{}
+	}
+	memo.readinessDeferred[normalizePathForCompare(cityPath)] = struct{}{}
+}
+
+// builtinReadinessDeferredInInvocation reports whether the open invocation
+// scope deferred cityPath's builtin readiness pass. It is false outside a
+// scope.
+func builtinReadinessDeferredInInvocation(cityPath string) bool {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return false
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	_, ok := memo.readinessDeferred[normalizePathForCompare(cityPath)]
+	return ok
 }
 
 type invocationConfigMemoEntry struct {
@@ -193,6 +239,28 @@ func noteBuiltinPackRefresh(tomlPath string) {
 	}
 	memo.refreshed[key] = true
 	delete(memo.entries, key)
+}
+
+// cityTOMLBeadsPeek answers peekCityTOMLBeads for tomlPath from this scope,
+// decoding the file on the first ask. Only an answer that decoded both fields
+// is remembered: a peek that could not read or parse the file, or decode one of
+// its fields, is retried by the next caller, the rule the composed-config
+// entries keep for errors.
+func (m *invocationConfigMemo) cityTOMLBeadsPeek(tomlPath string) cityTOMLBeadsPeek {
+	key := normalizePathForCompare(filepath.Clean(tomlPath))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if peek, ok := m.beadsPeeks[key]; ok {
+		return peek
+	}
+	peek, ok := decodeCityTOMLBeadsPeek(tomlPath)
+	if ok {
+		if m.beadsPeeks == nil {
+			m.beadsPeeks = map[string]cityTOMLBeadsPeek{}
+		}
+		m.beadsPeeks[key] = peek
+	}
+	return peek
 }
 
 // loadComposedCityConfig is config.LoadWithIncludesOptions for the cmd/gc

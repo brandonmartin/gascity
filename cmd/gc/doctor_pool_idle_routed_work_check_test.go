@@ -554,9 +554,9 @@ func TestPoolIdleRoutedWorkCheckListsSessionsOncePerStore(t *testing.T) {
 }
 
 // TestPoolIdleRoutedWorkCheckNeverQueriesRigStoreForAnotherRigsTemplates: a
-// rig's store only ever holds work routed to that rig's pools (plus the city
-// store's HQ beads), so it must never be asked about another rig's templates or
-// city-scoped templates.
+// rig's store holds work routed to that rig's pools and, because sling lets a
+// rig bead route to a city-scope target, to city-scoped pools. It must never be
+// asked about another rig's templates.
 func TestPoolIdleRoutedWorkCheckNeverQueriesRigStoreForAnotherRigsTemplates(t *testing.T) {
 	cityDir := t.TempDir()
 	alphaDir := t.TempDir()
@@ -591,13 +591,13 @@ func TestPoolIdleRoutedWorkCheckNeverQueriesRigStoreForAnotherRigsTemplates(t *t
 		store poolIdleRoutedWorkRecordingStore
 		want  []string
 	}{
-		"alpha": {alphaStore, []string{"alpha/builder"}},
-		"beta":  {betaStore, []string{"beta/builder"}},
+		"alpha": {alphaStore, []string{"alpha/builder", "hq"}},
+		"beta":  {betaStore, []string{"beta/builder", "hq"}},
 	} {
 		_, routed := tc.store.calls()
 		sort.Strings(routed)
 		if strings.Join(routed, ",") != strings.Join(tc.want, ",") {
-			t.Errorf("rig %s store routed lookups = %v, want only its own templates %v", label, routed, tc.want)
+			t.Errorf("rig %s store routed lookups = %v, want its own and city-scoped templates %v", label, routed, tc.want)
 		}
 	}
 }
@@ -631,6 +631,40 @@ func TestPoolIdleRoutedWorkCheckFindsRigPoolWithSessionsInCityStore(t *testing.T
 	}
 	details := strings.Join(result.Details, "\n")
 	for _, want := range []string{"rig repo pool repo/builder", "GA-1", "SESS-1"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+}
+
+// TestPoolIdleRoutedWorkCheckFindsRigBeadRoutedToCityPool: sling lets a
+// rig-prefixed bead route to a city-scope target while it stays in the rig
+// store, so a rig store is also asked about city-scoped templates with idle
+// instances.
+func TestPoolIdleRoutedWorkCheckFindsRigBeadRoutedToCityPool(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "hq"}},
+		Rigs:   []config.Rig{{Name: "repo", Path: rigDir}},
+	}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkSessionBead("hq", "active", ""),
+	}, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkRoutedBead("hq", ""),
+	}, nil)
+	stores := map[string]beads.Store{cityDir: cityStore, rigDir: rigStore}
+
+	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		return stores[path], nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{"rig repo pool hq", "GA-1"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}

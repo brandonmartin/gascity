@@ -9,6 +9,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // noSleep is a sleep stub so the confirm loop runs instantly under test.
@@ -309,6 +311,31 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	}
 	if enters != submitEnterMaxSends {
 		t.Fatalf("enters = %d, want %d", enters, submitEnterMaxSends)
+	}
+}
+
+// TestSubmitEnterAndConfirmFailedReSendIsUnconfirmed proves a re-send that
+// fails after an earlier send reached the pane reports the submit
+// unconfirmed, not failed: the first send may already have submitted the
+// message, so a caller that must not deliver twice may not retry it.
+func TestSubmitEnterAndConfirmFailedReSendIsUnconfirmed(t *testing.T) {
+	sendErr := errors.New("server exited")
+	var enters int
+	sendEnter := func() error {
+		enters++
+		if enters == 1 {
+			return nil
+		}
+		return sendErr
+	}
+	busy := func() (bool, error) { return false, nil }
+
+	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	if confirmed {
+		t.Fatal("confirmed = true, want false")
+	}
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) || !errors.Is(err, sendErr) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed wrapping sendErr", err)
 	}
 }
 
@@ -806,14 +833,12 @@ func TestNudgeSessionClaudeBusyThroughoutIsNotCredited(t *testing.T) {
 }
 
 // TestNudgeSessionCodexBusyThroughoutIsNotCredited is the codex twin of the
-// Claude test above. codex's composer starts with "› ", so the composer check
-// must read that prompt. Through Claude's "❯ " a codex composer is never
-// observed, and every nudge into a busy codex pane would requeue although codex
-// consumed it. A pane already running a turn gets Enter only, never the
-// Escape that cancels that turn. The busy indicator belongs to the
-// earlier turn and confirms nothing; the composer decides. A drained composer
-// means codex queued the nudge behind the turn, a nudge still in the composer
-// (typed or as a staged paste) is unconfirmed, and no row re-sends.
+// Claude test above, with the opposite outcome, because Codex reads its
+// submit's leading Escape as "interrupt the running turn": a nudge that finds
+// a codex turn running for the whole ready wait types nothing and presses
+// nothing, whatever the composer holds, and defers with
+// runtime.ErrSessionBusy. It used to type and send Escape+Enter, which
+// aborted the very turn it meant to inform.
 func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 	const message = "reminder: please respond to the review"
 	turn := []string{"• Ran make test", "  └ ok  ./...", "", "◦ Working (48s • esc to interrupt)", ""}
@@ -823,13 +848,11 @@ func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 		session  string
 		attached string
 		composer []string
-		want     error
-		keys     []string
 	}{
-		{"detached, composer drained", "busy-codex-drained-detached", "0", []string{"› "}, nil, []string{"C-u", "Enter"}},
-		{"attached, composer drained", "busy-codex-drained-attached", "1", []string{"› "}, nil, []string{"Enter"}},
-		{"detached, nudge typed in the composer", "busy-codex-typed-detached", "0", []string{"› " + message}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Enter"}},
-		{"detached, nudge staged as a paste", "busy-codex-staged-detached", "0", []string{"› [Pasted Content 1234 chars]"}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Enter"}},
+		{"detached, composer drained", "busy-codex-drained-detached", "0", []string{"› "}},
+		{"attached, composer drained", "busy-codex-drained-attached", "1", []string{"› "}},
+		{"detached, nudge typed in the composer", "busy-codex-typed-detached", "0", []string{"› " + message}},
+		{"detached, nudge staged as a paste", "busy-codex-staged-detached", "0", []string{"› [Pasted Content 1234 chars]"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -846,11 +869,16 @@ func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 				tm := &Tmux{cfg: DefaultConfig(), exec: ex}
 
 				err := tm.NudgeSession(tt.session, message)
-				if !errors.Is(err, tt.want) {
-					t.Fatalf("NudgeSession = %v, want %v", err, tt.want)
+				if !errors.Is(err, runtime.ErrSessionBusy) {
+					t.Fatalf("NudgeSession = %v, want runtime.ErrSessionBusy", err)
 				}
-				if keys := ex.sentKeys(); !slices.Equal(keys, tt.keys) {
-					t.Fatalf("sent keys = %q, want %q (one Enter, no Escape into the running turn)", keys, tt.keys)
+				if keys := ex.sentKeys(); len(keys) != 0 {
+					t.Fatalf("sent keys = %q, want none: Escape aborts the running codex turn", keys)
+				}
+				for _, call := range ex.calls {
+					if slices.Contains(call, "send-keys") && slices.Contains(call, "-l") {
+						t.Fatalf("typed %q into the busy codex pane, want nothing", call)
+					}
 				}
 			})
 		})
@@ -1009,5 +1037,25 @@ func TestSnapshotPaneIdleWithPrefixHourSpinner(t *testing.T) {
 				t.Errorf("snapshotPaneIdleWithPrefix idle = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNudgeSessionLockTimeoutIsNotSent proves a nudge that times out waiting
+// for the session's nudge lock reports that nothing was sent: it fails before
+// its first key, so a retry cannot deliver the message twice.
+func TestNudgeSessionLockTimeoutIsNotSent(t *testing.T) {
+	tm := NewTmuxWithConfig(Config{SocketName: "gc-test-lock-timeout-unused", NudgeLockTimeout: time.Millisecond})
+	const session = "gc-test-lock-timeout"
+	if !acquireNudgeLock(session, time.Second) {
+		t.Fatal("could not acquire the nudge lock for setup")
+	}
+	defer releaseNudgeLock(session)
+
+	err := tm.NudgeSession(session, "hello")
+	if !errors.Is(err, runtime.ErrNudgeNotSent) {
+		t.Fatalf("NudgeSession = %v, want ErrNudgeNotSent", err)
+	}
+	if errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("NudgeSession = %v, a lock timeout is not unconfirmed", err)
 	}
 }

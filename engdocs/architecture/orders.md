@@ -175,6 +175,9 @@ the tick never waits on order gates.
   `maxConsecutiveFSPressureSkips`+1 passes. After the gate, a pass runs
   the managed-Dolt preflight and the periodic order rescan, installs any
   staged dispatcher (a reload's, or the rescan's), and calls `dispatch()`.
+  The preflight waits at most 30 seconds for a Dolt recover, counted from
+  when the recover started; past that the pass carries on and the recover
+  keeps running, so a slow recover never holds up dispatch.
   A panic is recovered per pass (`safeTick`). Each pass is its own trace
   cycle with trigger `orders`, with one phase operation per step
   (`order_rescan`, `install_order_dispatcher`, `order_dispatch`), and a pass

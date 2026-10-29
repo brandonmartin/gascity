@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -1810,16 +1809,18 @@ func TestGcBdRejectsMetadataFileItCannotValidateBeforeWrite(t *testing.T) {
 		// unconfigured route targets that would otherwise be written by bd.
 		{name: "create with route to an unconfigured rig", verb: "create", arg: "@%s", file: `{"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured", "ghostrig/polecat-01"}},
 		{name: "new alias with route to an unconfigured rig", verb: "new", arg: "@%s", file: `{"gc.routed_to":"ghostrig/polecat-01"}`, want: []string{"not configured", "ghostrig/polecat-01"}},
-		{name: "create with a missing file", verb: "create", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"cannot read @file"}},
+		{name: "create with a missing file", verb: "create", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"@file input could not be read to validate it before write"}},
 		{name: "non-string guarded value", verb: "update", arg: "@%s", file: `{"gc.routed_to":true}`, want: []string{"non-string gc.routed_to"}},
 		{name: "malformed JSON", verb: "update", arg: "@%s", file: `{not-json}`, want: []string{"malformed --metadata"}},
 		{name: "empty file", verb: "update", arg: "@%s", file: "\n", want: []string{"malformed --metadata"}},
 		{name: "JSON that is not an object", verb: "update", arg: "@%s", file: `["gc.routed_to"]`, want: []string{"malformed --metadata"}},
-		{name: "missing file", verb: "update", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"cannot read @file"}},
-		{name: "directory", verb: "update", arg: "@" + dir, want: []string{"not a regular file"}},
-		{name: "no path", verb: "update", arg: "@", want: []string{"names no path"}},
-		{name: "relative path", verb: "update", arg: "@metadata.json", want: []string{"must be absolute"}},
-		{name: "stdin", verb: "update", arg: "@-", want: []string{"must be absolute"}},
+		{name: "missing file", verb: "update", arg: "@" + filepath.Join(dir, "absent.json"), want: []string{"@file input could not be read to validate it before write"}},
+		{name: "directory", verb: "update", arg: "@" + dir, want: []string{"@file input could not be read to validate it before write", "is a directory"}},
+		{name: "no path", verb: "update", arg: "@", want: []string{"@file input could not be read to validate it before write"}},
+		// A relative path resolves against the directory bd runs in (upstream
+		// #8333); one that names no file there is refused like any unreadable file.
+		{name: "relative path to an absent file", verb: "update", arg: "@absent-relative.json", want: []string{"@file input could not be read to validate it before write"}},
+		{name: "stdin", verb: "update", arg: "@-", want: []string{"@file input could not be read to validate it before write"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
@@ -3000,7 +3001,12 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 	}
 }
 
-func TestDoBdReleaseIfCurrentWorksForBdStoreFallback(t *testing.T) {
+// TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL is the CLI twin of the
+// store-level floor: a bd below 1.3.0 rejects the conditional-release flags,
+// and the command must fail with the typed refusal naming the floor. It must
+// never reach `bd sql` (or, on this embedded-Dolt rig, the `dolt sql` CLI): no
+// release path writes the row behind bd's back.
+func TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
@@ -3037,9 +3043,9 @@ prefix = "fe"
 	}
 	fakeBin := t.TempDir()
 	sqlLog := filepath.Join(fakeBin, "sql.log")
-	// bd 1.0.4 — the contract-tested minimum (deps.env BD_PREV_VERSION) — has no
-	// conditional-release flags and rejects them the way its flag parser does,
-	// which is what latches the store onto the raw-SQL path this test pins.
+	// A bd older than 1.3.0 has no conditional-release flags and rejects them
+	// the way its flag parser does. The sql branch only records a call, so the
+	// test can prove none happened.
 	fakeBD := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'unknown flag: --if-assignee\\n' >&2\n" +
@@ -3072,22 +3078,19 @@ prefix = "fe"
 
 	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
-		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 1 {
+		t.Fatalf("doBdReleaseIfCurrent = %d, want 1; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
-	if strings.TrimSpace(stdout.String()) != "released" {
-		t.Fatalf("output = %q, want released", stdout.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing on a refusal", stdout.String())
 	}
-	query, err := os.ReadFile(sqlLog)
-	if err != nil {
-		t.Fatalf("read SQL log: %v", err)
+	for _, want := range []string{beads.ErrConditionalReleaseUnsupported.Error(), "bd >= 1.3.0"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
 	}
-	// The release mints a fresh revision so the pre-release token is stale, so
-	// the token itself is not pinnable — everything around it is.
-	gotQuery := strings.TrimSpace(string(query))
-	wantQuery := regexp.MustCompile(`^UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = -?\d+ WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'$`)
-	if !wantQuery.MatchString(gotQuery) {
-		t.Fatalf("SQL query = %q, want match for %s", gotQuery, wantQuery)
+	if _, err := os.Stat(sqlLog); !os.IsNotExist(err) {
+		t.Fatalf("an old bd reached `bd sql` (log stat err=%v)", err)
 	}
 }
 

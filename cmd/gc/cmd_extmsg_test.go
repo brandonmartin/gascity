@@ -22,12 +22,14 @@ func TestExtMsgClientUsesSupervisorForSupervisorManagedCity(t *testing.T) {
 	t.Setenv("GC_NO_API", "")
 
 	sentinel := api.NewCityScopedClient("http://supervisor.sentinel:1", "test-city")
-	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
 	t.Cleanup(func() {
-		apiRouteControllerAliveHook = origAlive
+		apiRouteControllerIdentityHook = origIdentity
 		apiRouteSupervisorClientHook = origSup
 	})
-	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
 	apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
 
 	var stderr bytes.Buffer

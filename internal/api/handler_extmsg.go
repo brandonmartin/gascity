@@ -182,7 +182,7 @@ func (s *Server) extmsgNotifyMembers(
 			return
 		}
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
+		nudge := s.extmsgNotice(extmsgNotifyReminder{
 			Provider:                conv.Provider,
 			ConversationID:          conv.ConversationID,
 			ActorDisplay:            actorDisplayName,

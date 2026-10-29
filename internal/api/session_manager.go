@@ -20,6 +20,7 @@ func (s *Server) sessionManager(store beads.Store) *session.Manager {
 	opts := []session.ManagerOption{
 		session.WithCityPath(s.state.CityPath()),
 		session.WithEventRecorder(s.state.EventProvider()),
+		session.WithDeferredSubmitQueue(s.state.NudgeQueue()),
 	}
 	if cfg == nil {
 		return session.NewManagerWithOptions(store, s.state.SessionProvider(), opts...)

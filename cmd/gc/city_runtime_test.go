@@ -1318,7 +1318,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortM
 	cr := &CityRuntime{
 		cityPath: "/tmp/test-city",
 		stderr:   io.Discard,
-		managedDoltHealth: func(cityPath string) error {
+		managedDoltHealth: func(_ context.Context, cityPath string) error {
 			healthCalls++
 			if cityPath != "/tmp/test-city" {
 				t.Fatalf("health cityPath = %q, want %q", cityPath, "/tmp/test-city")
@@ -1338,7 +1338,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortM
 			return ""
 		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(context.Background())
 
 	if healthCalls != 1 {
 		t.Fatalf("healthCalls = %d, want 1", healthCalls)
@@ -1352,7 +1352,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickSkipsHealthWhenManagedPortP
 	cr := &CityRuntime{
 		cityPath: "/tmp/test-city",
 		stderr:   io.Discard,
-		managedDoltHealth: func(string) error {
+		managedDoltHealth: func(context.Context, string) error {
 			healthCalls++
 			return nil
 		},
@@ -1363,7 +1363,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickSkipsHealthWhenManagedPortP
 			return "3307"
 		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(context.Background())
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0", healthCalls)
@@ -1379,7 +1379,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickLogsOwnershipError(t *testi
 		cityPath:  "/tmp/test-city",
 		logPrefix: "gc test",
 		stderr:    &stderr,
-		managedDoltHealth: func(string) error {
+		managedDoltHealth: func(context.Context, string) error {
 			healthCalls++
 			return nil
 		},
@@ -1390,7 +1390,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickLogsOwnershipError(t *testi
 			return ""
 		},
 	}
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(context.Background())
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0", healthCalls)
@@ -1428,7 +1428,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 		logPrefix:     "gc test",
 		stdout:        io.Discard,
 		stderr:        io.Discard,
-		managedDoltHealth: func(string) error {
+		managedDoltHealth: func(context.Context, string) error {
 			orderEvents.record("preflight")
 			return nil
 		},
@@ -1487,7 +1487,7 @@ func TestOrdersLanePassPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T)
 		logPrefix:     "gc test",
 		stdout:        io.Discard,
 		stderr:        io.Discard,
-		managedDoltHealth: func(string) error {
+		managedDoltHealth: func(context.Context, string) error {
 			orderEvents.record("preflight")
 			return nil
 		},
@@ -1559,7 +1559,7 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 		OnStarted: func() {
 			cancel()
 		},
-		ManagedDoltHealth: func(string) error {
+		ManagedDoltHealth: func(context.Context, string) error {
 			orderEvents.record("preflight")
 			return nil
 		},
@@ -1614,7 +1614,7 @@ func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(
 		logPrefix:     "gc test",
 		stdout:        io.Discard,
 		stderr:        io.Discard,
-		managedDoltHealth: func(string) error {
+		managedDoltHealth: func(context.Context, string) error {
 			orderEvents.record("preflight")
 			return nil
 		},
@@ -1652,7 +1652,7 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 		CityName: "test-city",
 		Cfg:      &config.City{},
 		SP:       sp,
-		ManagedDoltHealth: func(cityPath string) error {
+		ManagedDoltHealth: func(_ context.Context, cityPath string) error {
 			healthCalls++
 			if cityPath == "" {
 				t.Fatal("health preflight got empty cityPath")
@@ -1694,7 +1694,7 @@ func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.
 		CityName: "test-city",
 		Cfg:      &config.City{},
 		SP:       sp,
-		ManagedDoltHealth: func(string) error {
+		ManagedDoltHealth: func(context.Context, string) error {
 			healthCalls++
 			return nil
 		},
@@ -1727,7 +1727,7 @@ func TestCityRuntimeTickPreflightUsesResolvableProviderStateByDefault(t *testing
 		cityPath:  cityPath,
 		logPrefix: "gc test",
 		stderr:    io.Discard,
-		managedDoltHealth: func(string) error {
+		managedDoltHealth: func(context.Context, string) error {
 			healthCalls++
 			return nil
 		},
@@ -1736,7 +1736,7 @@ func TestCityRuntimeTickPreflightUsesResolvableProviderStateByDefault(t *testing
 		},
 	}
 
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(context.Background())
 
 	if healthCalls != 0 {
 		t.Fatalf("healthCalls = %d, want 0 when provider state is already resolvable", healthCalls)
@@ -3686,7 +3686,10 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnRepo
 		t.Fatalf("Start: %v", err)
 	}
 
-	store := beads.NewMemStore()
+	// The trigger lives in the store too: the backstop re-reads it live
+	// before delivery and nudges only while that read still shows it open.
+	trigger := workBead("w-idle", "worker", "", "open", 5)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{trigger}, nil)
 	staleObs := time.Now().Add(-2 * idleClaimNudgeGrace).UTC().Format(time.RFC3339)
 	session, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -3731,7 +3734,7 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnRepo
 		AssignedWorkBeads: []beads.Bead{
 			// Open + unassigned == unclaimed: the slot's trigger bead the warm pool
 			// worker never began. workBead sets gc.routed_to but leaves the assignee empty.
-			workBead("w-idle", "worker", "", "open", 5),
+			trigger,
 		},
 	}
 	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, cr.loadSessionBeadSnapshot(), nil, false)
@@ -4222,7 +4225,7 @@ func (f fixedWispGC) shouldRun(time.Time) bool {
 	return true
 }
 
-func (f fixedWispGC) runGC(beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (f fixedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	return f.purged, f.err
 }
 
@@ -5056,7 +5059,7 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	oldRev := cr.configRev
 
 	prev := cityRuntimeStartBeadsLifecycle
-	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		return fmt.Errorf("boom")
 	}
 	t.Cleanup(func() {
@@ -5141,7 +5144,7 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 	prevStart := cityRuntimeStartBeadsLifecycle
 	prevDelay := cityRuntimeReloadLifecycleRetryDelay
 	var calls int
-	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		calls++
 		if calls == 1 {
 			return fmt.Errorf("init city beads: exec beads init: signal: terminated")
@@ -8093,7 +8096,7 @@ func newCapacityRefusingRuntime(t *testing.T, agentName, startCommand string, gu
 		stderr:        io.Discard,
 		capacityGuard: guard,
 		// No managed Dolt here: the preflight must not exec the beads script.
-		managedDoltHealth: func(string) error { return nil },
+		managedDoltHealth: func(context.Context, string) error { return nil },
 	}
 	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard)
 	cr.setControllerState(&controllerState{

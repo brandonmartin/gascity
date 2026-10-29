@@ -130,3 +130,36 @@ func TestReadFilteredContextAbortsMidActiveScan(t *testing.T) {
 		t.Fatalf("got %d events, want partial progress (0 < n < %d)", len(got), lines)
 	}
 }
+
+// TestTypePrefilterPassesUnicodeEscapedType: a \u escape spells a type without
+// its literal text, so the byte prefilter must not drop such a line before it
+// is decoded.
+func TestTypePrefilterPassesUnicodeEscapedType(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	ts := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	line := fmt.Sprintf(`{"seq":1,"type":"order.failed","ts":%q,"actor":"a","subject":"o1"}`, ts)
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, filter := range map[string]Filter{
+		"Types": {Types: []string{OrderFailed}},
+		"Type":  {Type: OrderFailed},
+	} {
+		got, err := ReadFiltered(path, filter)
+		if err != nil {
+			t.Fatalf("%s: ReadFiltered: %v", name, err)
+		}
+		if want := []uint64{1}; !reflect.DeepEqual(seqsOf(got), want) {
+			t.Errorf("%s: ReadFiltered seqs = %v, want %v", name, seqsOf(got), want)
+		}
+		got, err = ReadFilteredContext(context.Background(), path, filter)
+		if err != nil {
+			t.Fatalf("%s: ReadFilteredContext: %v", name, err)
+		}
+		if want := []uint64{1}; !reflect.DeepEqual(seqsOf(got), want) {
+			t.Errorf("%s: ReadFilteredContext seqs = %v, want %v", name, seqsOf(got), want)
+		}
+	}
+}

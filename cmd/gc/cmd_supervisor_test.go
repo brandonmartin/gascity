@@ -4581,6 +4581,11 @@ func TestBareSupervisorHomeOverrideErrorRejectsHostDefaultGCHome(t *testing.T) {
 	}
 }
 
+// The supervisor reports alive on the fourth poll. The timeout is a generous
+// ceiling rather than a tight window: the poll sequence needs a few
+// milliseconds, and a scheduler or cgroup stall longer than a tight window would
+// otherwise expire the deadline between polls and fail the test spuriously. A
+// passing run returns on the fourth poll, so the ceiling costs no wall time.
 func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 	oldAlive := supervisorAliveHook
 	oldTimeout := supervisorReadyTimeout
@@ -4593,7 +4598,7 @@ func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 		}
 		return 4242
 	}
-	supervisorReadyTimeout = 25 * time.Millisecond
+	supervisorReadyTimeout = time.Minute
 	supervisorReadyPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
@@ -4605,8 +4610,40 @@ func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 	if code := waitForSupervisorReady(&stderr); code != 0 {
 		t.Fatalf("waitForSupervisorReady code = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if calls < 4 {
-		t.Fatalf("supervisorAliveHook called %d times, want at least 4", calls)
+	if calls != 4 {
+		t.Fatalf("supervisorAliveHook called %d times, want 4", calls)
+	}
+}
+
+// A supervisor that never reports alive makes waitForSupervisorReady give up at
+// the hooked timeout, not the 15s default, and say so on stderr. The only
+// wall-clock bound is a ceiling far above the hooked timeout and below the
+// default, so a stalled scheduler cannot fail it.
+func TestWaitForSupervisorReadyGivesUpAtHookedTimeout(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldTimeout := supervisorReadyTimeout
+	oldPoll := supervisorReadyPollInterval
+	supervisorAliveHook = func() int { return 0 }
+	supervisorReadyTimeout = 20 * time.Millisecond
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyTimeout = oldTimeout
+		supervisorReadyPollInterval = oldPoll
+	})
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	code := waitForSupervisorReady(&stderr)
+	elapsed := time.Since(start)
+	if code != 1 {
+		t.Fatalf("waitForSupervisorReady code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "supervisor did not become ready") {
+		t.Fatalf("stderr = %q, want 'supervisor did not become ready'", stderr.String())
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("waitForSupervisorReady took %s, want it bounded by the hooked %s timeout, not the default", elapsed, 20*time.Millisecond)
 	}
 }
 

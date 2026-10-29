@@ -307,25 +307,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 8: Build agent environment.
 	agentEnv := map[string]string{
-		"GC_SESSION_NAME":     sessName,
-		"GC_SESSION_ID":       sessionBeadID,
-		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
-		"GC_SESSION_ORIGIN":   "ephemeral",
-		"GC_AGENT":            sessName,
-		"GC_ALIAS":            qualifiedName,
-		"GC_DIR":              workDir,
-		"GC_BEADS_SCOPE_ROOT": p.cityPath,
-		// Explicit empty values matter here. tmux session creation uses `env -u`
-		// only for keys present with empty strings, which prevents stale rig
-		// scope from leaking out of the tmux server's inherited environment.
-		"GC_RIG":      "",
-		"GC_RIG_ROOT": "",
-		"BEADS_DIR":   "",
-		// GT_ROOT stays city-scoped by default. bd formula discovery falls back
-		// to $GT_ROOT/.beads/formulas when agents run outside the city/rig repo
-		// roots (for example under .gc/agents/... or .gc/worktrees/...).
-		// Rig-scoped agents override the rig-specific keys below.
-		"GT_ROOT": p.cityPath,
+		"GC_SESSION_NAME":   sessName,
+		"GC_SESSION_ID":     sessionBeadID,
+		"GC_TEMPLATE":       templateNameFor(cfgAgent, qualifiedName),
+		"GC_SESSION_ORIGIN": "ephemeral",
+		"GC_AGENT":          sessName,
+		"GC_ALIAS":          qualifiedName,
+		"GC_DIR":            workDir,
 	}
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
@@ -342,22 +330,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			qualifiedName,
 		)
 	}
-	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		agentEnv["GC_BIN"] = exe
-	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	scopeEnv, err := sessionScopeEnv(p.cityPath, rigName, rigRoot, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
 	}
-	for key, value := range sessionBackendEnv {
+	for key, value := range scopeEnv {
 		agentEnv[key] = value
-	}
-	if rigName != "" {
-		agentEnv["GC_RIG"] = rigName
-		agentEnv["GC_RIG_ROOT"] = rigRoot
-		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
-		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
 
 	// configDir is the directory agent config-relative paths (pre-start
@@ -797,6 +775,36 @@ func composeStartupPrompt(beacon, prompt string, suppress bool) string {
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
 	return config.IsDeterministicControlDispatcher(cfgAgent)
+}
+
+// sessionScopeEnv projects the city or rig storage scope into a session.
+// Explicit empty rig values clear stale scope inherited from the runtime.
+func sessionScopeEnv(cityPath, rigName, rigRoot string, rigs []config.Rig) (map[string]string, error) {
+	env := map[string]string{
+		"GC_BEADS_SCOPE_ROOT": cityPath,
+		"GC_RIG":              "",
+		"GC_RIG_ROOT":         "",
+		"BEADS_DIR":           "",
+		"GT_ROOT":             cityPath,
+		"GC_BEADS":            rawBeadsProviderForScope(rigRoot, cityPath),
+	}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		env["GC_BIN"] = exe
+	}
+	backend, err := sessionBackendEnvWithError(cityPath, rigRoot, rigs)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range backend {
+		env[key] = value
+	}
+	if rigName != "" {
+		env["GC_RIG"] = rigName
+		env["GC_RIG_ROOT"] = rigRoot
+		env["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
+		env["GC_BEADS_SCOPE_ROOT"] = rigRoot
+	}
+	return env, nil
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {

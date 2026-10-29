@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -325,12 +327,17 @@ func TestResolvedWorkerRuntimeWithConfigIncludesProviderAuthPassthrough(t *testi
 			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
 		}
 	}
-	for _, key := range []string{"GC_RIG", "GC_SESSION_NAME"} {
+	for _, key := range []string{"GC_SESSION_NAME"} {
 		if got, ok := resolved.SessionEnv[key]; ok {
 			t.Errorf("SessionEnv[%s] = %q, want absent caller context", key, got)
 		}
 		if got, ok := resolved.Hints.Env[key]; ok {
 			t.Errorf("Hints.Env[%s] = %q, want absent caller context", key, got)
+		}
+	}
+	for _, env := range []map[string]string{resolved.SessionEnv, resolved.Hints.Env} {
+		if value, ok := env["GC_RIG"]; !ok || value != "" {
+			t.Errorf("GC_RIG = %q, present %v; want explicit empty scope", value, ok)
 		}
 	}
 	if got := resolved.SessionEnv["GC_CITY"]; got != cityDir {
@@ -2809,6 +2816,60 @@ func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
 			}
 			if err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Fatalf("attachmentHolds error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+			}
+		})
+	}
+}
+
+func TestWorkerResumeScopeEnvMatchesTemplate(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "project")
+	cfg := &config.City{Workspace: config.Workspace{Name: "city"}, Rigs: []config.Rig{{Name: "project", Path: rigDir}}, Providers: config.BuiltinProviders()}
+	for _, tc := range []struct{ name, dir string }{{"rig", "project"}, {"city", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := config.Agent{Name: "worker", Dir: tc.dir, Provider: "claude", Env: map[string]string{"GC_RIG": "wrong", "GC_BEADS_SCOPE_ROOT": "wrong"}}
+			cfg.Agents = []config.Agent{a}
+			name := a.QualifiedName()
+			bp := &agentBuildParams{cityName: "city", cityPath: cityDir, workspace: &cfg.Workspace, providers: cfg.Providers, lookPath: func(name string) (string, error) { return "/bin/" + name, nil }, fs: fsys.OSFS{}, rigs: cfg.Rigs, beaconTime: testBeaconTime, beadNames: map[string]string{}, stderr: io.Discard}
+			template, err := resolveTemplate(bp, &a, name, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumed, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{Template: name, AgentName: name, WorkDir: template.WorkDir}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumed == nil {
+				t.Fatal("nil runtime")
+			}
+			for _, key := range []string{"GC_RIG", "GC_RIG_ROOT", "BEADS_DIR", "GC_BEADS_SCOPE_ROOT", "GC_BEADS", "GC_BIN", "GT_ROOT", "BEADS_DOLT_AUTO_START"} {
+				if got, want := resumed.SessionEnv[key], template.Env[key]; got != want {
+					t.Errorf("%s = %q, template = %q", key, got, want)
+				}
+				if got, want := resumed.Hints.Env[key], template.Env[key]; got != want {
+					t.Errorf("Hints.Env[%s] = %q, template = %q", key, got, want)
+				}
+			}
+			provider, err := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, func(name string) (string, error) { return "/bin/" + name, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			createEnv, err := resolvedWorkerSessionEnvWithConfig(cityDir, cfg, provider, name, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"GC_RIG", "GC_RIG_ROOT", "BEADS_DIR", "GC_BEADS_SCOPE_ROOT", "GC_BEADS", "BEADS_DOLT_AUTO_START"} {
+				if got, want := createEnv[key], template.Env[key]; got != want {
+					t.Errorf("create environment %s = %q, template = %q", key, got, want)
+				}
+			}
+			for _, env := range []map[string]string{resumed.SessionEnv, createEnv} {
+				if got, want := strings.Split(env["PATH"], string(os.PathListSeparator))[0], filepath.Dir(env["GC_BIN"]); got != want {
+					t.Errorf("PATH begins with %q, want gc binary directory %q", got, want)
+				}
+			}
+			if tc.dir == "" && (resumed.SessionEnv["GC_RIG"] != "" || resumed.SessionEnv["BEADS_DIR"] != "") {
+				t.Error("city session has rig scope")
 			}
 		})
 	}

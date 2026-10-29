@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -23,9 +24,10 @@ const (
 )
 
 type testDoltFlockHelper struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	output *bytes.Buffer
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	output  *bytes.Buffer
+	readyAt time.Time
 }
 
 func requireProcLocks(t *testing.T) {
@@ -79,8 +81,114 @@ func startTestDoltFlockHelper(t *testing.T, dir, lockPath string) *testDoltFlock
 		_ = readyR.Close()
 		t.Fatalf("wait for flock helper readiness: %v\n%s", err, output)
 	}
+	helper.readyAt = time.Now()
 	_ = readyR.Close()
 	return helper
+}
+
+func linuxProcDeviceMajor(dev uint64) uint64 {
+	return (dev >> 8 & 0xfff) | (dev >> 32 & 0xfffff000)
+}
+
+func linuxProcDeviceMinor(dev uint64) uint64 {
+	return (dev & 0xff) | (dev >> 12 & 0xffffff00)
+}
+
+func logKnownHeldLockDiagnostics(t *testing.T, helper *testDoltFlockHelper, lockPath string, readyToRead time.Duration) {
+	t.Helper()
+	pid := helper.cmd.Process.Pid
+	t.Logf("helper pid=%d; helper-ready-to-holder-read=%s", pid, readyToRead)
+
+	statusPath := fmt.Sprintf("/proc/%d/status", pid)
+	status, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Logf("read helper status %s: %v", statusPath, err)
+	} else {
+		foundNSpid := false
+		for _, line := range strings.Split(string(status), "\n") {
+			if strings.HasPrefix(line, "NSpid:") {
+				t.Logf("helper namespace status %s: %s", statusPath, line)
+				foundNSpid = true
+				break
+			}
+		}
+		if !foundNSpid {
+			t.Logf("helper namespace status %s: NSpid line missing", statusPath)
+		}
+	}
+
+	lockInfo, err := os.Stat(lockPath)
+	if err != nil {
+		t.Logf("stat helper lock %s: %v", lockPath, err)
+	} else if stat, ok := lockInfo.Sys().(*syscall.Stat_t); !ok {
+		t.Logf("helper lock %s has unsupported stat metadata %T", lockPath, lockInfo.Sys())
+	} else {
+		major := linuxProcDeviceMajor(stat.Dev)
+		minor := linuxProcDeviceMinor(stat.Dev)
+		t.Logf("helper lock stat dev:inode=%02x:%02x:%d", major, minor, stat.Ino)
+
+		f, err := os.Open("/proc/locks")
+		if err != nil {
+			t.Logf("read /proc/locks for helper lock diagnostics: %v", err)
+		} else {
+			rows := 0
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := scanner.Text()
+				fields := strings.Fields(line)
+				if len(fields) < 6 {
+					continue
+				}
+				deviceInode := strings.Split(fields[5], ":")
+				if len(deviceInode) != 3 {
+					continue
+				}
+				rowMajor, majorErr := strconv.ParseUint(deviceInode[0], 16, 64)
+				rowMinor, minorErr := strconv.ParseUint(deviceInode[1], 16, 64)
+				rowInode, inodeErr := strconv.ParseUint(deviceInode[2], 10, 64)
+				if majorErr != nil || minorErr != nil || inodeErr != nil || rowInode != stat.Ino {
+					continue
+				}
+				rows++
+				deviceMatch := rowMajor == major && rowMinor == minor
+				t.Logf("/proc/locks row for helper lock inode (stat device match=%t): %s", deviceMatch, line)
+			}
+			if err := scanner.Err(); err != nil {
+				t.Logf("scan /proc/locks: %v", err)
+			}
+			if rows == 0 {
+				t.Logf("/proc/locks has no FLOCK row for helper lock inode %d", stat.Ino)
+			}
+			_ = f.Close()
+		}
+
+		fdDir := fmt.Sprintf("/proc/%d/fd", pid)
+		entries, err := os.ReadDir(fdDir)
+		if err != nil {
+			t.Logf("read helper descriptors %s: %v", fdDir, err)
+		} else {
+			foundFD := false
+			for _, entry := range entries {
+				fdPath := filepath.Join(fdDir, entry.Name())
+				fdInfo, err := os.Stat(fdPath)
+				if err != nil || !os.SameFile(fdInfo, lockInfo) {
+					continue
+				}
+				foundFD = true
+				fdInfoPath := fmt.Sprintf("/proc/%d/fdinfo/%s", pid, entry.Name())
+				contents, err := os.ReadFile(fdInfoPath)
+				if err != nil {
+					t.Logf("read locked helper fdinfo %s: %v", fdInfoPath, err)
+					continue
+				}
+				target, _ := os.Readlink(fdPath)
+				t.Logf("helper locked fd=%s target=%q fdinfo:\n%s", entry.Name(), target, contents)
+			}
+			if !foundFD {
+				t.Logf("no helper fd under %s matched lock %s", fdDir, lockPath)
+			}
+		}
+	}
 }
 
 func TestDoltFlockHelperProcess(t *testing.T) {
@@ -237,12 +345,20 @@ func TestManagedDoltLockHolderPIDsSeesKnownHeldLock(t *testing.T) {
 	dataDir, lockPath := makeDoltDataDirWithLock(t)
 	helper := startTestDoltFlockHelper(t, dataDir, lockPath)
 
+	readAt := time.Now()
 	pids, err := managedDoltLockHolderPIDs(lockPath, "/proc/locks")
+	readyToRead := readAt.Sub(helper.readyAt)
 	if err != nil {
+		rereadPIDs, rereadErr := managedDoltLockHolderPIDs(lockPath, "/proc/locks")
+		t.Logf("immediate holder re-read = %v, err=%v", rereadPIDs, rereadErr)
+		logKnownHeldLockDiagnostics(t, helper, lockPath, readyToRead)
 		t.Fatalf("resolve known lock holder: %v", err)
 	}
 	want := helper.cmd.Process.Pid
 	if len(pids) != 1 || pids[0] != want {
+		rereadPIDs, rereadErr := managedDoltLockHolderPIDs(lockPath, "/proc/locks")
+		t.Logf("immediate holder re-read = %v, err=%v", rereadPIDs, rereadErr)
+		logKnownHeldLockDiagnostics(t, helper, lockPath, readyToRead)
 		t.Fatalf("holders for known-held lock = %v, want [%d]", pids, want)
 	}
 }

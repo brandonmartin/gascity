@@ -648,7 +648,7 @@ func TestDoEventsWatchStoppedCityRequiresRunningAPI(t *testing.T) {
 		apiURL:   server.URL,
 		cityName: "mc-city",
 		cityPath: cityDir,
-	}, "", nil, 0, "", 50*time.Millisecond, &stdout, &stderr)
+	}, "", nil, 0, "", eventsWatchReplayTimeout, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doEventsWatch = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -671,12 +671,11 @@ func TestDoEventsWatchStoppedCityAfterSeqRequiresRunningAPI(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	// Give the test server enough time to respond when the package is under load.
 	code := doEventsWatch(eventsAPIScope{
 		apiURL:   server.URL,
 		cityName: "mc-city",
 		cityPath: cityDir,
-	}, "", nil, 5, "", time.Second, &stdout, &stderr)
+	}, "", nil, 5, "", eventsWatchReplayTimeout, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doEventsWatch = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -699,7 +698,7 @@ func TestDoEventsWatchCityBufferedReplayUsesEnvelopeSchema(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", 50*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", eventsWatchReplayTimeout, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -732,7 +731,7 @@ func TestDoEventsWatchCityBufferedReplayAfterSeqSkipsHeadProbe(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", 50*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", eventsWatchReplayTimeout, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -763,7 +762,7 @@ func TestDoEventsWatchSupervisorBufferedReplayUsesTaggedEnvelopeSchema(t *testin
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(eventsAPIScope{apiURL: server.URL}, "", nil, 0, "alpha:2", 50*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL}, "", nil, 0, "alpha:2", eventsWatchReplayTimeout, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -884,7 +883,7 @@ func TestDoEventsWatchCityBufferedReplayForwardsCorrelationFields(t *testing.T) 
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", 50*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 1, "", eventsWatchReplayTimeout, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -904,7 +903,7 @@ func TestDoEventsWatchSupervisorBufferedReplayForwardsCorrelationFields(t *testi
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(eventsAPIScope{apiURL: server.URL}, "", nil, 0, "alpha:2", 50*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL}, "", nil, 0, "alpha:2", eventsWatchReplayTimeout, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -994,7 +993,7 @@ func TestDoEventsWatchTimesOutWithoutMatch(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "bead.closed", nil, 0, "", 30*time.Millisecond, &stdout, &stderr)
+	code := doEventsWatch(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "bead.closed", nil, 0, "", eventsWatchNoMatchTimeout, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doEventsWatch = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -1358,6 +1357,19 @@ func TestEventsRotateHelpIncludesFlagsAndExample(t *testing.T) {
 		}
 	}
 }
+
+const (
+	// eventsWatchReplayTimeout is the doEventsWatch deadline for tests that
+	// return as soon as the buffered replay (or API error) is printed. The
+	// deadline also bounds the HTTP round trip to the test server, so it must
+	// outlast a loaded host; a passing run never waits on it.
+	eventsWatchReplayTimeout = 10 * time.Second
+	// eventsWatchNoMatchTimeout is the deadline for the watch test that only
+	// ends when the deadline fires. It is the one test that pays its full
+	// value in wall time, yet it still has to cover the head probe and the
+	// stream handshake on a loaded host before the stream idles out.
+	eventsWatchNoMatchTimeout = 500 * time.Millisecond
+)
 
 type testEventRoutes struct {
 	cityEvents       func(http.ResponseWriter, *http.Request)

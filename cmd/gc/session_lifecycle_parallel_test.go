@@ -7906,7 +7906,6 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 		Alias:       "mayor",
 		ResolvedProvider: &config.ResolvedProvider{
 			Name:            "claude-max",
-			Kind:            "claude",
 			BuiltinAncestor: "claude",
 		},
 		TemplateName: "mayor",

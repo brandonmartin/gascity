@@ -69,7 +69,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}
 
 	// Agent track.
-	resolved, workDir, transport, template, err := s.resolveSessionTemplateWithBareNameFallback(name)
+	resolved, _, transport, template, err := s.resolveSessionTemplateWithBareNameFallback(name)
 	if err != nil {
 		if errors.Is(err, errSessionTemplateNotFound) {
 			return nil, apierr.AgentNotFound.Msg("agent '" + name + "' not found")
@@ -120,7 +120,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	alias = createCtx.Alias
 	explicitName := createCtx.ExplicitName
 	workDirQualifiedName := createCtx.Identity
-	workDir = createCtx.WorkDir
+	workDir := createCtx.WorkDir
 
 	command, err := s.agentTemplateLaunchCommand(agentCfg, resolved, transport)
 	if err != nil {

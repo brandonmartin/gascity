@@ -23,6 +23,23 @@ import (
 const (
 	dockerProtocolContainerID         = "fake-container-id"
 	dockerProtocolObservationInterval = 10 * time.Millisecond
+
+	// dockerProtocolHangBudget is the wall-clock ceiling for every test-side
+	// wait on the Docker adapter or the fake docker in this test.
+	//
+	// It is a HANG DETECTOR, not a latency assertion: each wait returns the
+	// instant the process exits or the call is observed, and the real
+	// assertions (exit status, diagnostics, the exact Docker call trace)
+	// follow it. Raising it does not slow a passing run. See TESTING.md
+	// "Floors, ceilings, and inputs".
+	//
+	// testutil.ExecRaceTimeout is the floor for one subprocess start, but one
+	// adapter "start" is a bash script that spawns a few dozen children (jq
+	// config reads plus a fake docker that is itself bash) before the first
+	// prompt capture. At host load ~100 a start that needs exactly one capture
+	// outran the bare floor and was killed at 10s (ga-qhm6w). Derived with the
+	// same 6x multiplier as internal/session's execHangBudget.
+	dockerProtocolHangBudget = 6 * testutil.ExecRaceTimeout
 )
 
 func TestDockerSessionProtocol(t *testing.T) {
@@ -44,7 +61,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 		fixture.writeState(t, "tmux-missing", "")
 
 		config := dockerProtocolStartConfig(t, fixture.workDir, "")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 		defer cancel()
 		out, err := run(ctx, fixture, adapter, []string{"start", fixture.containerName}, config)
 		if err == nil {
@@ -90,7 +107,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 		fixture.writeState(t, "fail-rm-status", "41\n")
 
 		config := dockerProtocolStartConfig(t, fixture.workDir, "")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 		defer cancel()
 		out, err := run(ctx, fixture, adapter, []string{"start", fixture.containerName}, config)
 		var exitErr *exec.ExitError
@@ -111,7 +128,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 		fixture.writeState(t, "prompt-output", ">\n"+strings.Repeat("\n", 20))
 
 		config := dockerProtocolStartConfig(t, fixture.workDir, "> ")
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 		defer cancel()
 		started := time.Now()
 		out, err := run(ctx, fixture, adapter, []string{"start", fixture.containerName}, config)
@@ -153,7 +170,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 				fixture.writeState(t, "prompt-output", tt.output+"\n")
 
 				config := dockerProtocolStartConfig(t, fixture.workDir, tt.prefix)
-				ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 				defer cancel()
 				out, err := run(ctx, fixture, adapter, []string{"start", fixture.containerName}, config)
 				if err != nil {
@@ -190,18 +207,18 @@ func TestDockerSessionProtocol(t *testing.T) {
 		}()
 
 		captureCall := dockerProtocolCaptureCall(fixture.containerName, 120)
-		observationCtx, stopObservation := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		observationCtx, stopObservation := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 		waitForDockerProtocolCall(observationCtx, t, fixture, captureCall)
 		stopObservation()
 		cancel()
 
-		completionCtx, stopCompletion := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		completionCtx, stopCompletion := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 		defer stopCompletion()
 		var err error
 		select {
 		case err = <-startResult:
 		case <-completionCtx.Done():
-			t.Fatalf("Start did not return within %s after cancellation", testutil.ExecRaceTimeout)
+			t.Fatalf("Start did not return within %s after cancellation", dockerProtocolHangBudget)
 		}
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Start error = %v, want context.Canceled", err)
@@ -225,7 +242,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 	t.Run("unsupported_command_fails_closed", func(t *testing.T) {
 		fixture := newDockerProtocolFixture(t, fakeSource)
 		wantArgs := []string{"unsupported-op", "two words", "line one\nline two", ""}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 		defer cancel()
 		out, err := run(ctx, fixture, fixture.fakeDocker, wantArgs, nil)
 		if err == nil {
@@ -268,7 +285,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 					fixture.writeState(t, filepath.Join("containers", fixture.containerName), "running\n")
 					fixture.writeState(t, filepath.Join("tmux", fixture.containerName), "running\n")
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), dockerProtocolHangBudget)
 				defer cancel()
 				out, err := run(ctx, fixture, fixture.fakeDocker, tt.args, nil)
 				var exitErr *exec.ExitError

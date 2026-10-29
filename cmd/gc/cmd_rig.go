@@ -1252,7 +1252,6 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig remove: retiring provider scope ownership: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	invalidateInvocationConfigMemo()
 	if err := writeRigRemoval(tomlPath, cfg, rigName, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1276,11 +1275,14 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 // the whole file, which drops them, only when that edit cannot be proven; it
 // says so on stderr when it does.
 func writeRigRemoval(tomlPath string, cfg *config.City, rigName string, stderr io.Writer) error {
+	// Both writes change what the next load in this invocation reads.
+	invalidateInvocationConfigMemo()
 	err := config.RemoveRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, tomlPath, cfg, rigName)
 	if !errors.Is(err, config.ErrSurgicalRigRemoveUnsupported) {
 		return err
 	}
 	fmt.Fprintf(stderr, "gc rig remove: warning: %v; rewriting city.toml in full instead, which drops its comments\n", err) //nolint:errcheck // best-effort stderr
+	invalidateInvocationConfigMemo()
 	return config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName)
 }
 

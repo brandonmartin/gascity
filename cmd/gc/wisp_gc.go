@@ -433,9 +433,12 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		return 0, fmt.Errorf("reaping orphaned closed wisps: bead store unavailable")
 	}
 
+	// Push the existing age fence down to the backend so the durable leg of
+	// TierWisps does not enumerate every recent closed issue on each sweep.
 	candidates, err := store.List(beads.ListQuery{
-		Status:   "closed",
-		TierMode: beads.TierWisps,
+		Status:        "closed",
+		TierMode:      beads.TierWisps,
+		CreatedBefore: cutoff,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("listing closed wisp-tier rows: %w", err)

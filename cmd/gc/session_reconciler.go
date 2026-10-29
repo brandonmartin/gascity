@@ -1959,8 +1959,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	capacityGuard := reconcileOpts.capacityGuard
 	effectiveStartOptions := startOptions
+	if storeQueryPartial {
+		effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), withPartialWakeBudgetView())
+	}
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
-		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
+		effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
 	}
 	// Starts and launch-drift relaunches read the same dispatch option sources, so
 	// a relaunch applies the trigger-bead pins its fresh start would.
@@ -3121,9 +3124,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// attempts ("alias already belongs to gm-XXXX") for any session whose
 		// template still has demand. Rolling back closes the dead bead so the
 		// next reconciler tick can allocate a fresh slot under the same alias.
-		// capacityHeld keeps the same tick's heal from undoing the hold: a
+		// pendingCreateHeld keeps the same tick's heal from undoing the hold: a
 		// held row must stay a claimed pending create.
-		capacityHeld := false
+		pendingCreateHeld := false
 		if !alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
 			var startupTimeout time.Duration
 			if cfg != nil {
@@ -3136,7 +3139,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if expired && strings.TrimSpace(infoPostZombie.LastWokeAt) == "" {
 				if endpoint := resolvedEndpointKey(tp, infoPostZombie); capacityGuard.HoldsPendingCreate(endpoint) {
 					expired = false
-					capacityHeld = true
+					pendingCreateHeld = true
 					if trace != nil {
 						_, st := capacityGuard.Eligible(endpoint)
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonEndpointCapacityOpen, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
@@ -3144,6 +3147,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							"state":    st.State.String(),
 						})
 					}
+				}
+			}
+			if expired && strings.TrimSpace(infoPostZombie.LastWokeAt) == "" && reconcileOpts.wakeBudgetDeferrals.holds(infoPostZombie) {
+				expired = false
+				pendingCreateHeld = true
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWakeBudget, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{"session_bead_id": id})
 				}
 			}
 			if expired {
@@ -3677,7 +3687,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, tp.Hints.ProcessNames, alive), true, sessFront, clk, startupTimeout, !capacityHeld)
+		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, tp.Hints.ProcessNames, alive), true, sessFront, clk, startupTimeout, !pendingCreateHeld)
 		if healErr != nil {
 			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 			continue

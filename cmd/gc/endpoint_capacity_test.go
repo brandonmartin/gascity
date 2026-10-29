@@ -1995,3 +1995,78 @@ func TestCapacityRefusal_TickDuringTheStartAccruesNoChurn(t *testing.T) {
 		t.Fatalf("the start after the refusal lifts woke %d, running %v; want the seat back\nlog %q", woken, e.sp.IsRunning("s"), e.log.String())
 	}
 }
+
+func TestWakeBudgetDeferralPreservesPendingCreateAcrossSlowTicks(t *testing.T) {
+	e := newCapacityEnv(t, true, "a", "b", "dead")
+	e.clk.Time = time.Now().UTC()
+	e.limitToOneWake()
+	guard := &wakeBudgetDeferrals{}
+	e.startOptions = append(e.startOptions, withWakeBudgetDeferrals(guard))
+	a := e.pendingCreate(t, "a", "e", nil)
+	b := e.pendingCreate(t, "b", "e", map[string]string{"state": "creating", "pending_create_started_at": e.clk.Now().Format(time.RFC3339)})
+	dead := e.pendingCreate(t, "dead", "e", map[string]string{"state": "creating", "pending_create_started_at": e.clk.Now().Format(time.RFC3339)})
+
+	if got := e.start(context.Background(), a, b); got != 1 || !guard.holds(b.info) {
+		t.Fatalf("starts=%d, deferred b=%v; want one start and b deferred", got, guard.holds(b.info))
+	}
+	e.clk.Advance(11 * time.Minute)
+	hold := pendingCreateHoldForRows(e.cfg, e.guard, guard)
+	if n := reapStaleSessionBeads(e.city, e.store, testSeatWork(e.city, nil, e.store, nil), e.sp, e.dt, hold, e.clk, &e.log); n != 1 {
+		t.Fatalf("reaped %d, want only the unheld dead row", n)
+	}
+	requireHeldPendingCreate(t, e.bead(t, b.info.ID))
+	if got := e.bead(t, dead.info.ID); got.Status != "closed" {
+		t.Fatalf("dead status=%q, want closed", got.Status)
+	}
+	// A second budget-limited pass keeps the same row, even past the floor.
+	c := e.pendingCreate(t, "c", "e", nil)
+	c.info.CreatedAt = b.info.CreatedAt.Add(-time.Hour)
+	e.start(context.Background(), c, e.refreshed(b))
+	e.clk.Advance(11 * time.Minute)
+	e.reconcileTraced(e.bead(t, b.info.ID))
+	if got := e.bead(t, b.info.ID); got.Status != "open" {
+		t.Fatalf("deferred row status=%q, want open", got.Status)
+	}
+	found := false
+	for _, r := range e.records(TraceSiteReconcilerPendingCreate) {
+		if r.ReasonCode == TraceReasonWakeBudget && r.OutcomeCode == TraceOutcomeDeferred {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing wake-budget rollback deferral trace")
+	}
+}
+
+func TestWakeBudgetDeferralClearsAndFencesIncarnation(t *testing.T) {
+	e := newCapacityEnv(t, false, "a", "b")
+	e.clk.Time = time.Now().UTC()
+	e.limitToOneWake()
+	guard := &wakeBudgetDeferrals{}
+	e.startOptions = append(e.startOptions, withWakeBudgetDeferrals(guard))
+	a := e.pendingCreate(t, "a", "e", nil)
+	b := e.pendingCreate(t, "b", "e", nil)
+	e.start(context.Background(), a, b)
+	if !guard.holds(b.info) {
+		t.Fatal("expected budget hold")
+	}
+	newer := b.info
+	newer.InstanceToken = "new-incarnation"
+	if guard.holds(newer) {
+		t.Fatal("old deferral held a new incarnation")
+	}
+	// Partial reads cannot prove the row left the queue; a complete empty pass can.
+	guard.replace(nil, true)
+	if !guard.holds(b.info) {
+		t.Fatal("partial pass cleared the hold")
+	}
+	e.start(context.Background())
+	if guard.holds(b.info) {
+		t.Fatal("complete empty pass retained the hold")
+	}
+	e.clk.Advance(11 * time.Minute)
+	e.reconcileTraced(e.bead(t, b.info.ID))
+	if got := e.bead(t, b.info.ID); got.Status != "closed" {
+		t.Fatalf("status=%q, want expired unheld create closed", got.Status)
+	}
+}

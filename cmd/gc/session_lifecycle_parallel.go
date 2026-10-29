@@ -393,6 +393,48 @@ func (p startPhaseTimings) formatLog() string {
 	return " phases=[" + strings.Join(parts, " ") + "]"
 }
 
+// wakeBudgetDeferrals remembers only the last completed start pass. A controller
+// restart forgets the queue and falls back to the ordinary expiry floor.
+type wakeBudgetDeferrals struct {
+	mu   sync.Mutex
+	rows map[string]sessionpkg.Info
+}
+
+func (g *wakeBudgetDeferrals) holds(info sessionpkg.Info) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	old, ok := g.rows[info.ID]
+	return ok && old.InstanceToken == info.InstanceToken && old.Generation == info.Generation
+}
+
+func (g *wakeBudgetDeferrals) replace(rows map[string]sessionpkg.Info, partial bool) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if partial {
+		if g.rows == nil {
+			g.rows = make(map[string]sessionpkg.Info)
+		}
+		maps.Copy(g.rows, rows)
+	} else {
+		g.rows = rows
+	}
+}
+
+func withWakeBudgetDeferrals(g *wakeBudgetDeferrals) startExecutionOption {
+	return func(opts *startExecutionOptions) { opts.wakeBudgetDeferrals = g }
+}
+
+// A filtered or partial pass cannot prove that an omitted row left the queue.
+func withPartialWakeBudgetView() startExecutionOption {
+	return func(opts *startExecutionOptions) { opts.wakeBudgetPartial = true }
+}
+
 type startExecutionOptions struct {
 	async                          bool
 	asyncFollowUp                  func()
@@ -439,7 +481,9 @@ type startExecutionOptions struct {
 	dispatchOptionSources dispatchOptionSources
 	// capacityGuard gates starts per serving endpoint. Nil leaves every
 	// endpoint unguarded (legacy failure accounting).
-	capacityGuard *endpointCapacityGuard
+	capacityGuard       *endpointCapacityGuard
+	wakeBudgetDeferrals *wakeBudgetDeferrals
+	wakeBudgetPartial   bool
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
@@ -4216,9 +4260,6 @@ func executePlannedStartsTraced(
 	trace *sessionReconcilerTraceCycle,
 	options ...startExecutionOption,
 ) int {
-	if len(candidates) == 0 {
-		return 0
-	}
 	if ctx != nil && ctx.Err() != nil {
 		return 0
 	}
@@ -4236,6 +4277,11 @@ func executePlannedStartsTraced(
 			apply(&startOpts)
 		}
 	}
+	if len(candidates) == 0 {
+		startOpts.wakeBudgetDeferrals.replace(nil, startOpts.wakeBudgetPartial)
+		return 0
+	}
+	deferred := make(map[string]sessionpkg.Info)
 	stabilityWaiter := resolveStartStabilityWaiter(startOpts.stabilityWaiter)
 	sessionStaleKeyDetectionWaiter := startOpts.sessionStaleKeyDetectionWaiter
 	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
@@ -4300,12 +4346,6 @@ func executePlannedStartsTraced(
 		if len(waveCandidates) == 0 {
 			continue
 		}
-		if wakeCount >= maxWakes {
-			for _, candidate := range waveCandidates {
-				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
-			}
-			continue
-		}
 		var ready []startCandidate
 		for _, candidate := range waveCandidates {
 			if ctx != nil && ctx.Err() != nil {
@@ -4330,6 +4370,9 @@ func executePlannedStartsTraced(
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
+					if candidate.info.PendingCreateClaim && strings.TrimSpace(candidate.info.LastWokeAt) == "" {
+						deferred[candidate.info.ID] = candidate.info
+					}
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
 				}
 				break
@@ -4590,6 +4633,7 @@ func executePlannedStartsTraced(
 			return wakeCount
 		}
 	}
+	startOpts.wakeBudgetDeferrals.replace(deferred, startOpts.wakeBudgetPartial)
 	return wakeCount
 }
 

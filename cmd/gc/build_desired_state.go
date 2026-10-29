@@ -1989,7 +1989,24 @@ func collectAssignedWorkBeadsWithStores(
 			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
+	// The ready-by-assignee probe below needs the closed named-session index,
+	// which reads only the city store's closed history. Read it alongside the
+	// census legs instead of after them (ga-nj0me: 7s serial on this city). It
+	// starts after every leg is labeled so its record names the store's leg.
+	// A panic in it is re-raised here, on the caller's goroutine, as it was
+	// when the read ran inline.
+	var closedIdx session.ClosedNamedSessionBeadIndex
+	var closedIdxPanic any
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() { closedIdxPanic = recover() }()
+		closedIdx = readyAssigneesClosedNamedIndex(cfg, cityStore, pass, point, reads)
+	}()
 	wg.Wait()
+	if closedIdxPanic != nil {
+		panic(closedIdxPanic)
+	}
 
 	var result []beads.Bead
 	var resultStores []beads.Store
@@ -2022,7 +2039,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point, reads)
+	assignees := readyAssignedWorkAssigneesFromIndex(cfg, sessionBeads, skipReadyAssignees, closedIdx)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -2147,7 +2164,48 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
+// cfgHasOnDemandNamedSession reports whether any configured named session is
+// on_demand, the only mode readyAssignedWorkAssigneesFromIndex consults closed
+// history for.
+func cfgHasOnDemandNamedSession(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].Mode == "on_demand" {
+			return true
+		}
+	}
+	return false
+}
+
+// readyAssigneesClosedNamedIndex is the one batched read every configured
+// named session's closed-phantom lookup in readyAssignedWorkAssigneesFromIndex
+// consults, instead of the store.List-per-identity loop this replaced
+// (ga-0t7qjl: 109 serial bd calls, +155s, on this city). It is read only when
+// an on_demand session actually exists to consult it: a city with zero (or
+// only always-mode) named sessions must not pay this store read at all
+// (ga-bequ8d).
+//
+// The error feeds only the trace record. A hard failure leaves the index
+// empty, so every Find reports no match and each on_demand identity is still
+// probed under its qualified name; a partial read keeps the rows it did get.
+// It reads nothing that the assigned-work census writes, so the census runs it
+// alongside its own legs rather than after them.
+func readyAssigneesClosedNamedIndex(cfg *config.City, cityStore beads.Store, pass *demandPassTrace, point string, reads demandReads) session.ClosedNamedSessionBeadIndex {
+	if !cfgHasOnDemandNamedSession(cfg) {
+		return session.ClosedNamedSessionBeadIndex{}
+	}
+	start := pass.now()
+	closedIdx, idxErr := demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
+	pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
+	return closedIdx
+}
+
+// readyAssignedWorkAssigneesFromIndex enumerates the assignees the assigned
+// census probes Ready for, given the closed named-session index. It reads no
+// store.
+func readyAssignedWorkAssigneesFromIndex(cfg *config.City, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, closedIdx session.ClosedNamedSessionBeadIndex) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -2176,30 +2234,6 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 	}
 	if cfg != nil {
 		cityName := config.EffectiveCityName(cfg, "")
-		hasOnDemand := false
-		for i := range cfg.NamedSessions {
-			if cfg.NamedSessions[i].Mode == "on_demand" {
-				hasOnDemand = true
-				break
-			}
-		}
-		// One batched read for every configured named session's closed-phantom
-		// lookup below, instead of the store.List-per-identity loop this
-		// replaced (ga-0t7qjl: 109 serial bd calls, +155s, on this city).
-		// Built only when an on_demand session actually exists to consult it —
-		// a city with zero (or only always-mode) named sessions must not pay
-		// this store read at all (ga-bequ8d).
-		var closedIdx session.ClosedNamedSessionBeadIndex
-		if hasOnDemand {
-			// The error feeds only the trace record. A hard failure leaves the
-			// index empty, so every Find below reports no match and each
-			// on_demand identity is still probed under its qualified name; a
-			// partial read keeps the rows it did get.
-			start := pass.now()
-			var idxErr error
-			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
-			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
-		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
@@ -2418,14 +2452,30 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// and "city" groups and would double the template's demand. With the city
 	// probe no longer cold-gated, that double-count would be a persistent
 	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
-	for _, group := range groupOrder {
-		key := group.storeKey
+	//
+	// The groups' reads are independent, so they run concurrently, at most
+	// probeConcurrency at a time, and the fold below walks them in groupOrder:
+	// the error order, the partial verdicts and the first-leg-wins dedup are
+	// what a serial pass produces (ga-nj0me: ten serial group reads cost 22s of
+	// one tick). Two groups on one store share the cache's single fetch.
+	type groupRead struct {
+		ready []beads.Bead
+		err   error
+	}
+	groupReads := make([]groupRead, len(groupOrder))
+	forEachDemandLeg(len(groupOrder), probeConcurrency(cfg), func(i int) {
+		group := groupOrder[i]
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
 		// should wake pools must create an actionable root, such as a
 		// vapor/root-only wisp. Molecule containers and formula step
 		// beads remain hidden by readyExcludeTypes.
-		ready, readyErr := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, key))
+		ready, err := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, group.storeKey))
+		groupReads[i] = groupRead{ready: ready, err: err}
+	})
+	for i, group := range groupOrder {
+		key := group.storeKey
+		ready, readyErr := groupReads[i].ready, groupReads[i].err
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)

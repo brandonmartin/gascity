@@ -13003,37 +13003,59 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	tracer.detail = map[string]TraceSource{"worker": TraceSourceManual}
 	trace := tracer.BeginCycle(TraceTickTriggerPatrol, "", env.clk.Now().UTC(), env.cfg)
 
-	reconcileSessionBeadsTraced(
-		context.Background(),
-		env.city,
-		[]beads.Bead{session},
-		env.desiredState,
-		configuredSessionNames(env.cfg, "", env.store),
-		env.cfg,
-		env.sp,
-		env.store,
-		nil,
-		nil,
-		nil,
-		nil,
-		env.dt,
-		map[string]int{"worker": 0},
-		false,
-		nil,
-		"test-city",
-		nil,
-		env.clk,
-		rec,
-		env.cfg.Session.StartupTimeoutDuration(),
-		0,
-		&env.stdout,
-		&env.stderr,
-		trace,
-		withAsyncDrainAckStopTracker(env.stops),
-	)
+	pass := func() {
+		reconcileSessionBeadsTraced(
+			context.Background(),
+			env.city,
+			[]beads.Bead{session},
+			env.desiredState,
+			configuredSessionNames(env.cfg, "", env.store),
+			env.cfg,
+			env.sp,
+			env.store,
+			nil,
+			nil,
+			nil,
+			nil,
+			env.dt,
+			map[string]int{"worker": 0},
+			false,
+			nil,
+			"test-city",
+			nil,
+			env.clk,
+			rec,
+			env.cfg.Session.StartupTimeoutDuration(),
+			0,
+			&env.stdout,
+			&env.stderr,
+			trace,
+			withAsyncDrainAckStopTracker(env.stops),
+		)
+	}
+
+	// The pass that first sees the committed reset is not a stall however long
+	// ago the commit was: the start can only come on a pass over the session
+	// after the commit, and a tick that outlasts startup_timeout would otherwise
+	// report every healthy cycle as stalled. The start is held here (wait_hold),
+	// so the stall is reported once a full startup_timeout passes after it.
+	pass()
+	if got := strings.TrimSpace(env.stderr.String()); got != "" {
+		t.Fatalf("first pass after the commit stderr = %q, want silence", got)
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("recorded events on the first pass after the commit = %d, want 0: %#v", len(rec.Events), rec.Events)
+	}
+	env.clk.Advance(env.cfg.Session.StartupTimeoutDuration() / 2)
+	pass()
+	if got := strings.TrimSpace(env.stderr.String()); got != "" {
+		t.Fatalf("pass within startup_timeout of the first stderr = %q, want silence", got)
+	}
+	env.clk.Advance(env.cfg.Session.StartupTimeoutDuration()/2 + time.Second)
+	pass()
 
 	wantMessage := fmt.Sprintf(
-		"session reconciler: reset stalled for worker: elapsed_s=75 reset_committed_at=%s bead_id=%s",
+		"session reconciler: reset stalled for worker: elapsed_s=136 reset_committed_at=%s bead_id=%s",
 		committedAt,
 		session.ID,
 	)
@@ -13054,8 +13076,8 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	if err := json.Unmarshal(gotEvent.Payload, &payload); err != nil {
 		t.Fatalf("decode payload: %v", err)
 	}
-	if payload.SessionName != "worker" || payload.Template != "worker" || payload.ResetCommittedAt != committedAt || payload.ElapsedSeconds != 75 {
-		t.Fatalf("payload = %+v, want session/template worker, reset_committed_at %q, elapsed_s 75", payload, committedAt)
+	if payload.SessionName != "worker" || payload.Template != "worker" || payload.ResetCommittedAt != committedAt || payload.ElapsedSeconds != 136 {
+		t.Fatalf("payload = %+v, want session/template worker, reset_committed_at %q, elapsed_s 136", payload, committedAt)
 	}
 
 	foundTrace := false
@@ -13095,11 +13117,58 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	})
 	env.stderr.Reset()
 	recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
-	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
-		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
+	if got := strings.TrimSpace(env.stderr.String()); got != "" {
+		t.Fatalf("first pass after the re-commit stderr = %q, want silence", got)
+	}
+	env.clk.Advance(env.cfg.Session.StartupTimeoutDuration() + time.Second)
+	recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	wantRestalled := fmt.Sprintf(
+		"session reconciler: reset stalled for worker: elapsed_s=197 reset_committed_at=%s bead_id=%s",
+		committedAt,
+		session.ID,
+	)
+	if got := strings.TrimSpace(env.stderr.String()); got != wantRestalled {
+		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantRestalled)
 	}
 	if len(rec.Events) != 2 {
 		t.Fatalf("recorded events after reset clear = %d, want 2", len(rec.Events))
+	}
+}
+
+// TestReconcileSessionBeads_ResetBehindLongTickIsNotStalled: a fresh-mode cycle
+// kills the runtime in one tick and the restart can only come on the next
+// tick's pass over the session. When that tick runs longer than
+// startup_timeout, the pass that starts the session sees a reset committed
+// more than startup_timeout ago. It is the first pass after the commit and it
+// starts the session, so it must not report the reset stalled.
+func TestReconcileSessionBeads_ResetBehindLongTickIsNotStalled(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: env.clk.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.stderr.String(); strings.Contains(got, "reset stalled") {
+		t.Fatalf("stderr = %q, want no stall report for the pass that starts the session", got)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionResetStalled {
+			t.Fatalf("recorded %s for a reset the same pass started: %#v", e.Type, e)
+		}
+	}
+	if got := restartRequestFakeCallCount(env.sp, "Start", "worker"); got != 1 {
+		t.Fatalf("Start calls = %d, want 1 (the pass enqueued a start on the reset session)", got)
 	}
 }
 

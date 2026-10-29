@@ -209,6 +209,7 @@ const (
 	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
+	TraceReasonWakeBudget            TraceReasonCode = "wake_budget"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 )
 

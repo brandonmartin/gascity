@@ -28,7 +28,10 @@ type fakeBdProjection struct {
 	wispQueryErr error
 	showGate     chan struct{}
 	shows        int
-	listed       []string
+	// wispIDReads counts wisp-tier reads by ID. Each Get of an ephemeral row
+	// makes exactly one, with or without the bd show miss before it.
+	wispIDReads int
+	listed      []string
 }
 
 func (f *fakeBdProjection) run(_, _ string, args ...string) ([]byte, error) {
@@ -48,6 +51,7 @@ func (f *fakeBdProjection) run(_, _ string, args ...string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("issue %s not found", args[2])
 	case len(args) > 2 && args[0] == "query" && strings.HasPrefix(args[2], "ephemeral=true AND id="):
+		f.wispIDReads++
 		if f.wispQueryErr != nil {
 			return nil, f.wispQueryErr
 		}
@@ -132,8 +136,8 @@ func TestBdStoreParentProjectionIncludesEphemeralChild(t *testing.T) {
 			t.Fatalf("stale old-parent reads left = %d; the wait returned before the old parent's wisp listing converged", bd.staleReads)
 		}
 		// The first poll must have seen the stale listing and polled again.
-		if bd.shows < 2 {
-			t.Fatalf("waiter polled %d time(s), want a second poll after the stale old-parent listing", bd.shows)
+		if bd.wispIDReads < 2 {
+			t.Fatalf("waiter polled %d time(s), want a second poll after the stale old-parent listing", bd.wispIDReads)
 		}
 	})
 }

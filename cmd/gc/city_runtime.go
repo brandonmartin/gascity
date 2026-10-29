@@ -4647,11 +4647,17 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 // cached demand?" cost several remote round trips on every patrol tick, to avoid
 // recomputing something cheaper (ga-l7jdg).
 //
-// Read through the resolver's Walk executor rather than an enumeration: a leg
-// read failure is HASHED rather than raised (a stable error must license reuse
-// exactly as a stable read does, or a dark store rebuilds the snapshot every
-// tick forever), so the visit never returns an error and the plan's per-leg
-// policy has nothing to escalate.
+// The legs come from the resolver's Walk executor rather than an enumeration: a
+// leg read failure is HASHED rather than raised (a stable error must license
+// reuse exactly as a stable read does, or a dark store rebuilds the snapshot
+// every tick forever), so the visit never returns an error and the plan's
+// per-leg policy has nothing to escalate.
+//
+// The legs' reads are independent, so they run concurrently, at most
+// probeConcurrency at a time; the hash then folds them in the plan's leg
+// order. One slow store bounds the probe instead of the sum of every store
+// (ga-nj0me: ten serial live reads cost 24s of one patrol tick). The hash input
+// is byte-for-byte what a serial pass writes.
 func (cr *CityRuntime) readyDemandSnapshotFingerprint(trace *sessionReconcilerTraceCycle) string {
 	h := fnv.New64a()
 	cfg := cr.serviceConfigSnapshot()
@@ -4673,26 +4679,44 @@ func (cr *CityRuntime) readyDemandSnapshotFingerprint(trace *sessionReconcilerTr
 		_, _ = io.WriteString(h, err.Error())
 		return fmt.Sprintf("%x", h.Sum64())
 	}
+	var legs []storeref.Leg
 	_, _ = storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		ref := demandFingerprintRef(cr.cityName, leg.Ref)
-		_, _ = io.WriteString(h, ref)
-		_, _ = io.WriteString(h, "\x00")
+		legs = append(legs, leg)
+		return false, nil
+	})
+	type legRead struct {
+		ready []beads.Bead
+		err   error
+	}
+	reads := make([]legRead, len(legs))
+	forEachDemandLeg(len(legs), probeConcurrency(cfg), func(i int) {
+		leg := legs[i]
 		if leg.Store == nil {
-			_, _ = io.WriteString(h, "<nil>")
-			_, _ = io.WriteString(h, "\x00")
-			return false, nil
+			return
 		}
 		start := trace.demandNow()
 		ready, err := beads.ReadyLive(leg.Store, beads.ReadyQuery{TierMode: beads.TierBoth})
 		// The record takes the leg's canonical label, not the spelling the hash
 		// and log line use: the hash input must not change.
 		recordDemandStoreRead(trace, demandStoreRead{point: demandReadPointFingerprint, leg: censusRef(cfg, leg.Ref, censusRefScoped), op: "ready", tier: demandReadTierLive}, start, len(ready), err)
+		reads[i] = legRead{ready: ready, err: err}
+	})
+	for i, leg := range legs {
+		ref := demandFingerprintRef(cr.cityName, leg.Ref)
+		_, _ = io.WriteString(h, ref)
+		_, _ = io.WriteString(h, "\x00")
+		if leg.Store == nil {
+			_, _ = io.WriteString(h, "<nil>")
+			_, _ = io.WriteString(h, "\x00")
+			continue
+		}
+		ready, err := reads[i].ready, reads[i].err
 		if err != nil {
 			log.Printf("readyDemandSnapshotFingerprint: store %s: %v", ref, err)
 			_, _ = io.WriteString(h, "error:")
 			_, _ = io.WriteString(h, err.Error())
 			_, _ = io.WriteString(h, "\x00")
-			return false, nil
+			continue
 		}
 		sort.Slice(ready, func(i, j int) bool {
 			return ready[i].ID < ready[j].ID
@@ -4700,8 +4724,7 @@ func (cr *CityRuntime) readyDemandSnapshotFingerprint(trace *sessionReconcilerTr
 		for _, bead := range ready {
 			writeReadyDemandFingerprintBead(h, bead)
 		}
-		return false, nil
-	})
+	}
 	return fmt.Sprintf("%x", h.Sum64())
 }
 

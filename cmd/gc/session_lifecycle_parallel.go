@@ -215,10 +215,19 @@ func startLeaseName(c startCandidate) string {
 // sleep->re-wake fairness (a SleepPatch clears last_woke_at before the append,
 // so the fallback kicks in) is pinned by TestWakeFairnessInfoTwinCharacterization
 // — the slept_at middle tier keeps a session that slept recently from jumping
-// the queue ahead of one that has been waiting since creation.
+// the queue ahead of one that has been waiting since creation. A reset-pending
+// session (a fresh cycle or restart handoff: RestartRequestPatch clears
+// last_woke_at) ranks by reset_committed_at, when its last incarnation stopped,
+// so a long-lived seat that cycles every patrol cannot outrank pool sessions
+// created since by a stale slept_at or its CreatedAt (fa-s3ahr).
 func wakeFairnessTime(c startCandidate) time.Time {
 	if t, err := time.Parse(time.RFC3339, c.info.LastWokeAt); err == nil {
 		return t
+	}
+	if strings.TrimSpace(c.info.ContinuationResetPending) == "true" {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(c.info.ResetCommittedAt)); err == nil {
+			return t
+		}
 	}
 	if t, err := time.Parse(time.RFC3339, c.info.SleptAt); err == nil {
 		return t

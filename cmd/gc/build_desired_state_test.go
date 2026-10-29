@@ -2528,7 +2528,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil, nil, nil, "", nil)
+	}, nil, nil, nil, "", nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2571,7 +2571,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 
 	countListCalls := func(n int) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "", nil)
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -2594,7 +2594,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
 	countListCalls := func(cfg *config.City) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
+		readyAssignedWorkAssignees(cfg, store, nil, nil, "", nil)
 		return store.listCalls
 	}
 

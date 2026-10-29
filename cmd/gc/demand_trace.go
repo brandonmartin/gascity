@@ -176,6 +176,24 @@ func demandLegLabel(cfg *config.City, ref string) string {
 	}
 }
 
+// forEachDemandLeg calls fn(0..n-1) with at most limit calls in flight, for
+// the independent store reads of one demand read point. A read that panics
+// does not kill the process from a worker goroutine: once every call has
+// returned, the panic of the lowest-indexed leg is re-raised on the caller's
+// goroutine, where it meets the same recovery a serial read would have.
+func forEachDemandLeg(n, limit int, fn func(int)) {
+	panics := make([]any, n)
+	forEachBounded(n, limit, func(i int) {
+		defer func() { panics[i] = recover() }()
+		fn(i)
+	})
+	for _, p := range panics {
+		if p != nil {
+			panic(p)
+		}
+	}
+}
+
 // demandNow is the start instant for a demand sub-phase or store read.
 func (c *SessionReconcilerTraceCycle) demandNow() time.Time {
 	if c == nil || c.durationClock == nil {

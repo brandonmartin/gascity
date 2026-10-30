@@ -859,10 +859,10 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 		t.Fatalf("rewrite nested unrelated file: %v", err)
 	}
 
-	// Negative-assertion window: asserts no watcher poke arrives (ga-57b2dk exclusion).
 	select {
 	case <-pokeCh:
 		t.Fatalf("unexpected watcher poke after unrelated nested city-root file changed; stderr=%q", stderr.String())
+	// Negative-assertion window: asserts no watcher poke arrives (ga-57b2dk exclusion).
 	case <-time.After(250 * time.Millisecond):
 	}
 	if dirty.Load() {
@@ -905,10 +905,10 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 		if err := os.WriteFile(traceFile, []byte(body), 0o644); err != nil {
 			t.Fatalf("rewrite runtime trace #%d: %v", i+1, err)
 		}
-		// Negative-assertion window, loop body: asserts no watcher poke arrives (ga-57b2dk exclusion).
 		select {
 		case <-pokeCh:
 			t.Fatalf("unexpected watcher poke after runtime trace write #%d; stderr=%q", i+1, stderr.String())
+		// Negative-assertion window, loop body: asserts no watcher poke arrives (ga-57b2dk exclusion).
 		case <-time.After(250 * time.Millisecond):
 		}
 		if dirty.Load() {
@@ -1419,9 +1419,9 @@ func TestResetSessionCircuitBreakerStateClearsRacingOpenPersist(t *testing.T) {
 		resetErr <- resetSessionCircuitBreakerState(store, session.ID, identity, cb)
 	}()
 
-	// Bounded best-effort probe with no assertion on either branch (ga-57b2dk exclusion).
 	select {
 	case <-store.cleared:
+	// Bounded best-effort probe with no assertion on either branch (ga-57b2dk exclusion).
 	case <-time.After(50 * time.Millisecond):
 	}
 

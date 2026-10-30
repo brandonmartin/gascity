@@ -1214,12 +1214,17 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	if got := parsedCfg.Agents[0].IdleTimeoutDuration(); got != 5*time.Second {
 		t.Fatalf("parsed idle_timeout duration = %v, want %v", got, 5*time.Second)
 	}
-	tracker, ok := buildIdleTracker(parsedCfg, "test", dir, sp).(*memoryIdleTracker)
+	idleProvider := runtime.NewFake()
+	if err := idleProvider.Start(context.Background(), "mayor", runtime.Config{Command: "echo hello"}); err != nil {
+		t.Fatalf("fake start isolated mayor: %v", err)
+	}
+	idleProvider.SetActivity("mayor", time.Now().Add(-10*time.Minute))
+	tracker, ok := buildIdleTracker(parsedCfg, "test", dir, idleProvider).(*memoryIdleTracker)
 	if !ok || tracker == nil {
 		t.Fatal("buildIdleTracker(parsedCfg) = nil, want tracker")
 	}
-	if !tracker.checkIdle("mayor", "", "", "", sp, time.Now()) {
-		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", sp.Activity["mayor"], tracker.timeouts)
+	if !tracker.checkIdle("mayor", "", "", "", idleProvider, time.Now()) {
+		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", idleProvider.Activity["mayor"], tracker.timeouts)
 	}
 
 	bead := waitForNamedMode("on_demand", hangBudget)

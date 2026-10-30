@@ -29,6 +29,13 @@ Package-internal helpers in `internal/session/` may construct and use
 `session.Manager`; tests may construct it directly. Do not add new non-test
 direct `session.Manager.CreateSession` call sites outside the worker boundary.
 
+## Session environment scope
+
+When worker create or resume resolves a configured agent, project the same
+city/rig bead-provider and session-backend environment as template creation.
+Rig scope must follow the agent's resolved rig, and city sessions must clear
+inherited rig keys. Keep controller-only and city identity overlays authoritative.
+
 ## Bounded observation
 
 `worker.ObserveBounded` is how a caller waits on an observation (a handle read,

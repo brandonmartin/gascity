@@ -1247,9 +1247,9 @@ func TestBackstopLaneRecordsClosedNamedIndexOnEveryLeg(t *testing.T) {
 			t.Fatalf("exact=%t: closed index recorded=%t err=%v, want recorded", exact, ok, l.Err)
 		}
 
-		legacy := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", nil)
+		legacy := readyAssignedWorkAssignees(cfg, cache, nil, nil, "", nil)
 		backing.armed.Store(true)
-		v2 := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", newV2DemandReads(now, rec))
+		v2 := readyAssignedWorkAssignees(cfg, cache, nil, nil, "", newV2DemandReads(now, rec))
 		if runtime := config.NamedSessionRuntimeName(config.EffectiveCityName(cfg, ""), cfg.Workspace, "mayor"); !slices.Equal(v2, legacy) || !slices.Contains(v2, runtime) {
 			t.Errorf("exact=%t: v2 assignees %v, legacy %v; want equal, with the closed phantom's %q", exact, v2, legacy, runtime)
 		}
@@ -1445,7 +1445,7 @@ func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
 				rows, _, refs, _ := collectOpenUnassignedRoutedWork(cityPath, cfg, front, rigs, suspended, io.Discard, nil, reads)
 				projected, _ := projectControlDispatcherRoutes(cfg, rows, refs)
 				_ = openControlDispatcherDemand(cfg, projected)
-				_ = readyAssignedWorkAssignees(cfg, front, sessions, nil, nil, "", reads)
+				_ = readyAssignedWorkAssignees(cfg, front, sessions, nil, "", reads)
 				_ = rec.scaleCheck(time.Now())
 			}
 		})

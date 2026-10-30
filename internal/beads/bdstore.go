@@ -500,6 +500,10 @@ type BdStore struct {
 	// See bdstore_inline_deps.go.
 	inlineDeps inlineDependencyProjection
 
+	// wispHints orders Get's reads for rows last found in the wisp tier. See
+	// bdstore_wisp_residency.go.
+	wispHints wispResidencyHints
+
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
 }
 
@@ -1600,8 +1604,17 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 // event check it runs on the event watcher's goroutine (checkEvent).
 func (s *BdStore) readsBySubprocess() bool { return true }
 
-// Get retrieves a bead by ID via bd show.
+// Get retrieves a bead by ID via bd show, falling back to the wisp tier. An ID
+// last found in the wisp tier is looked up there first (wispResidencyHints).
 func (s *BdStore) Get(id string) (Bead, error) {
+	wispChecked := false
+	if s.wispHints.has(id) {
+		var b Bead
+		var found bool
+		if b, found, wispChecked = s.getHintedWisp(id); found {
+			return b, nil
+		}
+	}
 	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
 	// restart (SIGKILL + port rebind) recovers instead of surfacing a one-shot
 	// "invalid connection"/"i/o timeout" transport error. The runner performs a
@@ -1625,11 +1638,13 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// (e.g. auto-handoff mail created by gc handoff --auto). Only IDs
 		// that look like bead IDs are eligible: callers also pass through
 		// non-bead names (e.g. slash-qualified session recipients), which
-		// must not leak into a supplemental wisp query.
-		if isWispQueryableID(id) {
+		// must not leak into a supplemental wisp query. A hinted read that
+		// already found the wisp tier clean is not repeated.
+		if isWispQueryableID(id) && !wispChecked {
 			wisps, queryErr := s.getEphemeralByID(id)
 			for _, b := range wisps {
 				if b.ID == id {
+					s.wispHints.note(id)
 					return b, nil
 				}
 			}

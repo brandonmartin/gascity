@@ -1685,6 +1685,7 @@ func TestSessionWakeOpRetargetsWhenTheReopenFallsThrough(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := doSessionWake(killPokeSessionIdentity, &stdout, &stderr, true, sessionWakeDeps{
+		willNotStart:              wakeWillNotStart,
 		opKey:                     "move-1",
 		store:                     cliOpReopenFailStore{Store: c.reload(t)},
 		cfg:                       cfg,

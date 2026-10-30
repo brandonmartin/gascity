@@ -58,6 +58,7 @@ type sessionWakeDeps struct {
 	// cfgErr is the city config's load error, when cfg did not load.
 	cfgErr                    error
 	store                     beads.Store
+	willNotStart              func(session.Info, wakeVerdictDeps, time.Time) (string, bool)
 	cfg                       *config.City
 	cityPath                  string
 	cityResolved              bool
@@ -99,6 +100,7 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 		cfgErr:                    cfgErr,
 		sp:                        wakeVerdictProvider(),
 		store:                     store,
+		willNotStart:              wakeWillNotStart,
 		cfg:                       cfg,
 		cityPath:                  cityPath,
 		cityResolved:              cityErr == nil,
@@ -204,7 +206,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		if info, err := sessFront.Get(id); err == nil {
 			woken = info
 		}
-		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
+		if why, _ := deps.willNotStart(woken, wakeVerdictDeps{
 			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, work: cityWorkLegOf(beads.WorkStore{Store: deps.store}), rigStores: rigStores,
 			runsV2: func() bool { return deps.cityResolved && cityRunsV2(deps.cityPath, deps.cfg) },
 		}, deps.now()); why != "" {

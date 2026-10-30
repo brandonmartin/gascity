@@ -170,6 +170,7 @@ func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
 
 	var calls []string
 	deps := sessionWakeDeps{
+		willNotStart: func(session.Info, wakeVerdictDeps, time.Time) (string, bool) { return "", true },
 		store:        store,
 		cityPath:     "/city",
 		cityResolved: true,
@@ -257,6 +258,7 @@ func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
 
 	poked := false
 	deps := sessionWakeDeps{
+		willNotStart: wakeWillNotStart,
 		store:        store,
 		cityPath:     "/city",
 		cityResolved: true,
@@ -298,6 +300,7 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 	}
 
 	deps := sessionWakeDeps{
+		willNotStart: wakeWillNotStart,
 		store:        store,
 		cityPath:     "/city",
 		cityResolved: true,
@@ -390,6 +393,7 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 
 			withdrawCalled := false
 			deps := sessionWakeDeps{
+				willNotStart: wakeWillNotStart,
 				store:        store,
 				cityPath:     "/city",
 				cityResolved: true,
@@ -488,7 +492,7 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 			if sessionWakeHasRunnableTemplateInfo(session.Info{Template: "worker"}, cfg) {
 				t.Fatal("test setup: template \"worker\" must not be runnable under this config")
 			}
-			deps := sessionWakeDeps{store: store, cfg: cfg, cityPath: "/city", now: time.Now}
+			deps := sessionWakeDeps{willNotStart: wakeWillNotStart, store: store, cfg: cfg, cityPath: "/city", now: time.Now}
 
 			// The wake is recorded (and a stale create healed), but no agent
 			// runs the template: the shared will-not-start predicate says so
@@ -605,6 +609,7 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 				}
 			}
 			deps := sessionWakeDeps{
+				willNotStart: wakeWillNotStart,
 				store:        store,
 				cfg:          cfg,
 				cityPath:     cityPath,
@@ -895,7 +900,8 @@ func TestDoSessionWake_JudgesThePostWakeRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	deps := sessionWakeDeps{
-		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		willNotStart: wakeWillNotStart,
+		store:        store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
 		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
 		cityUsesManagedReconciler: func(string) bool { return false },
 		pokeController:            func(string, reconcilekey.Key) error { return nil },
@@ -928,7 +934,8 @@ func TestDoSessionWakeReadsTheWorkStoreOnASplitCity(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	if code := doSessionWake(seat.ID, &bytes.Buffer{}, &stderr, false, sessionWakeDeps{
-		store: work, cfg: cfg, cityPath: cityPath, sp: sp, now: time.Now,
+		willNotStart: wakeWillNotStart,
+		store:        work, cfg: cfg, cityPath: cityPath, sp: sp, now: time.Now,
 	}); code != 0 || strings.Contains(stderr.String(), "will not start") {
 		t.Fatalf("doSessionWake = %d, stderr %q; want the work store's claim to override the latch", code, stderr.String())
 	}
@@ -954,7 +961,8 @@ func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
 				t.Fatal(err)
 			}
 			deps := sessionWakeDeps{
-				store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+				willNotStart: wakeWillNotStart,
+				store:        store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
 				withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
 				cityUsesManagedReconciler: func(string) bool { return false },
 				pokeController:            func(string, reconcilekey.Key) error { return nil },

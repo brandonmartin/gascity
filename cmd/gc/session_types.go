@@ -65,6 +65,13 @@ type drainState struct {
 	followUp bool // true when the controller should trigger one more immediate tick
 }
 
+// resetPassMark records the first reconciler pass that found a session's
+// committed continuation reset waiting on a start with no runtime to evict.
+type resetPassMark struct {
+	committedAt string // the raw reset_committed_at the pass observed
+	firstPass   time.Time
+}
+
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
 // It stays in-memory only and is consumed on a later reconciler tick.
 type idleProbeState struct {
@@ -79,6 +86,7 @@ type drainTracker struct {
 	drains           map[string]*drainState          // session bead ID -> drain state
 	idleProbes       map[string]*idleProbeState      // session bead ID -> async idle probe
 	resetStalls      map[string]bool                 // session bead ID -> reset stall event emitted
+	resetPasses      map[string]resetPassMark        // session bead ID -> first pass that found its committed reset waiting on a start
 	zombieCrashes    map[string]bool                 // session bead ID -> zombie-process session.crashed event emitted
 	suspendDeferrals map[string]int                  // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
 	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
@@ -91,6 +99,7 @@ func newDrainTracker() *drainTracker {
 		drains:           make(map[string]*drainState),
 		idleProbes:       make(map[string]*idleProbeState),
 		resetStalls:      make(map[string]bool),
+		resetPasses:      make(map[string]resetPassMark),
 		zombieCrashes:    make(map[string]bool),
 		suspendDeferrals: make(map[string]int),
 		liveClaimVetoes:  make(map[string]string),
@@ -277,6 +286,28 @@ func (dt *drainTracker) clearResetStall(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.resetStalls, beadID)
+	delete(dt.resetPasses, beadID)
+}
+
+// resetFirstPass returns when the reconciler first passed over beadID with the
+// reset committed at committedAt still waiting on a start, recording now on
+// that first pass. A reset committed again (a different committedAt) starts a
+// new count. The bool is false when no pass can be recorded (nil tracker or
+// blank bead ID), and the caller then has only the commit time to go on.
+func (dt *drainTracker) resetFirstPass(beadID, committedAt string, now time.Time) (time.Time, bool) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return time.Time{}, false
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if mark, ok := dt.resetPasses[beadID]; ok && mark.committedAt == committedAt {
+		return mark.firstPass, true
+	}
+	if dt.resetPasses == nil {
+		dt.resetPasses = make(map[string]resetPassMark)
+	}
+	dt.resetPasses[beadID] = resetPassMark{committedAt: committedAt, firstPass: now}
+	return now, true
 }
 
 // markZombieCrash reports whether this is the first zombie-process detection

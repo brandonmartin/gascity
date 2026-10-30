@@ -3069,3 +3069,39 @@ func TestWispGC_ReapResolvesRootsLive(t *testing.T) {
 		t.Fatalf("reaped %d; a step of a root the store has reopened was deleted on the cache's word", reaped)
 	}
 }
+
+// recordingOrphanListStore observes the backend query as well as its results.
+type recordingOrphanListStore struct {
+	*gcTestStore
+	queries []beads.ListQuery
+}
+
+func (s *recordingOrphanListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.gcTestStore.List(query)
+}
+
+func TestWispGC_ReapQueriesOnlyRowsBeforeCutoff(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	cutoff := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	old := cutoff.Add(-time.Second)
+	ephemeral := makeGCOrphanWisp("gc-old-ephemeral", old, "missing-root")
+	noHistory := makeGCOrphanWisp("gc-old-no-history", old, "missing-root")
+	noHistory.Ephemeral = false
+	noHistory.NoHistory = true
+	atCutoff := makeGCOrphanWisp("gc-at-cutoff", cutoff, "missing-root")
+	recent := makeGCOrphanWisp("gc-recent", cutoff.Add(time.Second), "missing-root")
+	store := &recordingOrphanListStore{gcTestStore: newGCStore([]beads.Bead{ephemeral, noHistory, atCutoff, recent})}
+
+	reaped, err := reapOrphanedClosedWisps(store, cutoff, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.queries) == 0 || store.queries[0].Status != "closed" || store.queries[0].TierMode != beads.TierWisps || !store.queries[0].CreatedBefore.Equal(cutoff) {
+		t.Fatalf("queries = %+v, want closed wisps created before cutoff", store.queries)
+	}
+	if reaped != 2 {
+		t.Fatalf("reaped = %d, want 2", reaped)
+	}
+	assertDeletedIDs(t, store.deletedIDs, ephemeral.ID, noHistory.ID)
+}

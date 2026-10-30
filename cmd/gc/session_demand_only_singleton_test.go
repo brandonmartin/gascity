@@ -122,6 +122,7 @@ func TestDoSessionWake_DemandOnlySingletonReportsItWillNotStart(t *testing.T) {
 				t.Fatalf("store.Create(session bead): %v", err)
 			}
 			deps := sessionWakeDeps{
+				resolveSessionID:          resolveSessionIDMaterializingNamedBeforeReopen,
 				willNotStart:              wakeWillNotStart,
 				store:                     store,
 				cfg:                       demandOnlySingletonCfg(tt.named),

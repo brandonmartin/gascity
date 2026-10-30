@@ -290,6 +290,7 @@ func newCLIOpWakeFixtureOver(t *testing.T, backing beads.Store) *cliOpWakeFixtur
 		t.Fatalf("creating session bead: %v", err)
 	}
 	return &cliOpWakeFixture{rec: rec, id: b.ID, deps: sessionWakeDeps{
+		resolveSessionID:          resolveSessionIDMaterializingNamedBeforeReopen,
 		willNotStart:              wakeWillNotStart,
 		store:                     rec,
 		cfg:                       &config.City{Agents: []config.Agent{{Name: "worker"}}},

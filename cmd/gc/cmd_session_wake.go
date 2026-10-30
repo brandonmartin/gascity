@@ -58,6 +58,7 @@ type sessionWakeDeps struct {
 	// cfgErr is the city config's load error, when cfg did not load.
 	cfgErr                    error
 	store                     beads.Store
+	resolveSessionID          func(cityPath string, cfg *config.City, store beads.Store, target string, beforeReopen func(id string) error) (string, error)
 	willNotStart              func(session.Info, wakeVerdictDeps, time.Time) (string, bool)
 	cfg                       *config.City
 	cityPath                  string
@@ -100,6 +101,7 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 		cfgErr:                    cfgErr,
 		sp:                        wakeVerdictProvider(),
 		store:                     store,
+		resolveSessionID:          resolveSessionIDMaterializingNamedBeforeReopen,
 		willNotStart:              wakeWillNotStart,
 		cfg:                       cfg,
 		cityPath:                  cityPath,
@@ -250,7 +252,7 @@ var errWakeNotAdmitted = errors.New("wake not admitted")
 // (refuseClosedWakeTarget).
 func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target string) (string, cliOpStart, error) {
 	admitted, start := "", cliOpStart(0)
-	id, err := resolveSessionIDMaterializingNamedBeforeReopen(deps.cityPath, deps.cfg, sessStore, target, func(closedID string) error {
+	id, err := deps.resolveSessionID(deps.cityPath, deps.cfg, sessStore, target, func(closedID string) error {
 		admitted, start = closedID, op.retarget(closedID)
 		if start != cliOpExecute {
 			return errWakeNotAdmitted

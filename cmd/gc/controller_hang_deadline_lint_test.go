@@ -21,16 +21,7 @@ import (
 // a direct time.After/time.Now().Add call.
 var rawHangDeadlinePattern = regexp.MustCompile(`time\.After\([0-9]|time\.Now\(\)\.Add\([0-9]|waitForNamedMode\([^)]*,\s*[0-9]`)
 
-// controllerTestExcludedHangDeadlineLines are the raw-literal sites in
-// controller_test.go that are correct as they stand, per
-// TESTING.md:1364-1371, and must NOT be migrated (ga-57b2dk). Line numbers
-// are 1-indexed.
-var controllerTestExcludedHangDeadlineLines = map[int]string{
-	421:  "input the test feeds a fake server to define the scenario, not a hang detector",
-	861:  "negative-assertion window (asserts no watcher poke arrives)",
-	907:  "negative-assertion window (asserts no watcher poke arrives, loop body)",
-	1420: "bounded best-effort probe with no assertion on either branch",
-}
+const rawHangDeadlineExclusionMarker = "(ga-57b2dk exclusion)"
 
 func controllerTestPath(t *testing.T) string {
 	t.Helper()
@@ -47,9 +38,40 @@ func controllerTestLines(t *testing.T) (path string, data []byte, lines []string
 	return path, data, strings.Split(string(data), "\n")
 }
 
+// rawHangDeadlineExclusionPrecedes reports whether the closest preceding
+// non-blank line marks this raw deadline as an intentional exclusion.
+func rawHangDeadlineExclusionPrecedes(lines []string, lineIndex int) bool {
+	for i := lineIndex - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		return strings.Contains(lines[i], rawHangDeadlineExclusionMarker)
+	}
+	return false
+}
+
+// rawHangDeadlineExclusionMarkerErrors reports marker comments that no longer
+// lead to a raw deadline, so exclusions cannot outlive the code they explain.
+func rawHangDeadlineExclusionMarkerErrors(path string, lines []string) []string {
+	var stale []string
+	for i, line := range lines {
+		if !strings.Contains(line, rawHangDeadlineExclusionMarker) {
+			continue
+		}
+		next := i + 1
+		for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+			next++
+		}
+		if next == len(lines) || !rawHangDeadlinePattern.MatchString(lines[next]) {
+			stale = append(stale, fmt.Sprintf("%s:%d: exclusion marker is not followed by a raw hang deadline", path, i+1))
+		}
+	}
+	return stale
+}
+
 // rawHangDeadlineOffenders returns formatted offender strings for every line
-// in [from, to] that matches rawHangDeadlinePattern and is not one of
-// controllerTestExcludedHangDeadlineLines.
+// in [from, to] that matches rawHangDeadlinePattern without an exclusion
+// marker on the preceding non-blank line.
 func rawHangDeadlineOffenders(path string, lines []string, from, to int) []string {
 	var offenders []string
 	if from < 1 {
@@ -60,7 +82,7 @@ func rawHangDeadlineOffenders(path string, lines []string, from, to int) []strin
 		if !rawHangDeadlinePattern.MatchString(line) {
 			continue
 		}
-		if _, excluded := controllerTestExcludedHangDeadlineLines[i]; excluded {
+		if rawHangDeadlineExclusionPrecedes(lines, i-1) {
 			continue
 		}
 		offenders = append(offenders, formatOffender(path, i, line))
@@ -68,9 +90,52 @@ func rawHangDeadlineOffenders(path string, lines []string, from, to int) []strin
 	return offenders
 }
 
+func TestRawHangDeadlineExclusionUsesCommentNotLineNumber(t *testing.T) {
+	lines := []string{
+		"package example",
+		"",
+		"// This wait defines the scenario (ga-57b2dk exclusion).",
+		"",
+		"<-time.After(50 * time.Millisecond)",
+	}
+	lines = append([]string{"", "", ""}, lines...)
+
+	if offenders := rawHangDeadlineOffenders("controller_test.go", lines, 1, len(lines)); len(offenders) != 0 {
+		t.Fatalf("marked raw hang deadline should be excluded after line shifts, got %v", offenders)
+	}
+}
+
+func TestRawHangDeadlineExclusionMarkerMustRemainCurrent(t *testing.T) {
+	valid := []string{
+		"// This wait defines the scenario (ga-57b2dk exclusion).",
+		"",
+		"<-time.After(50 * time.Millisecond)",
+	}
+	if stale := rawHangDeadlineExclusionMarkerErrors("controller_test.go", valid); len(stale) != 0 {
+		t.Fatalf("current exclusion marker reported stale: %v", stale)
+	}
+
+	for name, lines := range map[string][]string{
+		"deadline removed": {
+			"// This wait defines the scenario (ga-57b2dk exclusion).",
+			"",
+			"awaitClose(t, done, \"operation completed\")",
+		},
+		"file ends after marker": {
+			"// This wait defines the scenario (ga-57b2dk exclusion).",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if stale := rawHangDeadlineExclusionMarkerErrors("controller_test.go", lines); len(stale) != 1 {
+				t.Fatalf("expected one stale marker error, got %v", stale)
+			}
+		})
+	}
+}
+
 // TestControllerTestHasNoUnmigratedRawHangDeadlines pins ga-57b2dk's primary
 // acceptance check: every sub-10s raw-literal timer in controller_test.go
-// that isn't one of the four documented exclusions must be migrated to
+// without a marker-documented exclusion must be migrated to
 // awaitClose/awaitCond, exactly as #4638 already did for the rest of the
 // package.
 func TestControllerTestHasNoUnmigratedRawHangDeadlines(t *testing.T) {
@@ -83,15 +148,17 @@ func TestControllerTestHasNoUnmigratedRawHangDeadlines(t *testing.T) {
 			len(offenders), strings.Join(offenders, "\n  "))
 	}
 
-	// Guard against the exclusion list silently going stale (e.g. the code
-	// around an excluded line moved or was migrated without updating this
-	// map) by requiring every documented exclusion to still match.
-	for lineNo, reason := range controllerTestExcludedHangDeadlineLines {
-		if lineNo > len(lines) || !rawHangDeadlinePattern.MatchString(lines[lineNo-1]) {
-			t.Errorf("expected excluded raw hang deadline at %s:%d (%s) but it no longer matches; "+
-				"update controllerTestExcludedHangDeadlineLines if the code moved or was migrated",
-				path, lineNo, reason)
-		}
+	// Guard against an exclusion marker surviving after its raw deadline was
+	// removed or migrated.
+	if stale := rawHangDeadlineExclusionMarkerErrors(path, lines); len(stale) > 0 {
+		t.Errorf("controller_test.go has stale raw hang deadline exclusion marker(s):\n  %s",
+			strings.Join(stale, "\n  "))
+	}
+
+	shifted := append([]string{"", "", ""}, lines...)
+	if offenders := rawHangDeadlineOffenders(path, shifted, 1, len(shifted)); len(offenders) > 0 {
+		t.Errorf("leading blank lines changed the raw hang deadline exclusions:\n  %s",
+			strings.Join(offenders, "\n  "))
 	}
 }
 

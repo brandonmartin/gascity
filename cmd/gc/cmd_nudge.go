@@ -1659,7 +1659,10 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		}
 		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
 	case worker.NudgeUndeliveredNoIdleBoundary:
-		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
+		// Transient, not stuck: the session was mid-turn when observed. The
+		// dispatcher types it in once the turn ends, or the turn's own prompt
+		// hook injects it first, usually within seconds.
+		return " (the session is busy right now; the queued dispatcher delivers it at its next idle boundary)"
 	case worker.NudgeUndeliveredPendingInteraction:
 		return " (the session is waiting on a permission prompt; the queued dispatcher delivers it after the prompt is answered)"
 	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:

@@ -7076,7 +7076,7 @@ func TestDeliverSessionNudgeWithProviderWaitIdleQueuesBusyClaudeFamilyWithoutBlo
 			if code != 0 {
 				t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0; stderr: %s", code, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), "the session never reached an idle boundary") {
+			if !strings.Contains(stdout.String(), "the session is busy right now") {
 				t.Errorf("stdout = %q, want the no-idle-boundary downgrade reason", stdout.String())
 			}
 		})

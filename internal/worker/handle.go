@@ -224,7 +224,9 @@ const (
 	// is a property of the runtime, not of the session's current state.
 	NudgeUndeliveredProviderUnsupported NudgeUndeliveredReason = "live_delivery_unsupported"
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
-	// but the session never reached the idle boundary within the wait window.
+	// but the session was busy: it was observed mid-turn, or did not reach an
+	// idle boundary within the wait window. It is a transient session state; the
+	// queued dispatcher delivers the nudge at the next idle boundary.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
 	// NudgeUndeliveredPendingInteraction means the session is waiting on a
 	// pending interaction such as a tool permission prompt. Typing into it

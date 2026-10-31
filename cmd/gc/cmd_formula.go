@@ -947,6 +947,7 @@ city's work store, copy them into the binding with
 							Vars:             cookVars,
 							IdempotencyKey:   graphRootKey,
 							PriorityOverride: cloneFormulaCookPriority(source.Priority),
+							ExclusionsFrom:   attach,
 						})
 						if err != nil {
 							if cleanupErr := closeFormulaCookFailedGraphV2Roots(store, recipe); cleanupErr != nil {

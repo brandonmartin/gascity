@@ -22,6 +22,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -1434,7 +1435,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("control dispatcher graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "require")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		writer, _, err := beads.ResolveConditionalWriter(graph)
 		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
@@ -1481,7 +1482,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("fenced molecule attach through the dispatcher's graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		root, err := graph.Create(beads.Bead{Title: "workflow", Type: "task", Status: "open", Metadata: map[string]string{
 			beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
@@ -1741,12 +1742,26 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
 			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
-			"HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
+			"HasResidentOutside", "NamespaceCensusHandle",
+			// ReadyBlockedByAbsent over native Dolt reports no rows, and
+			// StrandsAbsentTargets answers false, so ReadyBlockedByAbsentFor
+			// finds no listing, as over the bare engine: bd never strands a
+			// dependent behind an absent blocker (it reads it as external).
+			"ReadyBlockedByAbsent", "ReadyContext",
 			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
+			"StrandsAbsentTargets",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
 			"ConditionalWritesModeSource", "Count", "DepListBatch",
-			"NamespaceCensusHandle", "ReadOnly", "SawRows",
+			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
+			// GetExactBatch over a SQLite binding reports
+			// beads.ErrExactBatchGetUnsupported, and the caller reads per id:
+			// the path it takes when the wrapper lacks the method.
+			"GetExactBatch",
+			// ReadyOrdered over a SQLite binding delegates to beads.ReadyOrdered,
+			// which reads a store without the capability whole and reports
+			// ordered=false: the path a caller takes when the wrapper lacks it.
+			"ReadOnly", "ReadyOrdered", "SawRows",
 			"SupportsEphemeralGraphApply", "TransferIfCurrent", "WaitForParentProjection",
 		},
 	}
@@ -1772,5 +1787,26 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		if !slices.Equal(got, sorted) {
 			t.Errorf("the emitter claims %v that %s lacks, pinned %v: check each new claim answers over %s as its absence would, then update the pin", got, engine, sorted, engine)
 		}
+	}
+}
+
+// TestEmittingClassStoreReadyOrderedOverSQLiteReadsWhole pins the over-claim's
+// answer: a SQLite binding cannot cut a bounded ready read in order, so the
+// emitter reads it whole and reports ordered=false, exactly what a caller gets
+// from a wrapper without the method.
+func TestEmittingClassStoreReadyOrderedOverSQLiteReadsWhole(t *testing.T) {
+	engine := splittest.NewClassStore(t, config.BeadClassGraph)
+	for i := range 3 {
+		if _, err := engine.Create(beads.Bead{Title: fmt.Sprintf("step %d", i), Type: "task"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+	}
+	wrapped := splitClassRoutes(engine).withCLIEmission(t.TempDir()).stores[coordclass.ClassGraph]
+	rows, ordered, err := beads.ReadyOrdered(wrapped, beads.ReadyQuery{TierMode: beads.FederatedReadTier, Limit: 1}, beads.ReadyOrderCanonical)
+	if err != nil {
+		t.Fatalf("ReadyOrdered: %v", err)
+	}
+	if ordered || len(rows) != 3 {
+		t.Fatalf("ReadyOrdered over SQLite = %d rows, ordered %v; want the whole set, unordered", len(rows), ordered)
 	}
 }

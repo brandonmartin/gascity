@@ -3,9 +3,11 @@ package k8s
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	execerr "k8s.io/client-go/util/exec"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -1152,6 +1155,55 @@ func TestBuildPodEnvProjectsManagedLocalDoltTarget(t *testing.T) {
 	}
 }
 
+// TestBuildPodEnvProjectsWithheldManagedLocalDoltTarget pins the pod half of
+// the gastownhall/gascity#1656 withhold. A managed-direct session whose
+// controller-local port gc withheld, so host-local bd follows the scope's
+// .beads/dolt-server.port mirror, carries neither host nor port, only the
+// managed-local marker. A pod cannot read the controller's mirror, so it must
+// still reach the in-cluster managed service exactly as the port-only shape
+// does, and the controller-side marker must stay out of the pod.
+func TestBuildPodEnvProjectsWithheldManagedLocalDoltTarget(t *testing.T) {
+	cfgEnv := runtimetest.WithheldManagedDoltEnv()
+	cfgEnv["GC_AGENT"] = "worker"
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	for key, want := range map[string]string{
+		"GC_DOLT_HOST":           podManagedDoltHost,
+		"GC_DOLT_PORT":           podManagedDoltPort,
+		"BEADS_DOLT_SERVER_HOST": podManagedDoltHost,
+		"BEADS_DOLT_SERVER_PORT": podManagedDoltPort,
+	} {
+		if got := envMap[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if got, ok := envMap["GC_DOLT_MANAGED_LOCAL"]; ok {
+		t.Fatalf("GC_DOLT_MANAGED_LOCAL = %q reached the pod; the pod's target is the in-cluster service, not a controller-local server", got)
+	}
+}
+
+// TestBuildPodEnvOmitsDoltForEmptyTargetWithoutManagedLocalMarker guards the
+// other side of that marker: empty host and port without GC_DOLT_MANAGED_LOCAL
+// is a scope without Dolt or a failed resolution, which leaves the same empty
+// keys, and must project nothing rather than the managed alias.
+func TestBuildPodEnvOmitsDoltForEmptyTargetWithoutManagedLocalMarker(t *testing.T) {
+	cfgEnv := runtimetest.WithheldManagedDoltEnv()
+	cfgEnv["GC_AGENT"] = "worker"
+	cfgEnv["GC_DOLT_MANAGED_LOCAL"] = ""
+
+	for _, e := range mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort) {
+		switch e.Name {
+		case "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT":
+			t.Fatalf("%s = %q projected for a session env without a Dolt target", e.Name, e.Value)
+		}
+	}
+}
+
 func TestBuildPodEnvRejectsHostOnlyProjectedTarget(t *testing.T) {
 	_, err := buildPodEnv(map[string]string{
 		"GC_AGENT":     "worker",
@@ -1515,6 +1567,40 @@ func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 	if !found {
 		t.Fatal("initBeadsInPod did not use projected store root and prefix")
 	}
+}
+
+// TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias pins the pod's
+// .beads/metadata.json repair for a withheld managed-direct session
+// (gastownhall/gascity#1656): the session carries no port, but its target is
+// still the managed server, so the metadata must be patched onto the
+// in-cluster service instead of the repair returning before it runs.
+func TestInitBeadsInPodPatchesWithheldManagedLocalTargetToAlias(t *testing.T) {
+	fake := newFakeK8sOps()
+	env := runtimetest.WithheldManagedDoltEnv()
+	env["GC_BEADS_PREFIX"] = "demo"
+	cfg := runtime.Config{Env: env}
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+
+	portNum, err := strconv.Atoi(podManagedDoltPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := json.Marshal(map[string]any{
+		"dolt_server_host": podManagedDoltHost,
+		"dolt_server_port": portNum,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPatchB64 := base64.StdEncoding.EncodeToString(patch)
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" && c.cmd[1] == "-c" && strings.Contains(c.cmd[2], wantPatchB64) {
+			return
+		}
+	}
+	t.Fatalf("initBeadsInPod did not patch .beads/metadata.json onto %s:%s; calls=%v", podManagedDoltHost, podManagedDoltPort, fake.calls)
 }
 
 func TestVerifyBeadsInPodChecksCanonicalFiles(t *testing.T) {
@@ -2173,6 +2259,43 @@ func TestProvider_RelaunchSuWrapsForLinuxUsername(t *testing.T) {
 	last := body[len(body)-1]
 	if !strings.Contains(last, `su - dev -c`) {
 		t.Errorf("respawn body = %q, want it su-wrapped for the LINUX_USERNAME tmux socket", last)
+	}
+}
+
+// A pane's pipe-pane survives respawn-pane -k, and `pipe-pane -o` toggles (it
+// closes an existing pipe). Relaunch re-runs the post-launch setup, so every
+// pipe-pane it issues must (re)open the pane log rather than toggle it, or
+// alternate relaunches would silently turn diagnostic logging off.
+func TestProvider_RelaunchKeepsPaneLogPipeOn(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	for i := 0; i < 2; i++ {
+		if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+			t.Fatalf("Relaunch #%d: %v", i+1, err)
+		}
+	}
+
+	var pipes [][]string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) > 1 && c.cmd[0] == "tmux" && c.cmd[1] == "pipe-pane" {
+			pipes = append(pipes, c.cmd)
+		}
+	}
+	if len(pipes) != 2 {
+		t.Fatalf("pipe-pane calls = %d (%v), want one per Relaunch", len(pipes), pipes)
+	}
+	for _, cmd := range pipes {
+		for _, arg := range cmd {
+			if arg == "-o" {
+				t.Errorf("pipe-pane cmd = %q uses -o, which toggles the pipe off on an already-piped pane", cmd)
+			}
+		}
+		if got := cmd[len(cmd)-1]; got != "cat >> /tmp/agent-output.log" {
+			t.Errorf("pipe-pane shell command = %q, want append to /tmp/agent-output.log", got)
+		}
 	}
 }
 

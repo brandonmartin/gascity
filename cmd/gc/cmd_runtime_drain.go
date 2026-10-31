@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -260,7 +261,7 @@ func newRuntimeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+"gc runtime undrain" to cancel. Under the v2 session reconciler it also
 marks the session row, so the agent's drain-ack stops the session even on a
 min_active_sessions floor.`,
 		Args: cobra.ArbitraryArgs,
@@ -278,6 +279,15 @@ min_active_sessions floor.`,
 func cmdRuntimeDrain(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc runtime drain: missing session alias or ID") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc runtime drain: %v\n", errWorkerSiteDrainNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	target, err := resolveSessionRuntimeTarget(args[0], stderr)
@@ -373,8 +383,12 @@ func drainRuntime(dops drainOps, writeRow func() error, sp runtime.Provider, rec
 		}
 	}
 	if err := dops.setDrain(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The drain flag is in force; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime drain: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
@@ -413,7 +427,7 @@ func newRuntimeUndrainCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack and
+the v2 session reconciler it also clears the session row's drain-ack and
 its operator drain mark.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -430,6 +444,15 @@ its operator drain mark.`,
 func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc runtime undrain: missing session alias or ID") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", errWorkerSiteDrainNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	target, err := resolveSessionRuntimeTarget(args[0], stderr)
@@ -500,8 +523,12 @@ func undrainRuntime(dops drainOps, clearRow func() error, sp runtime.Provider, r
 		return 1
 	}
 	if err := dops.clearDrain(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The drain is cleared; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime undrain: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionUndrained,
@@ -610,7 +637,12 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 		readRow = drainCheckRowReader(target.cityPath, func() (*config.City, error) { return cfg, nil }, target.sessionName, target.sessionID)
 	} else {
 		current, rowName, err := currentDrainCheckTarget()
-		if err != nil {
+		switch {
+		case isControlPlaneDescriptorError(err):
+			// The session's city is there, but its plane is unknown, so no
+			// source can answer: unknown, not "not draining".
+			return writeRuntimeDrainCheckUnknown(defaultSessionDisplayIdentity(), []string{drainCheckFailure(drainCheckSourceRow, err)}, jsonOutput, stdout, stderr)
+		case err != nil:
 			return 1 // no session to check; silent without context, as before
 		}
 		target = current
@@ -709,8 +741,13 @@ func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) 
 // GC_DRAIN". Only the typed sentinels count; an error that merely reads like
 // absence (an adapter's "command not found") or that also says the runtime
 // could not be observed is a failure to answer.
+//
+// The worker-site guard's refusal is "meta not applicable" too: a box holds no
+// runtime meta, so the session row alone answers there. In-box drain-ack has
+// no path under the legacy reconciler (D-DRAINACK); the guard makes that loud
+// instead of reading a box-local runtime.
 func drainCheckRuntimeAbsent(err error) bool {
-	if errors.Is(err, runtime.ErrMetaUnsupported) {
+	if errors.Is(err, runtime.ErrMetaUnsupported) || errors.Is(err, guard.ErrControllerOwnedRuntime) {
 		return true
 	}
 	return errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable)
@@ -815,7 +852,7 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-Under session_reconciler = "v2" the ack is first written to the session
+Under the v2 session reconciler the ack is first written to the session
 row, bound to its current incarnation. A session acking itself must
 carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
@@ -861,6 +898,32 @@ func cmdRuntimeDrainAck(args []string, jsonOutput, operator bool, stdout, stderr
 	return runtimeDrainAck(newDrainOps(sp), target, operator, os.Getenv("GC_INSTANCE_TOKEN"), jsonOutput, stdout, stderr)
 }
 
+// drainAckCaller is who runs a drain-ack: an operator (--operator), or the
+// session itself, and the session identity its environment carries.
+type drainAckCaller struct {
+	operator         bool
+	sessionID, token string // the caller's GC_SESSION_ID and GC_INSTANCE_TOKEN
+}
+
+// names reports whether the caller's own environment names the session
+// bead b: an --operator ack from inside the session it targets is that
+// session's own ack.
+func (c drainAckCaller) names(b beads.Bead) bool {
+	id, token := strings.TrimSpace(c.sessionID), strings.TrimSpace(c.token)
+	return (id != "" && id == b.ID) || (token != "" && token == strings.TrimSpace(b.Metadata["instance_token"]))
+}
+
+// drainAckCallerSessionID is the caller's GC_SESSION_ID, a seam for tests,
+// which MUST NOT call t.Parallel() when they swap it.
+var drainAckCallerSessionID = callerSessionIDFromEnv
+
+// callerSessionIDFromEnv is the calling process's GC_SESSION_ID.
+func callerSessionIDFromEnv() string { return os.Getenv("GC_SESSION_ID") }
+
+// drainAckOwnOperator is the refusal of an --operator ack the caller makes
+// on its own session.
+const drainAckOwnOperator = "--operator acks another session from outside it, and the caller's GC_SESSION_ID or GC_INSTANCE_TOKEN names this one; nothing acknowledged"
+
 // runtimeDrainAck decides the city's mode once. A legacy city runs
 // doRuntimeDrainAck exactly as before E3. A v2 city keeps legacy's order and
 // binds the ack to the session row (CONTRACT v5.7 D5): the incarnation check,
@@ -870,22 +933,30 @@ func cmdRuntimeDrainAck(args []string, jsonOutput, operator bool, stdout, stderr
 // stay released, which is safe because they were unexecuted. envToken is the
 // caller's GC_INSTANCE_TOKEN.
 func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, envToken string, jsonOutput bool, stdout, stderr io.Writer) int {
+	caller := drainAckCaller{operator: operator, sessionID: drainAckCallerSessionID(), token: envToken}
+	if operator && caller.sessionID != "" && caller.sessionID == strings.TrimSpace(target.sessionID) {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", drainAckOwnOperator) //nolint:errcheck // best-effort stderr
+		return drainAckRefused
+	}
 	cfg, strict := drainAckCityMode(target.cityPath)
 	if !strict {
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, caller, jsonOutput, stdout, stderr)
 	}
 	commit, code := checkDrainAckRowAt(target.cityPath, cfg, target.sessionName, target.sessionID, operator, envToken, stderr)
 	if code != 0 {
 		return code
 	}
-	drainAckReleaseHeldClaims(target.cityPath, target.sessionName, stderr)
+	if refusal := drainAckReleaseHeldClaims(target.cityPath, target.sessionName, caller, stderr); refusal != "" {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
+		return drainAckRefused
+	}
 	if commit != nil {
 		if err := commit(); err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: held claims released; row ack not written, nothing acknowledged (safe to re-run): %v\n", err) //nolint:errcheck // best-effort stderr
 			return drainAckRefused
 		}
 	}
-	return finishRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAck(rowAckedDrainOps{drainOps: dops, stderr: stderr}, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -893,81 +964,106 @@ func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, 
 // ---------------------------------------------------------------------------
 
 func newRuntimeRequestRestartCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var key string
+	cmd := &cobra.Command{
 		Use:   "request-restart",
 		Short: "Request controller restart this session (returns immediately)",
-		Long: `Signal the controller to stop and restart this session.
+		Long: `Ask the controller to stop this session and start it again fresh.
 
-Sets GC_RESTART_REQUESTED metadata on the session, pokes the controller for
-an immediate reconcile tick, and returns without waiting. Control-plane
-authority over the actual stop/start stays with the controller's reconcile
-loop; this command only signals it so the request need not wait for the next
-periodic patrol tick.
+Records the restart request on this session's row (the request the
+controller acts on). Outside a worker site it then sets the runtime's
+GC_RESTART_REQUESTED hint. Then it pokes the controller for an immediate
+reconcile. It returns without waiting for the restart.
 
-The command exits 0 once the restart request is durably persisted and the
-controller has been signaled, even if the controller has not yet acted. If
-the controller cannot be signaled, the command exits 1 with a diagnostic —
-the restart request itself remains durably set, so the controller still
-picks it up on its next periodic reconcile tick regardless.
+The request is bound to this session's incarnation. It is recorded only while
+the session row, or the live runtime under the session's name, still carries
+the GC_INSTANCE_TOKEN this process runs under, so a process left over from an
+earlier incarnation cannot restart its successor. An agent CLI that scrubs
+*TOKEN* variables from the shells it spawns (for example Claude Code with
+CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1) removes GC_INSTANCE_TOKEN, and the
+request is refused; keep that variable in the agent's subprocess environment.
+
+Exits 0 once the request is recorded, even when the controller could not be
+signaled: a warning says so, and the controller acts at its next pass. Exits 1
+with no restart requested and no runtime hint set when the request cannot be
+recorded: no session context or GC_INSTANCE_TOKEN, an unreachable session
+store, a session whose row and live runtime name another incarnation, or a
+session store that cannot compare-and-swap where the request needs it: a v2
+city records the request only by compare-and-swap, and
+[beads] conditional_writes = "require" refuses any write the store cannot
+fence.
+
+While the op journal records lifecycle ops, the request is recorded as a
+restart{fresh} op, which closes with the request's outcome, a refusal
+included; a rerun with the same --key reports the first run's outcome instead
+of requesting again. The key is request-restart's own: gc handoff or gc
+session reset under the same --key records another op. The restart stops this
+session, and so can stop the run before it closes its op: a rerun with the
+same --key is then refused as in progress until the op's deadline passes, and
+after that replays the first run's success while the session row still
+records the restart as pending, else reports the op's failure, also once the
+restart has run, since the op records no context to tell it by.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before signaling the controller.`,
+It emits a session.draining event once the request is recorded.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdRuntimeRequestRestart(stdout, stderr) != 0 {
+			if cmdRuntimeRequestRestart(key, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	addOpKeyFlag(cmd, &key, restartOpKeyNote)
+	return cmd
 }
 
-func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
+// cmdRuntimeRequestRestart records this session's restart request row first
+// (SG-3), as a restart{fresh} op under the op key key (empty mints one; OJ-6).
+func cmdRuntimeRequestRestart(key string, stdout, stderr io.Writer) int {
+	const verb = "gc runtime request-restart"
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
+	r := rowFirstRestart{
+		verb:        verb,
+		cityPath:    current.cityPath,
+		sessionName: current.sessionName,
+		display:     current.display,
+		token:       os.Getenv(runtime.InstanceTokenEnv),
+		poke:        pokeControllerForRestart,
+		stderr:      stderr,
+	}
+	// No token refuses before anything is opened or read.
+	if strings.TrimSpace(r.token) == "" {
+		fmt.Fprintf(stderr, "%s: %s\n", verb, r.notRecorded(session.ErrRestartRequestUnfenced)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	sp, err := newSessionProvider()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s\n", verb, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	dops := newDrainOps(sp)
-	store, storeErr := openCityStoreAt(current.cityPath)
-	if storeErr != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
+	store, err := openCityStoreAt(current.cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %s\n", verb, r.notRecorded(fmt.Errorf("opening store: %w", err))) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	// Route the SESSION-class access (restart persist through the worker
+	// Route the SESSION-class access (the restart record, through the worker
 	// boundary) to the session coordination-class store so a
 	// [beads.classes.sessions] relocation reaches gc runtime request-restart.
 	// The routing cfg is loaded refresh-free (the full cfg loads later, for
-	// timeout/template resolution). Identity today, so byte-identical.
-	var sessStore beads.Store
-	if store != nil {
-		routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
-		sessStore = cliSessionStore(store, routeCfg, current.cityPath)
-	}
+	// template resolution).
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
+	sessStore := cliSessionStore(store, routeCfg, current.cityPath)
 	rec := openCityRecorderAt(current.cityPath, stderr)
-	cfg, _ := loadCityConfig(current.cityPath, stderr)
-	var persistRestart func() error
-	if store != nil {
-		persistRestart = func() error {
-			handle, err := workerHandleForSessionTargetWithConfig(current.cityPath, sessStore, sp, cfg, current.sessionName)
-			if err != nil {
-				return err
-			}
-			return handle.Reset(context.Background())
-		}
-	}
-	_, pinned, err := sessionRestartableByController(sessStore, current.sessionName)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return doRuntimeRequestRestart(dops, persistRestart, pinned, rec, current.display, current.sessionName,
-		current.cityPath, stdout, stderr)
+	cfg, cfgErr := loadCityConfig(current.cityPath, stderr)
+	r.record = sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName)
+	r.hint = restartHintOps(current.cityPath, sp)
+	r.ops = newRestartOps(cfg, cfgErr, sessStore, key, current.sessionName, current.display, false, stdout, stderr)
+	return doRuntimeRequestRestart(r, rec, stdout)
 }
 
 // controllerRestartTimeout computes the bounded timeout for waiting on the
@@ -989,54 +1085,55 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 	return d
 }
 
-// doRuntimeRequestRestart sets the restart-requested flag, pokes the
-// controller for an immediate reconcile tick, and returns without waiting for
-// the controller to act. Control-plane authority over the actual stop/start
-// stays with the controller's reconcile loop; this call only signals it so
-// the request need not wait for the next periodic tick.
+// doRuntimeRequestRestart records the restart request row first (SG-3), then
+// emits session.draining and pokes the controller, returning without waiting
+// for the controller to act. Control-plane authority over the actual
+// stop/start stays with the controller's reconcile loop.
 //
-// pinned marks a kill-protected named session (pin_awake == "true"): the
-// reconciler refuses to collaterally kill such a session on a bare runtime
-// restart-requested flag, so for pinned sessions persistRestart (which lands
-// continuation_reset_pending, the explicit-reset escape hatch) is mandatory
-// rather than best-effort. See sessionRestartableByController.
-func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned bool, rec events.Recorder,
-	targetName, sn, cityPath string, stdout, stderr io.Writer,
-) int {
-	if err := dops.setRestartRequested(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+// It exits 0 once the request is recorded, whether or not the controller was
+// notified, and 1 when nothing was recorded: then no runtime hint is set, no
+// event is recorded and the controller is not poked (a v2 refusal on a store
+// with no conditional writer has asked it for identify, nothing more).
+//
+// A recorded request (r.ops) proposes its restart op first: a refusal exits 1
+// before any effect, and a replay of a successful op prints the success line
+// and exits 0 without acting again.
+func doRuntimeRequestRestart(r rowFirstRestart, rec events.Recorder, stdout io.Writer) int {
+	switch r.ops.startRestart(r.verb) {
+	case cliOpRefused:
 		return 1
+	case cliOpReplayed:
+		fmt.Fprint(stdout, "Restart requested.\n") //nolint:errcheck // best-effort stdout
+		return 0
 	}
-	if pinned {
-		if persistRestart == nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: pinned session %q has no restart persistence available; not requesting restart\n", sn) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: could not persist restart marker for pinned session %q; not requesting restart: %v\n", sn, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	} else if persistRestart != nil {
-		// Also persist the request through the worker boundary so it survives
-		// tmux session death. Non-fatal here: the runtime flag above is primary.
-		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
+	defer r.ops.end()
+	if err := r.recordRestart(); err != nil {
+		fmt.Fprintf(r.stderr, "%s: %s\n", r.verb, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
-		Actor:   targetName,
-		Subject: targetName,
+		Actor:   r.display,
+		Subject: r.display,
 		Message: "restart requested by session",
 	})
-
-	// Name-only key: sn is authoritative here, while GC_SESSION_ID can be stale.
-	if err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	switch r.notifyController() {
+	case restartNotified:
+		fmt.Fprint(stdout, "Restart requested; controller notified for immediate reconcile.\n") //nolint:errcheck // best-effort stdout
+	case restartRemote:
+		fmt.Fprint(stdout, "Restart requested; the remote controller restarts this session at its next reconcile.\n") //nolint:errcheck // best-effort stdout
+	default:
+		fmt.Fprint(stdout, "Restart requested; the controller restarts this session at its next pass.\n") //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprint(stdout, "Restart requested; controller notified for immediate reconcile.\n") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// restartFlagNotApplicable reports whether err is a worker site's guard
+// refusing the runtime restart flag. The box holds no runtime to set it on or
+// clear it from; the bead restart marker, which the remote controller's
+// reconciler reads, is the whole request there.
+func restartFlagNotApplicable(err error) bool {
+	return errors.Is(err, guard.ErrControllerOwnedRuntime)
 }
 
 // waitForControllerRestart polls until the controller accepts the stop
@@ -1096,13 +1193,34 @@ var drainAckReleaseHeldClaims = releaseUnexecutedClaimsForSession
 // releaseUnexecutedClaimsForSession resolves this city's residency-correct work
 // legs and gives back every in_progress claim the draining session still holds.
 //
+// A seat's own ack, and an --operator ack whose caller's environment names
+// the seat, is the seat saying it holds nothing. It is refused, with nothing
+// released, while the seat holds started work the release would keep
+// (PHASE1-2 §6.5, OD9: the hook's drain-ack fence, for the direct command):
+// acking would stop the seat with that claim kept on it, the assigned-work
+// wake would restart it, and the cycle would repeat. An operator acks from
+// outside the session, and the --operator self-ack is refused outright. The
+// refusal is returned; "" is a pass that ran, or could not begin.
+//
 // The leg set mirrors `gc session close`, which leads with the WORK store and
 // hands in the relocated graph binding as a class leg: a claim that claim-time
 // routing left in the binding is invisible to a work-led scan, and would be
 // released by nothing. Best-effort throughout — a city that cannot be resolved
 // or a store that cannot be opened must never block the ack itself, which is the
 // signal the controller is waiting on.
-func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.Writer) {
+func releaseUnexecutedClaimsForSession(cityPath, sessionName string, caller drainAckCaller, stderr io.Writer) string {
+	var refusal string
+	openDrainAckCity(cityPath, sessionName, stderr, func(cfg *config.City, store beads.Store, rigStores func() map[string]beads.Store) {
+		refusal = releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, caller, stderr)
+	})
+	return refusal
+}
+
+// openDrainAckCity opens the city at cityPath for a drain-ack's pass over
+// sessionName's claims and hands visit its config, its store and its rig
+// legs. It calls nothing when either is empty, cityPath is no city, or its
+// store does not open.
+func openDrainAckCity(cityPath, sessionName string, stderr io.Writer, visit func(cfg *config.City, store beads.Store, rigStores func() map[string]beads.Store)) {
 	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(sessionName) == "" {
 		return
 	}
@@ -1142,7 +1260,7 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		}
 		return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 	}
-	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, stderr)
+	visit(cfg, store, rigStores)
 }
 
 // releaseUnexecutedClaimsForSessionStore resolves a runtime session name to the
@@ -1154,34 +1272,52 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 // rigStores is a thunk, not a map, because opening the rig stores is real store
 // I/O on the pre-ack path. It is called only once resolution and the session
 // Get have both succeeded — a drain-ack that cannot find its session pays
-// nothing for stores it would immediately discard.
+// nothing for stores it would immediately discard. The refusal, and caller,
+// are releaseUnexecutedClaimsForSession's.
 func releaseUnexecutedClaimsForSessionStore(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	rigStores func() map[string]beads.Store,
 	sessionName string,
+	caller drainAckCaller,
 	stderr io.Writer,
-) {
+) string {
+	legs, sessionBead, ok := drainAckSeat(cityPath, cfg, store, rigStores, sessionName)
+	if !ok {
+		return ""
+	}
+	if caller.operator && caller.names(sessionBead) {
+		return drainAckOwnOperator
+	}
+	if held := releaseDrainAckClaims(legs, sessionBead, !caller.operator, drainAckReleaseBudget, stderr); len(held) > 0 {
+		return fmt.Sprintf("this session holds %s, which it started and has not finished: continue it (an operator acks from outside this session with --operator); nothing acknowledged", strings.Join(held, ", "))
+	}
+	return ""
+}
+
+// drainAckSeat resolves sessionName to its session bead and the work legs
+// its claims live on. A session that cannot be resolved holds nothing a
+// drain-ack pass can find, so there is nothing to report (ok false): the ack
+// is the signal the controller is waiting on, and a pass that could not begin
+// must not decorate a successful ack with a warning an operator can do
+// nothing about. A claim genuinely left behind is still caught by the
+// dead-assignee lane.
+func drainAckSeat(cityPath string, cfg *config.City, store beads.Store, rigStores func() map[string]beads.Store, sessionName string) (WorkLegs, beads.Bead, bool) {
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	sessionID, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
-		// A session that cannot be resolved holds nothing this pass can find, so
-		// there is nothing to report. The ack is the signal the controller is
-		// waiting on, and a release that could not begin must not decorate a
-		// successful ack with a warning an operator can do nothing about. A claim
-		// genuinely left behind here is still caught by the dead-assignee lane.
-		return
+		return WorkLegs{}, beads.Bead{}, false
 	}
 	sessionBead, err := sessStore.Get(sessionID)
 	if err != nil {
-		return
+		return WorkLegs{}, beads.Bead{}, false
 	}
 	var rigs map[string]beads.Store
 	if rigStores != nil {
 		rigs = rigStores()
 	}
-	releaseUnexecutedClaimsOnDrainAck(workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigs), sessionBead, drainAckReleaseBudget, stderr)
+	return workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigs), sessionBead, true
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.
@@ -1203,8 +1339,11 @@ const drainAckReleaseBudget = 15 * time.Second
 // tells the controller it may stop this session, so acknowledging first opens a
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	drainAckReleaseHeldClaims(cityPath, sn, stderr)
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, caller drainAckCaller, jsonOutput bool, stdout, stderr io.Writer) int {
+	if refusal := drainAckReleaseHeldClaims(cityPath, sn, caller, stderr); refusal != "" {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
+		return drainAckRefused
+	}
 	return finishRuntimeDrainAck(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
 }
 
@@ -1212,11 +1351,18 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 // and the report.
 func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if err := dops.setDrainAck(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The ack is in force; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+	workerSite := false
 	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		if workerSite = noteWorkerSitePoke(stderr, "gc runtime drain-ack", err); !workerSite {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 	}
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
@@ -1233,20 +1379,44 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 		}
 		return 0
 	}
+	if workerSite {
+		fmt.Fprintln(stdout, "Drain acknowledged. The remote controller stops this session at its next reconcile.") //nolint:errcheck // best-effort stdout
+		return 0
+	}
 	fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
 	return 0
 }
 
-// drainAckRefused is runtimeDrainAck's status for a v2 ack that the row check
-// or its CAS refused. Neither writes the row or the env ack; only a CAS
+// rowAckedDrainOps is the strict path's drainOps after the row ack committed.
+// The row is the ack there; the env flag only mirrors it into the runtime. A
+// worker site's guard holds no runtime to mirror into, so its
+// ErrControllerOwnedRuntime is "not applicable" (a warning), as drain-check
+// reads it, rather than failing an ack that is already in force.
+type rowAckedDrainOps struct {
+	drainOps
+	stderr io.Writer
+}
+
+func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
+	err := o.drainOps.setDrainAck(sessionName)
+	if errors.Is(err, guard.ErrControllerOwnedRuntime) {
+		fmt.Fprintf(o.stderr, "gc runtime drain-ack: warning: the row ack is in force; no runtime here to mirror it into: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil
+	}
+	return err
+}
+
+// drainAckRefused is runtimeDrainAck's status for a seat's own ack refused
+// because it holds started work (either mode), and for a v2 ack that the row
+// check or its CAS refused. Neither writes the row or the env ack; only a CAS
 // refusal follows the held-claim release. The process still exits 1; the
 // distinct value lets the hook tell a refusal from a failed ack.
 const drainAckRefused = 2
 
 // drainAckCityMode reports whether the city at cityPath runs the v2 session
-// reconciler, the only reader of the row ack, and returns the config it read.
-// A path that is not a city, a config that does not load, or a mode the
-// controller would refuse to latch is legacy.
+// reconciler, the only reader of the row ack (cityRunsV2), and returns the
+// config it read. A path that is not a city or a config that does not load is
+// legacy.
 func drainAckCityMode(cityPath string) (*config.City, bool) {
 	if strings.TrimSpace(cityPath) == "" {
 		return nil, false
@@ -1258,13 +1428,55 @@ func drainAckCityMode(cityPath string) (*config.City, bool) {
 	if err != nil || cfg == nil {
 		return nil, false
 	}
-	return cfg, drainAckStrictConfig(cfg)
+	return cfg, cityRunsV2(cityPath, cfg)
 }
 
-// drainAckStrictConfig reports whether cfg latches the v2 reconciler.
+// cityRunsV2 reports whether the city at cityPath runs the v2 reconciler:
+// the mode its running controller latched, when its identify reply tells
+// (controllerLatchedReconcilerMode), else the mode cfg resolves to
+// (drainAckStrictConfig), which the next controller start latches; legacy
+// with neither. The running controller wins because the mode is
+// boot-latched: a config edit that resolves the other way only takes effect
+// at restart, and until then the drain marks, acks and wake verdicts must be
+// the ones the running reconciler reads.
+func cityRunsV2(cityPath string, cfg *config.City) bool {
+	if mode, ok := controllerLatchedReconcilerMode(cityPath, cfg); ok {
+		return mode == reconcilerV2
+	}
+	return cfg != nil && drainAckStrictConfig(cfg)
+}
+
+// drainAckStrictConfig reports whether cfg latches the v2 reconciler, as the
+// controller latches it; a mode it would refuse to latch is legacy.
 func drainAckStrictConfig(cfg *config.City) bool {
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv) // as the controller latches it
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	return err == nil && mode == reconcilerV2
+}
+
+// controllerLatchedReconcilerMode asks the city's running controller which
+// session reconciler it latched (probeControllerIdentity). ok is false when
+// no controller's identify reply parses: none runs, or only the ping fallback
+// answered, as a current controller that missed the identify deadline does
+// too, so a ping alone says nothing about the latch. A controller whose
+// identify parsed without the mode predates both the field and the v2
+// default, so with an unset key (or anything but an explicit "v2") it latched
+// legacy; under an explicit v2 the answer is left to cfg's resolution. A var
+// so tests can stand in a controller; tests that swap it MUST NOT call
+// t.Parallel().
+var controllerLatchedReconcilerMode = func(cityPath string, cfg *config.City) (reconcilerMode, bool) {
+	identity := probeControllerIdentity(cityPath)
+	switch identity.SessionReconciler {
+	case config.SessionReconcilerV2:
+		return reconcilerV2, true
+	case config.SessionReconcilerLegacy:
+		return reconcilerLegacy, true
+	}
+	if identity.HostingMode.known() && cfg != nil {
+		if mode, _, ok := cfg.Daemon.SessionReconcilerMode(); !ok || mode != config.SessionReconcilerV2 {
+			return reconcilerLegacy, true
+		}
+	}
+	return reconcilerLegacy, false
 }
 
 // checkDrainAckRowAt is the v2 ack's incarnation check (CONTRACT v5.7 D5),

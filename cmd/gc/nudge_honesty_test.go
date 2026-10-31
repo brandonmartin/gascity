@@ -100,6 +100,25 @@ func TestQueuedNudgeDowngradeNoteDistinguishesItsCauses(t *testing.T) {
 	}
 }
 
+// TestQueuedNudgeNoIdleNoteReportsATransientState (ga-b74cs): the busy
+// short-circuit queues a nudge after one observation of recent pane activity,
+// so the session is merely mid-turn. A note saying it "never" reached an idle
+// boundary read as a session that is stuck for good, and operators escalated
+// nudges that the dispatcher delivered seconds later. The note must describe a
+// busy-right-now state and say when delivery happens.
+func TestQueuedNudgeNoIdleNoteReportsATransientState(t *testing.T) {
+	target := nudgeTarget{resolved: &config.ResolvedProvider{Name: "claude"}}
+	note := queuedNudgeDowngradeNote(target, worker.NudgeUndeliveredNoIdleBoundary)
+	if strings.Contains(note, "never") {
+		t.Fatalf("no-idle note = %q, must not claim the session never idles", note)
+	}
+	for _, want := range []string{"busy right now", "next idle boundary"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("no-idle note = %q, want it to contain %q", note, want)
+		}
+	}
+}
+
 // TestManagedNudgeWakeReportsASkippedWake: the enqueue succeeded and the wake did
 // not. Returning nil for both made a queued-but-unwoken nudge indistinguishable
 // from a delivered one.

@@ -218,18 +218,11 @@ title = "Do work"
 	}
 }
 
-// TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand covers a work bead
-// that was routed with a plain `gc sling <pool> <bead>` and is then wrapped by
-// a graph.v2 pour formula. The plain sling leaves gc.routed_to=<pool> on the
-// source; once the wrap makes the source an input-convoy member, the
-// workflow's executable step is the demand unit. If the source keeps its stale
-// gc.routed_to, defaultScaleCheckCounts counts the source and the executable
-// step as separate demand, a cold pool spawns two workers, and both race to
-// claim the same job.
-//
-// The invariant this test guards: after a graph.v2 wrap of a raw-routed
-// source, cold-pool demand is exactly 1 and exactly one open+routed+unassigned
-// executable step exists.
+// TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand covers a bead that a
+// plain `gc sling <pool> <bead>` routed before `--on` wrapped it in a graph.v2
+// workflow. The pre-wrap gc.routed_to must not survive the wrap: the source
+// would otherwise stay open + routed + unassigned next to the workflow's
+// executable step, and a cold pool would read demand 2 for one job.
 func TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -253,73 +246,75 @@ title = "Do work"
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	// Seed a source bead that already carries the pool route, as a prior
-	// plain sling would have left it, before the wrap is attached.
 	store := beads.NewMemStoreFrom(1, []beads.Bead{
-		{
-			ID:     "BL-42",
-			Title:  "Work",
-			Type:   "task",
-			Status: "open",
-			Metadata: map[string]string{
-				"gc.routed_to":           "polecat",
-				"gc.execution_routed_to": "polecat",
-			},
-		},
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
 	}, nil)
 	deps.Store = store
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "")
 
 	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
-	opts := testOpts(a, "BL-42")
-	opts.OnFormula = "graph-work"
-	opts.ScopeKind = "city"
-	opts.ScopeRef = "test-city"
-	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
-		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+
+	// Plain sling first: the bead is routed with the claim key.
+	plain := testOpts(a, "BL-42")
+	if code := doSling(plain, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("plain doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	routed, err := store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("get source after plain sling: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "polecat" {
+		t.Fatalf("precondition: source gc.routed_to after plain sling = %q, want polecat", got)
 	}
 
-	// The source's stale claim-semantics route must be gone: the workflow
-	// root supplies routing and demand from here on. Its observability route
-	// (gc.execution_routed_to) is kept so downstream resolvers still find the
-	// pool that owns the workflow.
+	// Then wrap the routed bead in a graph.v2 workflow.
+	wrap := testOpts(a, "BL-42")
+	wrap.OnFormula = "graph-work"
+	wrap.ScopeKind = "city"
+	wrap.ScopeRef = "test-city"
+	if code := doSling(wrap, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("--on doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
 	source, err := store.Get("BL-42")
 	if err != nil {
 		t.Fatalf("get source: %v", err)
 	}
-	if got := source.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("source gc.routed_to = %q, want empty (workflow root owns demand; stale raw route is duplicate)", got)
+	if got := source.Status; got != "open" {
+		t.Fatalf("source status = %q, want open", got)
 	}
-	if got := source.Metadata["gc.execution_routed_to"]; got != "polecat" {
-		t.Fatalf("source gc.execution_routed_to = %q, want polecat", got)
+	if got := source.Assignee; got != "" {
+		t.Fatalf("source assignee = %q, want empty", got)
 	}
 
-	// Classify the workflow beads: the wrapper's executable step must supply
-	// exactly one open+routed+unassigned demand row.
 	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("list beads: %v", err)
 	}
-	readySteps := 0
+	var root beads.Bead
+	var demandUnits []string
 	for _, b := range all {
-		if b.ID == "BL-42" {
-			continue
-		}
-		if b.Metadata["gc.kind"] == "workflow" || b.Metadata["gc.kind"] == "workflow-finalize" {
+		if b.Metadata["gc.kind"] == "workflow" && b.Metadata["gc.routed_to"] == "polecat" {
+			root = b
 			continue
 		}
 		if b.Metadata["gc.routed_to"] == "polecat" &&
+			b.Metadata["gc.kind"] != "workflow-finalize" &&
 			b.Status == "open" && b.Assignee == "" {
-			readySteps++
+			demandUnits = append(demandUnits, b.ID)
 		}
 	}
-	if readySteps != 1 {
-		t.Fatalf("open+routed+unassigned executable steps = %d, want 1", readySteps)
+	if root.ID == "" {
+		t.Fatalf("no routed workflow root found; beads=%#v", all)
+	}
+	if got := root.Status; got != "in_progress" {
+		t.Fatalf("workflow root status = %q, want in_progress", got)
+	}
+	if len(demandUnits) != 1 || demandUnits[0] == "BL-42" {
+		t.Fatalf("open+routed+unassigned beads = %v, want exactly the workflow's executable step", demandUnits)
 	}
 
-	// The anti-double-spawn invariant: cold-pool demand is exactly 1. With the
-	// source's stale gc.routed_to left in place this reads 2.
 	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
 		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &a, store, nil),
 	})
@@ -330,6 +325,14 @@ title = "Do work"
 		t.Fatalf("defaultScaleCheckCounts partials: %v", partials)
 	}
 	if got := counts["polecat"]; got != 1 {
-		t.Fatalf("cold-pool demand after raw-routed graph.v2 wrap = %d, want 1 (2 = double-spawn)", got)
+		t.Fatalf("cold-pool demand after plain sling then graph.v2 --on = %d, want 1 (one job)", got)
+	}
+
+	// The source keeps only the execution route; the claim key is gone.
+	if got := source.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("source gc.routed_to = %q after graph.v2 wrap, want cleared", got)
+	}
+	if got := source.Metadata["gc.execution_routed_to"]; got != "polecat" {
+		t.Fatalf("source gc.execution_routed_to = %q, want polecat", got)
 	}
 }

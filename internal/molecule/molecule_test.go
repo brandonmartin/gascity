@@ -3960,6 +3960,27 @@ func TestMoleculeExclusionsSurviveEveryMaterialization(t *testing.T) {
 				t.Fatal(err)
 			}
 			check(attached.IDMapping, "review.author", "review.parent")
+			late := &formula.Recipe{Name: "late", Steps: []formula.RecipeStep{
+				{ID: "late", IsRoot: true, Type: "task", Title: "Late"},
+				{ID: "late.work", Type: "task", Title: "Work", Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: "review.local"}},
+			}}
+			instantiated, err := Instantiate(context.Background(), store, late, Options{ExclusionsFrom: parent.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(instantiated.IDMapping, "review.author", "review.parent")
+			if batch {
+				local = nodeByKey(spy.plan.Nodes, "late.work").Metadata
+			} else {
+				step, err := mem.Get(instantiated.IDMapping["late.work"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				local = step.Metadata
+			}
+			if !beadmeta.ExcludesClaimant(local, "review.local") {
+				t.Fatal("attached exclusion replaced a step-local exclusion")
+			}
 			fragment := &formula.FragmentRecipe{Steps: []formula.RecipeStep{{ID: "fanout.work", Type: "task", Title: "Fanout"}}}
 			expanded, err := InstantiateFragment(context.Background(), store, fragment, FragmentOptions{RootID: root.ID, PriorityOverride: priorityPtr(1)})
 			if err != nil {

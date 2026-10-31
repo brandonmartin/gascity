@@ -1612,3 +1612,82 @@ func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
 		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
 	}
 }
+
+func TestFormulaCookAttachGraphV2InheritsClaimantExclusions(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+[daemon]
+formula_v2 = true
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "sub-work.formula.toml"), []byte(`
+formula = "sub-work"
+version = 2
+contract = "graph.v2"
+[[steps]]
+id = "later"
+title = "Later"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := store.Create(beads.Bead{Title: "enclosing root", Type: "task", Metadata: map[string]string{beadmeta.ExcludeClaimantsMetadataKey: excludeTestReviewer}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.Create(beads.Bead{Title: "attach target", Type: "task", Metadata: map[string]string{"workflow_id": root.ID, beadmeta.ExcludeClaimantsMetadataKey: "another-reviewer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"sub-work", "--attach", source.ID, "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cook: %v; stdout=%s stderr=%s", err, &stdout, &stderr)
+	}
+	var result formulaCookJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.IDMapping) < 3 {
+		t.Fatalf("expected root, step, finalizer: %#v", result.IDMapping)
+	}
+	for step, id := range result.IDMapping {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, identity := range []string{excludeTestReviewer, "another-reviewer"} {
+			if !beadmeta.ExcludesClaimant(b.Metadata, identity) {
+				t.Errorf("%s (%s) exclusions = %q, missing %s", step, id, b.Metadata[beadmeta.ExcludeClaimantsMetadataKey], identity)
+			}
+		}
+		if strings.HasSuffix(step, ".later") {
+			row := excludeTestRow(id, "open", "", b.Metadata[beadmeta.ExcludeClaimantsMetadataKey])
+			for _, tc := range []struct{ identity, action string }{{excludeTestReviewer, "drain"}, {excludeTestOther, "work"}} {
+				rec := &excludeTestRecorder{}
+				var out, errs bytes.Buffer
+				doHookClaim("query", "/rig", excludeTestOptions(tc.identity), rec.ops(t, "["+row+"]"), &out, &errs)
+				if got := decodeExcludeTestResult(t, out.String()); got.Action != tc.action {
+					t.Errorf("%s claim = %q, want %q", tc.identity, got.Action, tc.action)
+				}
+			}
+		}
+	}
+}

@@ -378,7 +378,7 @@ func TestInstallReadAuth(t *testing.T) {
 	t.Run("installs the gate when a key is configured", func(t *testing.T) {
 		t.Setenv("GC_CITY_READ_PUBKEY", "")
 		t.Setenv("GC_CITY_READ_REQUIRED", "")
-		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
+		sm := NewSupervisorMux(&fakeCityResolver{}, nil, false, "t", "", time.Now())
 		if err := InstallReadAuth(sm, "k1:"+b64, false); err != nil {
 			t.Fatalf("install: %v", err)
 		}
@@ -389,7 +389,7 @@ func TestInstallReadAuth(t *testing.T) {
 	t.Run("no-op when unconfigured", func(t *testing.T) {
 		t.Setenv("GC_CITY_READ_PUBKEY", "")
 		t.Setenv("GC_CITY_READ_REQUIRED", "")
-		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
+		sm := NewSupervisorMux(&fakeCityResolver{}, nil, false, "t", "", time.Now())
 		if err := InstallReadAuth(sm, "", false); err != nil {
 			t.Fatalf("install: %v", err)
 		}
@@ -400,7 +400,7 @@ func TestInstallReadAuth(t *testing.T) {
 	t.Run("errors when required but missing", func(t *testing.T) {
 		t.Setenv("GC_CITY_READ_PUBKEY", "")
 		t.Setenv("GC_CITY_READ_REQUIRED", "")
-		sm := NewSupervisorMux(nil, nil, false, "t", "", time.Now())
+		sm := NewSupervisorMux(&fakeCityResolver{}, nil, false, "t", "", time.Now())
 		if err := InstallReadAuth(sm, "", true); err == nil {
 			t.Fatal("expected fail-closed error")
 		}
@@ -412,7 +412,7 @@ func TestInstallReadAuth(t *testing.T) {
 func TestSupervisorMux_ReadAuthGuardsRead(t *testing.T) {
 	pub, _ := mustKeypair(t)
 	v := newTestReadVerifier(t, pub, time.Now())
-	sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now()).
+	sm := NewSupervisorMux(&fakeCityResolver{}, nil, false, "test", "", time.Now()).
 		WithAnyHostAllowed().
 		WithReadAuth(v)
 
@@ -432,7 +432,7 @@ func TestSupervisorMux_ReadAuthGuardsRead(t *testing.T) {
 // Opt-in/off-by-default: with no key configured the read gate is not installed,
 // so a first-party city read is never turned away for a missing grant.
 func TestSupervisorMux_NoReadAuthAllowsOpenReads(t *testing.T) {
-	sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now()).
+	sm := NewSupervisorMux(&fakeCityResolver{}, nil, false, "test", "", time.Now()).
 		WithAnyHostAllowed()
 	if sm.readAuth != nil {
 		t.Fatal("read-auth must be disabled when no key is configured")
@@ -446,13 +446,12 @@ func TestSupervisorMux_NoReadAuthAllowsOpenReads(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// Gate is off: whatever the backend-less downstream returns, it must not be
-	// the read-auth missing-grant rejection.
-	if resp.StatusCode == http.StatusUnauthorized {
+	// The empty resolver has no running city, so the read reaches the scoped
+	// handler and returns its normal 404 instead of an auth rejection or an
+	// internal error.
+	if resp.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(resp.Body)
-		if bytes.Contains(body, []byte(readAuthHeader)) {
-			t.Fatalf("first-party read gated by read-auth when no key configured: %s", body)
-		}
+		t.Fatalf("open read status=%d, want 404 (body %s)", resp.StatusCode, body)
 	}
 }
 
@@ -556,7 +555,7 @@ func TestReadAuthMiddleware_WithResolvedVerifier(t *testing.T) {
 func TestSupervisorMux_ReadAuthAcceptsValidGrant(t *testing.T) {
 	now := time.Now()
 	pub, priv := mustKeypair(t)
-	sm := NewSupervisorMux(nil, nil, false, "test", "", now).
+	sm := NewSupervisorMux(&fakeCityResolver{}, nil, false, "test", "", now).
 		WithAnyHostAllowed().
 		WithReadAuth(newTestReadVerifier(t, pub, now))
 	srv := httptest.NewServer(sm.Handler())
@@ -579,9 +578,9 @@ func TestSupervisorMux_ReadAuthAcceptsValidGrant(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	// First presentation clears the gate (not a read-auth rejection).
-	if code := do(); code == http.StatusUnauthorized || code == http.StatusForbidden {
-		t.Fatalf("valid read grant should clear the gate, got %d", code)
+	// First presentation clears the gate and reaches the empty resolver.
+	if code := do(); code != http.StatusNotFound {
+		t.Fatalf("valid read grant: code=%d want 404 from empty resolver", code)
 	}
 	// Single-use: the same token replayed is rejected.
 	if code := do(); code != http.StatusForbidden {
@@ -595,7 +594,7 @@ func TestSupervisorMux_ReadAuthAcceptsValidGrant(t *testing.T) {
 func TestSupervisorMux_ReadAuthPassesInReadOnlyMode(t *testing.T) {
 	now := time.Now()
 	pub, priv := mustKeypair(t)
-	sm := NewSupervisorMux(nil, nil, true /* readOnly */, "test", "", now).
+	sm := NewSupervisorMux(&fakeCityResolver{}, nil, true /* readOnly */, "test", "", now).
 		WithAnyHostAllowed().
 		WithReadAuth(newTestReadVerifier(t, pub, now))
 	srv := httptest.NewServer(sm.Handler())
@@ -613,7 +612,8 @@ func TestSupervisorMux_ReadAuthPassesInReadOnlyMode(t *testing.T) {
 		t.Fatalf("do: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		t.Fatalf("read in read-only mode must clear the gate, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("read in read-only mode: status=%d want 404 from empty resolver (body %s)", resp.StatusCode, body)
 	}
 }

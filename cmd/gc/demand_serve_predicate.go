@@ -38,6 +38,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -131,11 +132,16 @@ func demandRowServable(b beads.Bead) bool {
 	// LABEL: human is exact, case-sensitive, like the query's label filter;
 	// the hook does not apply a human post-filter. Dispatch holds match the
 	// reserved hold:<reason> namespace case-insensitively, so the demand
-	// predicate excludes every row the hook's post-filter will strip.
+	// predicate excludes every row the hook's post-filter will strip. The
+	// namespace's released labels (hold:cleared) are served, so they are not
+	// excluded here either.
 	for _, label := range b.Labels {
 		label = strings.TrimSpace(label)
 		for _, prefix := range rules.ExcludeLabelPrefixes {
-			if strings.HasPrefix(strings.ToLower(label), strings.ToLower(prefix)) {
+			if strings.HasPrefix(strings.ToLower(label), strings.ToLower(prefix)) &&
+				!slices.ContainsFunc(rules.ExcludeLabelPrefixExceptions, func(exception string) bool {
+					return strings.EqualFold(label, exception)
+				}) {
 				return false
 			}
 		}

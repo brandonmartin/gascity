@@ -98,6 +98,46 @@ esac
 	}
 }
 
+// TestInProgressTierServesReleasedHoldCandidate pins the other side of the
+// namespace rule (ga-azdbu): `bd set-state <id> hold=cleared` leaves
+// hold:cleared behind, and a released hold is not parked, so the crash-recovery
+// tier must keep serving the bead. A hold added beside it still parks it, on
+// either side.
+func TestInProgressTierServesReleasedHoldCandidate(t *testing.T) {
+	requireJQ(t)
+	cases := []struct {
+		name   string
+		labels string
+		served bool
+	}{
+		{"released", `["hold:cleared","mysql-cutover"]`, true},
+		{"released case folded", `["Hold:Cleared"]`, true},
+		{"released then re-held", `["hold:cleared","hold:mayor"]`, false},
+		{"re-held then released", `["hold:mayor","hold:cleared"]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bdScript := `#!/bin/sh
+case "$1" in
+  list) printf '%s' '[{"id":"wk-1","status":"in_progress","assignee":"sess-1","labels":` + tc.labels + `}]' ;;
+  show) printf '%s' '[{"id":"wk-1","status":"in_progress","dependencies":[]}]' ;;
+  *) printf '[]' ;;
+esac
+`
+			script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
+			out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+
+			var rows []map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
+				t.Fatalf("tier output is not a JSON array: %v (output %q)", err, out)
+			}
+			if served := len(rows) == 1 && rows[0]["id"] == "wk-1"; served != tc.served {
+				t.Fatalf("labels %s: served = %v, want %v (rows %v)", tc.labels, served, tc.served, rows)
+			}
+		})
+	}
+}
+
 // TestInProgressTierServesUnheldCandidate is the load-bearing negative
 // control. Without it, a "fix" that silences the churn by serving nothing at
 // all — defeating crash recovery entirely — would look green.

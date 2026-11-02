@@ -33,7 +33,9 @@ The selection fails closed: a diff touching the Go module, Bazel's module or
 workspace configuration, a `.bzl` file, `tools/`, `third_party/`, the Makefile,
 the linter configuration, a BUILD file outside a Go package, or a Go file
 outside every package `go list` reports runs the full `make check-go`, and so
-does any step of the selection that cannot complete.
+does any step of the selection that cannot complete. An untracked path that
+Bazel does not declare is skipped only as a Bazel reader candidate; other
+selection failures still widen the check.
 """
 
 from __future__ import annotations
@@ -185,7 +187,7 @@ def changed_paths(merge_base: str) -> list[tuple[str, str]]:
     untracked = command_output(["git", "ls-files", "--others", "--exclude-standard", "-z", "--"])
     for path in untracked.split(b"\0"):
         if path:
-            records.setdefault(os.fsdecode(path), "A")
+            records.setdefault(os.fsdecode(path), "?")
     for path in records:
         if not path or os.path.isabs(path) or ".." in path.split("/"):
             raise SelectionError(f"git produced unsafe path {path!r}")
@@ -304,6 +306,39 @@ def query_test_targets(bazel: str, labels: list[str], aggregate: bool) -> list[t
     return targets
 
 
+def bazel_target_exists(bazel: str, label: str) -> bool:
+    args = [bazel, "query", "--output=label", label]
+    try:
+        completed = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        raise SelectionError(f"cannot run {bazel!r}: {error}") from error
+    if completed.returncode == 0:
+        targets = [line.strip() for line in os.fsdecode(completed.stdout).splitlines() if line.strip()]
+        if targets == [label]:
+            return True
+        raise SelectionError(f"bazel query did not return file target {label!r}")
+
+    detail = os.fsdecode(completed.stderr).strip()
+    diagnostics = [
+        line.strip()
+        for line in detail.splitlines()
+        if line.lstrip().startswith(("ERROR:", "FATAL:"))
+    ]
+    missing_target = (
+        len(diagnostics) == 1
+        and (
+            diagnostics[0].startswith(f"ERROR: no such target '{label}':")
+            or diagnostics[0].startswith(f'ERROR: no such target "{label}":')
+        )
+    )
+    if missing_target and not completed.stdout.strip():
+        return False
+    raise SelectionError(
+        f"{shlex.join(args[:2])} failed with exit {completed.returncode}"
+        + (f": {detail}" if detail else "")
+    )
+
+
 def target_package(label: str) -> str:
     if not label.startswith("//") or ":" not in label:
         raise SelectionError(f"bazel query produced a label outside the main repository: {label!r}")
@@ -365,7 +400,10 @@ def select(plan: Plan) -> None:
         if any(char in path for char in '"\n\r\\'):
             raise FullCheck(f"{path!r} cannot be written as a Bazel label")
         target = path[len(package) + 1 :] if package else path
-        labels.append(f"//{package}:{target}")
+        label = f"//{package}:{target}"
+        if status == "?" and not bazel_target_exists(bazel, label):
+            continue
+        labels.append(label)
 
     plan.touched = sorted(go_test_arg(directory) for directory in code_touched)
     test_pkgs = set(code_touched) | test_touched

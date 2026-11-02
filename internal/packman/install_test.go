@@ -507,6 +507,48 @@ source = "https://example.com/inner.git"
 	}
 }
 
+func TestReadCachedPackImportsToleratesUntrackedRootDotfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	stubCachedPackStatus(t, "?? .git-merged-sha-tmp")
+
+	source := "https://example.com/tools.git"
+	commit := "abc123"
+	path, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git): %v", err)
+	}
+	writeCachedPackCommit(t, path, commit)
+	if err := os.WriteFile(filepath.Join(path, "pack.toml"), []byte(`
+[pack]
+name = "tools"
+schema = 1
+
+[imports.inner]
+source = "https://example.com/inner.git"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	imports, err := ReadCachedPackImports(source, commit)
+	if err != nil {
+		t.Fatalf("ReadCachedPackImports: %v", err)
+	}
+	if _, ok := imports["inner"]; !ok {
+		t.Fatalf("missing nested import: %#v", imports)
+	}
+
+	stubCachedPackStatus(t, "?? formulas/rogue.toml")
+	if _, err := ReadCachedPackImports(source, commit); err == nil || !strings.Contains(err.Error(), "local worktree changes") {
+		t.Fatalf("ReadCachedPackImports with untracked pack content: err = %v, want local worktree changes", err)
+	}
+}
+
 func TestReadCachedPackImportsRejectsMissingGitHead(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

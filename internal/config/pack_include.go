@@ -584,10 +584,48 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
-	if strings.TrimSpace(status) != "" {
+	if HasLocalCacheEdits(status) {
 		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
 	}
 	return nil
+}
+
+// HasLocalCacheEdits reports whether `git status --porcelain` output for a
+// cached import checkout shows changes that can alter what the loader reads.
+// Tracked edits, and any untracked path other than a stray root-level
+// dotfile, count. The loader reads a pack through named files and fixed
+// subdirectories (pack.toml, agents/, commands/, ...), never an arbitrary
+// dotfile at the repository root (only the content hash reads one, to hash
+// it), so a transient one (an editor or tool temp file) must not stop the
+// whole city's config load (ga-7t1jo). Git control files (.gitignore,
+// .gitattributes, .gitmodules) are not tolerated: an untracked .gitignore can
+// hide later untracked pack content from this very check. Untracked
+// directories, nested paths, and git-quoted names always count.
+func HasLocalCacheEdits(status string) bool {
+	for _, line := range strings.Split(status, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		path, untracked := strings.CutPrefix(line, "?? ")
+		if !untracked || !isStrayRootDotfile(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStrayRootDotfile reports whether an untracked porcelain path is a plain
+// dotfile directly under the repository root that git itself does not read.
+func isStrayRootDotfile(path string) bool {
+	if len(path) < 2 || path[0] != '.' || strings.ContainsAny(path, "/\"") {
+		return false
+	}
+	switch path {
+	case ".gitignore", ".gitattributes", ".gitmodules":
+		return false
+	}
+	return true
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {

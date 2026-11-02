@@ -1073,6 +1073,151 @@ fetched = "2026-04-10T00:00:00Z"
 	}
 }
 
+// setupLockedGitCacheCity builds a city that imports one locked remote pack
+// whose shared cache is a real, clean git checkout at the locked commit. It
+// returns the city dir and the cache dir so a test can drop files into the
+// cache before loading.
+func setupLockedGitCacheCity(t *testing.T) (cityDir, cacheDir string) {
+	t.Helper()
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	cityDir = filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	source := "https://github.com/example/gastown.git"
+	seedDir := filepath.Join(dir, "seed")
+	mustMkdirAll(t, seedDir, 0o755)
+	writeTestFile(t, seedDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "polecat"
+scope = "city"
+`)
+	if _, err := runRepoCacheGit(seedDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if _, err := runRepoCacheGit(seedDir, "add", "pack.toml"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := runRepoCacheGit(seedDir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	commit, err := runRepoCacheGit(seedDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	cacheDir = filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, commit))
+	mustMkdirAll(t, filepath.Dir(cacheDir), 0o755)
+	if err := os.Rename(seedDir, cacheDir); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.gastown]
+source = "https://github.com/example/gastown.git"
+version = "^1.2"
+`)
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs."https://github.com/example/gastown.git"]
+version = "1.2.3"
+commit = "%s"
+fetched = "2026-04-10T00:00:00Z"
+`, commit))
+	return cityDir, cacheDir
+}
+
+// A stray untracked dotfile at the root of a cached import (ga-7t1jo: a
+// .git-merged-sha-tmp that appeared for ~66s) is not pack content the loader
+// reads, so it must not stop the whole city's config load. Anything the loader
+// could read, and anything that changes how git sees the tree, still refuses.
+func TestImport_RootPackRemoteImportUntrackedCacheFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{name: "root dotfile from the incident", path: ".git-merged-sha-tmp"},
+		{name: "root dotfile", path: ".stray"},
+		{name: "root non-dot file", path: "stray.toml", wantErr: true},
+		{name: "root gitignore could hide later files", path: ".gitignore", wantErr: true},
+		{name: "root gitattributes changes git filters", path: ".gitattributes", wantErr: true},
+		{name: "nested dotfile", path: "agents/.stray", wantErr: true},
+		{name: "dot directory", path: ".hidden/file", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir, cacheDir := setupLockedGitCacheCity(t)
+			target := filepath.Join(cacheDir, filepath.FromSlash(tt.path))
+			mustMkdirAll(t, filepath.Dir(target), 0o755)
+			if err := os.WriteFile(target, []byte("stray\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("LoadWithIncludes with untracked %s: %v", tt.path, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("LoadWithIncludes with untracked %s: want local worktree changes error, got nil", tt.path)
+			}
+			if !strings.Contains(err.Error(), "local worktree changes") || !strings.Contains(err.Error(), `run "gc import install"`) {
+				t.Fatalf("error = %v, want dirty-cache install hint", err)
+			}
+		})
+	}
+}
+
+func TestHasLocalCacheEdits(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   bool
+	}{
+		{name: "clean", status: "", want: false},
+		{name: "untracked root dotfile", status: "?? .git-merged-sha-tmp", want: false},
+		{name: "several untracked root dotfiles", status: "?? .a\n?? .b", want: false},
+		{name: "tracked modification", status: " M pack.toml", want: true},
+		{name: "tracked modification after trim", status: "M pack.toml", want: true},
+		{name: "tracked deletion", status: " D pack.toml", want: true},
+		{name: "staged addition", status: "A  extra.toml", want: true},
+		{name: "untracked root file", status: "?? stray.toml", want: true},
+		{name: "untracked gitignore", status: "?? .gitignore", want: true},
+		{name: "untracked gitattributes", status: "?? .gitattributes", want: true},
+		{name: "untracked gitmodules", status: "?? .gitmodules", want: true},
+		{name: "untracked nested dotfile", status: "?? agents/.stray", want: true},
+		{name: "untracked dot directory", status: "?? .hidden/", want: true},
+		{name: "quoted path", status: `?? ".odd name"`, want: true},
+		{name: "dotfile plus tracked edit", status: "?? .a\n M pack.toml", want: true},
+		{name: "dotfile plus untracked nested", status: "?? .a\n?? formulas/.b", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasLocalCacheEdits(tt.status); got != tt.want {
+				t.Fatalf("HasLocalCacheEdits(%q) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestImport_RootPackRemoteImportMissingSharedCacheFails(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")

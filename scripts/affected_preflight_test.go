@@ -73,6 +73,50 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		)
 	})
 
+	t.Run("untracked file without a Bazel target does not widen the check", func(t *testing.T) {
+		f := newAffectedFixture(t)
+		writeTestFile(t, filepath.Join(f.repo, ".cursor", "hooks.json"), "{}\n")
+		writeTestFile(t, filepath.Join(f.queryDir, "undeclared"), "//:.cursor/hooks.json\n")
+
+		out := f.mustRun(t)
+		f.requireMakeCalls(t, f.guards())
+		if strings.Contains(out, "full check:") {
+			t.Errorf("untracked undeclared file widened the check:\n%s", out)
+		}
+		calls := f.bazelCalls(t)
+		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "//:.cursor/hooks.json") {
+			t.Errorf("Bazel calls = %v, want only an existence query for the untracked file", calls)
+		}
+	})
+
+	t.Run("tracked file without a Bazel target still widens the check", func(t *testing.T) {
+		f := newAffectedFixture(t)
+		writeTestFile(t, filepath.Join(f.repo, ".cursor", "hooks.json"), "{}\n")
+		f.git(t, "git add .cursor/hooks.json")
+		writeTestFile(t, filepath.Join(f.queryDir, "undeclared"), "//:.cursor/hooks.json\n")
+
+		out := f.mustRun(t)
+		f.requireMakeCalls(t, []string{"check-go"})
+		if !strings.Contains(out, "affected-preflight: full check: selection failed:") ||
+			!strings.Contains(out, "no such target '//:.cursor/hooks.json'") {
+			t.Errorf("tracked undeclared file did not select the full check:\n%s", out)
+		}
+	})
+
+	t.Run("untracked undeclared file does not hide an unrelated Bazel error", func(t *testing.T) {
+		f := newAffectedFixture(t)
+		writeTestFile(t, filepath.Join(f.repo, ".cursor", "hooks.json"), "{}\n")
+		writeTestFile(t, filepath.Join(f.queryDir, "undeclared"), "//:.cursor/hooks.json\n")
+		writeTestFile(t, filepath.Join(f.queryDir, "fail"), "")
+
+		out := f.mustRun(t)
+		f.requireMakeCalls(t, []string{"check-go"})
+		if !strings.Contains(out, "affected-preflight: full check: selection failed:") ||
+			!strings.Contains(out, "fake query failure") {
+			t.Errorf("unrelated Bazel error did not select the full check:\n%s", out)
+		}
+	})
+
 	t.Run("embedded file selects the embedding package", func(t *testing.T) {
 		f := newAffectedFixture(t)
 		writeTestFile(t, filepath.Join(f.repo, "alpha", "assets", "msg.txt"), "changed\n")
@@ -286,6 +330,22 @@ func newAffectedFixture(t *testing.T) affectedFixture {
 	writeExecutable(t, f.fakeBazel, framedCallRecorder("AFFECTED_FAKE_BAZEL_LOG")+
 		`[ "$1" = query ] || exit 0
 [ ! -e "$AFFECTED_FAKE_QUERY_DIR/fail" ] || { echo "fake query failure" >&2; exit 7; }
+if [ "$2" = --output=label ]; then
+  label="$3"
+  if [ -e "$AFFECTED_FAKE_QUERY_DIR/undeclared" ] && grep -Fqx "$label" "$AFFECTED_FAKE_QUERY_DIR/undeclared"; then
+    echo "ERROR: no such target '$label': not declared in package" >&2
+    exit 7
+  fi
+  echo "$label"
+  exit 0
+fi
+if [ -e "$AFFECTED_FAKE_QUERY_DIR/undeclared" ]; then
+  while IFS= read -r label; do
+    case "$*" in
+      *"$label"*) echo "ERROR: no such target '$label': not declared in package" >&2; exit 7 ;;
+    esac
+  done < "$AFFECTED_FAKE_QUERY_DIR/undeclared"
+fi
 case "$*" in
   *filegroup*) cat "$AFFECTED_FAKE_QUERY_DIR/aggregate" ;;
   *) cat "$AFFECTED_FAKE_QUERY_DIR/direct" ;;

@@ -1132,6 +1132,98 @@ func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
 	}
 }
 
+func activeAlwaysNamedSession(t *testing.T) (*sim, simRuntime) {
+	t.Helper()
+	s := scripted(t, []string{"gc-chat"}, chatRow("gc-chat", "1", "state", "active", "last_woke_at", rowAt(-time.Hour)))
+	s.cfg.Agents = []config.Agent{{Name: "chat", StartCommand: "true"}}
+	s.cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
+	s.settle()
+
+	const name = "s-gc-chat"
+	s.sp.mu.Lock()
+	dead := s.sp.rts[name]
+	if dead == nil {
+		s.sp.mu.Unlock()
+		t.Fatal("named session runtime was not seeded")
+	}
+	dead.corpse = true // tmux remain-on-exit keeps the pane listed after it dies
+	s.sp.touch(name)
+	deadCopy := *dead
+	s.sp.mu.Unlock()
+	return s, deadCopy
+}
+
+// An unsuspended mode=always named session whose pane dies as
+// a remain-on-exit corpse stays open and recovers in place under a new runtime
+// object and token.
+func TestSimAlwaysNamedSessionDeadPaneRestarts(t *testing.T) {
+	s, dead := activeAlwaysNamedSession(t)
+	for range 4 {
+		s.advance(simPatrol)
+		s.inventory()
+		s.pass()
+		for len(s.parked) > 0 {
+			s.release(0)
+		}
+		s.audit("v2")
+	}
+
+	b, _ := s.legs[0].backing.Get("gc-chat")
+	s.sp.mu.Lock()
+	rt := s.sp.rts["s-gc-chat"]
+	s.sp.mu.Unlock()
+	switch {
+	case b.Status != "open" || b.Metadata["state"] != "awake":
+		t.Errorf("row %s %v; want the named session open and awake", b.Status, b.Metadata)
+	case rt == nil || rt.corpse || rt.id != "gc-chat" || rt.object == dead.object || rt.token == dead.token || rt.token != b.Metadata["instance_token"]:
+		t.Errorf("runtime %+v (dead %+v), row token %q; want the open row running under a new runtime object and matching token", rt, dead, b.Metadata["instance_token"])
+	}
+	s.noViolations(t)
+}
+
+// A provider that refuses every Start must never leave an
+// always named session row marked active over its dead pane.
+func TestSimAlwaysNamedSessionStartFailuresDoNotReportActive(t *testing.T) {
+	s, _ := activeAlwaysNamedSession(t)
+	startsBefore := len(s.sp.starts)
+	for range 4 {
+		s.advance(simPatrol)
+		s.inventory()
+		s.sp.mu.Lock()
+		s.sp.nextStart = fmt.Errorf("sim: provider unavailable")
+		s.sp.mu.Unlock()
+		s.pass()
+		for len(s.parked) > 0 {
+			s.release(0)
+		}
+		s.sp.mu.Lock()
+		attempted := len(s.sp.starts) > startsBefore
+		s.sp.mu.Unlock()
+		b, _ := s.legs[0].backing.Get("gc-chat")
+		if attempted && (b.Metadata["state"] == "active" || b.Metadata["state"] == "awake") {
+			t.Errorf("after a failed Start, row reports a live session: %v", b.Metadata)
+		}
+		s.audit("v2")
+	}
+
+	s.sp.mu.Lock()
+	starts := slices.Clone(s.sp.starts[startsBefore:])
+	rt := s.sp.rts["s-gc-chat"]
+	s.sp.mu.Unlock()
+	if len(starts) == 0 {
+		t.Fatal("provider Start was never attempted")
+	}
+	for _, start := range starts {
+		if start.Created {
+			t.Errorf("provider unexpectedly created runtime %+v", start)
+		}
+	}
+	if rt != nil && !rt.corpse {
+		t.Errorf("runtime %+v is live although every Start failed", rt)
+	}
+	s.noViolations(t)
+}
+
 // Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p; mc-7is1r; §12.2 row 66): a
 // floor member acks and its pane then dies before the controller's pass,
 // the normal exit after a drain (remain-on-exit keeps the dead pane

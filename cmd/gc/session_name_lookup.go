@@ -59,6 +59,11 @@ type poolSessionCreateIdentity struct {
 	BeforeWrite func(rowID string) error
 	// Segments, when set, times the availability checks and the write.
 	Segments *poolCreateSegments
+	// availability, when set, answers the runtime-name and identity checks
+	// from the guarded create's lock-scoped session union (see
+	// readSessionAvailability). The row write and ID minting still use the
+	// real store, so the provider's conditional-write semantics are unchanged.
+	availability *sessionAvailabilityReader
 }
 
 // poolCreateWriteError marks a create error from the row write itself, or
@@ -382,6 +387,10 @@ func createPoolSessionBeadWithIdentifiers(
 	identity.AgentName = agentName
 	seg := identity.Segments
 	segStart := seg.mark()
+	availabilityStore := store
+	if identity.availability != nil {
+		availabilityStore = *identity.availability
+	}
 	availabilityErr := func() error {
 		if identifiers.beadScoped {
 			// Snapshot leg first: a holder the tick already sees must fail the
@@ -390,11 +399,11 @@ func createPoolSessionBeadWithIdentifiers(
 				return err
 			}
 		}
-		if err := ensurePoolSessionIdentifiersAvailable(store, cfg, availabilitySnapshot, template, identity, identifiers); err != nil {
+		if err := ensurePoolSessionIdentifiersAvailable(availabilityStore, cfg, availabilitySnapshot, template, identity, identifiers); err != nil {
 			return err
 		}
 		if identifiers.beadScoped {
-			return ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, template, agentName)
+			return ensurePoolIdentityNotHeldByOpenRow(availabilityStore, cfg, nil, template, agentName)
 		}
 		return nil
 	}()

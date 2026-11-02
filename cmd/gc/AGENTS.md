@@ -37,9 +37,23 @@ Failure-event excerpts omit routine startup configuration notices before
 truncation. Keep complete redacted output in the supervisor log and preserve the
 execution error, including the effective timeout, when no diagnostic remains.
 
-# CLI implementation
+# CLI and supervisor implementation
 
 Session-model ownership diagnostics inspect work separately from message beads:
 mail assignees are delivery recipients and may name historical sessions. Resolve
 known session aliases and alias history before treating an owner token as a
 missing bead ID, and report failures from either coordination-class store.
+
+Pool creates prove availability under the complete city-scoped identifier lock
+set. The cross-store census must be live and complete. Within that fence, the
+primary runtime-name and identity checks share one fresh type+label session
+union; closed-name reservations use exact `session_name` probes, never a scan of
+all closed history. The alias reservation check reads the primary session
+store directly. A partial read refuses creation. Keep the real write store
+separate from this per-create availability reader so ID minting and conditional
+writes retain the provider's semantics.
+
+Session availability storage adapters belong at the per-class composition edge
+(`cmd/gc/class_store.go`) and hold only typed session handles; the desired-state
+builder keeps using session-owned name checks. Keep API publication and full
+city readiness as separate barriers; see `internal/api/AGENTS.md`.

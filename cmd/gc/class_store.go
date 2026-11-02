@@ -486,3 +486,52 @@ func warnFederationBlindOverrides(stderr io.Writer, a *config.Agent, topo config
 			a.QualifiedName(), key, "gc ready")
 	}
 }
+
+// sessionAvailabilityReader answers exact metadata checks from one live open
+// session union plus exact historical runtime-name reservations. Only List is
+// snapshotted: Get, writes and a repair of a damaged session still reach the
+// typed session handle it embeds. It holds no raw store: the snapshot is reached
+// only through its List closure.
+type sessionAvailabilityReader struct {
+	beads.SessionStore
+	list func(beads.ListQuery) ([]beads.Bead, error)
+}
+
+// List answers from the lock-scoped snapshot at the federated read tier.
+func (s sessionAvailabilityReader) List(q beads.ListQuery) ([]beads.Bead, error) {
+	q.TierMode = beads.FederatedReadTier
+	return s.list(q)
+}
+
+// readSessionAvailability must run under the complete identifier lock set. Open
+// sessions share one type+label read across the runtime-name and identity
+// checks. Historical sessions reserve only their exact session_name, so query
+// those names instead of scanning unbounded closed-session history per create.
+// A partial or failed read refuses: it is not proof that a name is free.
+func readSessionAvailability(sessions beads.SessionStore, names []string) (sessionAvailabilityReader, error) {
+	rows, err := session.ListAllSessionBeads(sessions, beads.ListQuery{Live: true, TierMode: beads.FederatedReadTier})
+	if err != nil {
+		return sessionAvailabilityReader{}, err
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		reserved, err := sessions.List(beads.ListQuery{
+			Status: "closed", IncludeClosed: true, Live: true,
+			TierMode: beads.FederatedReadTier, Metadata: map[string]string{"session_name": name},
+		})
+		if err != nil {
+			return sessionAvailabilityReader{}, err
+		}
+		for _, row := range reserved {
+			if session.IsSessionBeadOrRepairable(row) {
+				rows = append(rows, row)
+			}
+		}
+	}
+	snapshot := beads.NewMemStoreFrom(0, rows, nil)
+	return sessionAvailabilityReader{SessionStore: sessions, list: snapshot.List}, nil
+}

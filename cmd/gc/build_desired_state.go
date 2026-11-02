@@ -6447,12 +6447,17 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 		if availabilityErr != nil {
 			return fmt.Errorf("checking locked pool availability for template %q: %w", template, availabilityErr)
 		}
+		availabilityStore, availabilityErr := readSessionAvailability(v.store, identifiers.availabilityNames)
+		lockedStart = seg.since(poolCreateSegmentCensus, lockedStart)
+		if availabilityErr != nil {
+			return fmt.Errorf("checking locked pool availability for template %q: %w", template, availabilityErr)
+		}
 		if alias != "" {
 			// A proven collision retains the long-standing alias-deferral contract:
 			// the pool bead is created without a public alias and sync records
 			// pool_alias_conflict. An unanswerable reservation query is different:
 			// it is not proof of a collision and must fail the entire create closed.
-			aliasErr := session.EnsureAliasAvailableWithConfig(v.store, v.city, alias, "")
+			aliasErr := session.EnsureAliasAvailableWithConfig(availabilityStore, v.city, alias, "")
 			if aliasErr == nil {
 				aliasErr = poolAliasCollisionFromInfos(availabilityInfos, alias)
 			}
@@ -6469,8 +6474,9 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 		var createErr error
 		// Only the primary snapshot receives the successful-create writeback.
 		availabilitySnapshot := newSessionBeadSnapshotFromInfos(availabilityInfos)
-		info, createErr = createPoolSessionBeadWithIdentifiers(
+		info, createErr = createPoolSessionBeadWithAvailability(
 			v.store,
+			availabilityStore,
 			template,
 			v.city,
 			availabilitySnapshot,

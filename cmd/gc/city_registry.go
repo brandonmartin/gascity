@@ -22,10 +22,11 @@ import (
 // The controllerState pointer is safe to hold because controllerState has its
 // own internal RWMutex for field-level safety.
 type cityView struct {
-	Name    string
-	Path    string
-	Started bool
-	Status  string
+	Name     string
+	Path     string
+	Started  bool
+	APIReady bool
+	Status   string
 
 	// controllerState is a pointer to the city's api.State implementation.
 	// It is thread-safe via its own internal RWMutex.
@@ -84,6 +85,7 @@ type cityMembership struct {
 	started    bool
 	tombstoned bool
 	hasState   bool
+	apiReady   bool
 }
 
 type recentlyUnregisteredCity struct {
@@ -422,7 +424,8 @@ func (transientCityEventProvider) Close() error {
 	return nil
 }
 
-// CityState returns the api.State for a named city, or nil if not found/not running.
+// CityState returns an owned city's wired API, including during adoption.
+// API publication and full startup readiness are separate barriers.
 // Lock-free read from the atomic snapshot.
 func (r *cityRegistry) CityState(name string) api.State {
 	snap := r.snap.Load()
@@ -433,7 +436,7 @@ func (r *cityRegistry) CityState(name string) api.State {
 	if view.Tombstoned {
 		return nil
 	}
-	if !view.Started || view.cs == nil {
+	if (!view.Started && !view.APIReady) || view.cs == nil {
 		return nil
 	}
 	return view.cs
@@ -568,6 +571,7 @@ func (r *cityRegistry) signalMembershipChangeLocked(snap *citySnapshot) {
 			started:    v.Started,
 			tombstoned: v.Tombstoned,
 			hasState:   v.cs != nil,
+			apiReady:   v.APIReady,
 		}
 	}
 	if maps.Equal(membership, r.membership) {
@@ -594,6 +598,7 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 		Name:       mc.name,
 		Path:       path,
 		Started:    mc.started,
+		APIReady:   mc.apiReady,
 		Status:     mc.status,
 		cs:         cs,
 		Tombstoned: mc.tombstoned.Load(),

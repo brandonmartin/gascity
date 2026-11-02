@@ -47,6 +47,14 @@ Violating any fails the build; full rationale is in the architecture docs.
 
 ## Configuration publication
 
+Supervisor API publication is separate from city startup readiness. A wired
+city may serve events and workspace services during adoption only after its
+controller lock, socket and token belong to that runtime (`managedCity.apiReady`).
+Registration alone never exposes its API; `OnStarted` still owns `Running=true`
+and city.create completion after startup reconciliation. Snapshot publication
+of either barrier must remain atomic with registry lifecycle changes; tombstoned
+cities never resolve to API state.
+
 API config edits, validation, snapshot publication and city-config rollback
 share the controller's publication transaction with runtime reloads. A rejected
 edit must remain absent from both disk and the API's cached raw config. Preserve

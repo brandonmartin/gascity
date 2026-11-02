@@ -1261,6 +1261,7 @@ type managedCity struct {
 	cr         *CityRuntime
 	name       string // city name at launch — used for name-drift detection
 	started    bool
+	apiReady   bool // ownership and API wiring complete; adoption may still be running
 	status     string
 	cancel     context.CancelFunc
 	done       chan struct{} // closed when the city goroutine exits
@@ -2685,6 +2686,16 @@ func startOneCity(
 	if ul, ok := lis.(*net.UnixListener); ok {
 		ul.SetUnlinkOnClose(false)
 	}
+
+	// The controller lock, socket, token, services and API state now belong to
+	// this runtime. Publish routes before adoption so event subscribers and
+	// workspace services remain reachable through a slow initial reconcile.
+	// OnStarted still owns full startup readiness and city.create completion.
+	cr.UpdateCallback(path, func(m *managedCity) {
+		if m == mc {
+			m.apiReady = true
+		}
+	})
 
 	go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
 		// Recovery and close(done) defer is pushed FIRST so it

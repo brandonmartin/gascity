@@ -207,16 +207,17 @@ func workerPlan(cfg *config.City, id string, slot int) createPlan {
 	return createPlan{ID: id, Template: cfg.Agents[0].QualifiedName(), QualifiedInstance: qualifiedInstance, Slot: poolSlot}
 }
 
-// aliasQueryFailStore fails the first alias-keyed query, which is the
-// locked alias reservation check: the re-census before it and the identifier
-// checks after it answer, so only the alias check cannot.
-type aliasQueryFailStore struct {
+// availabilityQueryFailStore refuses the primary availability proof after
+// the open-session census: either the exact historical-name probe or the
+// legacy alias-keyed query. Neither failure proves a name is taken.
+type availabilityQueryFailStore struct {
 	beads.Store
 	failed bool
 }
 
-func (s *aliasQueryFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if _, ok := q.Metadata["alias"]; ok && !s.failed {
+func (s *availabilityQueryFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	_, aliasQuery := q.Metadata["alias"]
+	if (aliasQuery || (q.Live && q.IncludeClosed)) && !s.failed {
 		s.failed = true
 		return nil, errors.New("alias index unavailable")
 	}
@@ -379,7 +380,7 @@ func TestCreateEffect_ProvenAliasCollisionCreatesWithoutAlias_QueryErrorFailsClo
 		h := newCreateHarness(t, nil)
 		h.reserve(t, "c1")
 
-		h.runAll(t, &createPass{cfg: cfg, store: &aliasQueryFailStore{Store: mem}}, plan)
+		h.runAll(t, &createPass{cfg: cfg, store: &availabilityQueryFailStore{Store: mem}}, plan)
 
 		assertFailedNoWrite(t, h)
 		if rows := sessionRows(t, mem); len(rows) != 0 {
@@ -669,7 +670,7 @@ func TestCreateEffect_LockedReadFailureBacksOffFenceRead(t *testing.T) {
 	cfg := workerCity(60)
 	for name, store := range map[string]beads.Store{
 		"re-census read error": &firstListFailStore{Store: beads.NewMemStore()},
-		"alias query error":    &aliasQueryFailStore{Store: beads.NewMemStore()},
+		"alias query error":    &availabilityQueryFailStore{Store: beads.NewMemStore()},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newCreateHarness(t, nil)
@@ -993,12 +994,6 @@ func TestCreatePoolSessionBeadWithGuardedAliasMatchesPreRefactor(t *testing.T) {
 			w.stores = w.stores[:1]
 			return w
 		}},
-		"alias query error": {"alias index unavailable", func(t *testing.T) guardedCreateWorld {
-			mem := beads.NewMemStore()
-			w := basic(t, rigCity(t, namepool), &aliasQueryFailStore{Store: mem}, 1)
-			w.stores = []beads.Store{mem}
-			return w
-		}},
 		"lock failure": {"flock failed", func(t *testing.T) guardedCreateWorld {
 			w := basic(t, workerCity(2), beads.NewMemStore(), 1)
 			w.locks = func(string, []string, func() error) error { return errors.New("flock failed") }
@@ -1314,7 +1309,7 @@ func TestCreateEffect_RefusalCarriesThePlanConfigRev(t *testing.T) {
 func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 	cfg := workerCity(2)
 	t.Run("before the write", func(t *testing.T) {
-		// The locked alias check panics, inside the fence.
+		// The locked primary availability read panics before the write.
 		cfg := &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
 			Agents:    []config.Agent{{Name: "worker", Dir: "rig", StartCommand: "true", MaxActiveSessions: intPtr(2), NamepoolNames: []string{"furiosa", "nux"}}},
@@ -1323,7 +1318,7 @@ func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 		h := newCreateHarness(t, nil)
 		h.reserve(t, "c1")
 		plan := workerPlan(cfg, "c1", 1)
-		h.runAll(t, &createPass{cfg: cfg, store: aliasPanicStore{Store: store}}, plan)
+		h.runAll(t, &createPass{cfg: cfg, store: availabilityPanicStore{Store: store}}, plan)
 		assertFailedNoWrite(t, h)
 		h.assertRefused(t, plan, createStagePanic)
 		if rows := sessionRows(t, store); len(rows) != 0 {
@@ -1354,13 +1349,14 @@ func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 	})
 }
 
-// aliasPanicStore panics on an alias-keyed List: the locked alias check,
-// which runs on the effect's goroutine.
-type aliasPanicStore struct{ beads.Store }
+// availabilityPanicStore panics during the locked primary availability proof
+// on the effect's goroutine, before any row write.
+type availabilityPanicStore struct{ beads.Store }
 
-func (s aliasPanicStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if _, ok := q.Metadata["alias"]; ok {
-		panic("alias index driver crashed")
+func (s availabilityPanicStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	_, aliasQuery := q.Metadata["alias"]
+	if aliasQuery || (q.Live && q.IncludeClosed) {
+		panic("availability driver crashed")
 	}
 	return s.Store.List(q)
 }
@@ -1575,7 +1571,7 @@ func TestCreateEffectSettlesOnlyByMessage(t *testing.T) {
 	}
 	h.runAll(t, &createPass{cfg: workerCity(3), store: beads.NewMemStore()}, workerPlan(cfg, "landed", 1))
 	h.runAll(t, &createPass{cfg: cfg, store: doomed}, workerPlan(cfg, "refused", 1))
-	h.runAll(t, &createPass{cfg: cfg, store: aliasPanicStore{Store: beads.NewMemStore()}}, workerPlan(cfg, "panicked", 2))
+	h.runAll(t, &createPass{cfg: cfg, store: availabilityPanicStore{Store: beads.NewMemStore()}}, workerPlan(cfg, "panicked", 2))
 	if got := len(h.settlements()); got != 3 {
 		t.Fatalf("settlements = %d, want one per effect", got)
 	}

@@ -718,6 +718,67 @@ schema = 1
 	assertSingleIssue(t, report, "cache-worktree-dirty")
 }
 
+// stubCachedPackStatus makes every cached checkout report the given
+// `git status --porcelain` output on top of stubCachedPackGit.
+func stubCachedPackStatus(t *testing.T, status string) {
+	t.Helper()
+	prev := runGit
+	runGit = func(dir string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
+			return status, nil
+		}
+		return prev(dir, args...)
+	}
+	t.Cleanup(func() { runGit = prev })
+}
+
+// A stray untracked root dotfile is not pack content the loader reads, so the
+// check agrees with config load and does not flag it; anything the loader
+// could read still does (ga-7t1jo).
+func TestCheckInstalledUntrackedCacheFiles(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    string
+		wantIssue bool
+	}{
+		{name: "root dotfile", status: "?? .git-merged-sha-tmp"},
+		{name: "root dotfile plus pack content", status: "?? .git-merged-sha-tmp\n?? agents/rogue/agent.toml", wantIssue: true},
+		{name: "root non-dot file", status: "?? stray.toml", wantIssue: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			city := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+			stubCachedPackGit(t)
+			writeTestLockfile(t, city, map[string]LockedPack{
+				"https://example.com/untracked.git": {Version: "2.0.0", Commit: "cccc"},
+			})
+			stageCachedPackAtCommit(t, "https://example.com/untracked.git", "cccc", "cccc", `
+[pack]
+name = "untracked"
+schema = 1
+`)
+			stubCachedPackStatus(t, tt.status)
+
+			report, err := CheckInstalled(city, map[string]config.Import{
+				"pack:untracked": {Source: "https://example.com/untracked.git", Version: "^2.0"},
+			})
+			if err != nil {
+				t.Fatalf("CheckInstalled: %v", err)
+			}
+			if tt.wantIssue {
+				assertSingleIssue(t, report, "cache-worktree-dirty")
+				return
+			}
+			if report.HasIssues() {
+				t.Fatalf("issues = %#v, want none", report.Issues)
+			}
+		})
+	}
+}
+
 func TestCheckInstalledUsesRemoteSubpath(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()

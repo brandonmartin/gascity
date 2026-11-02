@@ -51,6 +51,10 @@ type Options struct {
 	// When nil, each step's compiled priority is used.
 	PriorityOverride *int
 
+	// ExclusionsFrom attaches the source bead and its live workflow root's
+	// claimant exclusions to every created step before it becomes visible.
+	ExclusionsFrom string
+
 	// PreserveRootType keeps the root bead's declared type instead of
 	// coercing legacy non-workflow roots to molecule containers. Attach uses
 	// this for executable sub-DAG roots such as retry attempts.
@@ -305,27 +309,19 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// as a forward pointer to that bead's own v1 attachment, never to a container
 	// of it, so nesting there would adopt an unrelated molecule (ga-crz5ege). A
 	// genuine top-level head with no container key self-roots via its own id.
-	rootBeadID := beadmeta.ResolveNestingRootID(parentBead.Metadata, attachBeadID)
-
+	//
 	// A resolved container root may point at a molecule that has since fully
 	// closed (e.g. re-attaching a content bead to a fresh formula after its
 	// prior review round-trip closed cleanly) -- a dead pointer, not a live
-	// upstream workflow to honor. Only a still-open chain root is trusted;
-	// anything else (closed, or no longer resolvable) falls back to self-root,
-	// exactly like the no-chain case (ga-yov1rr). A live chain
+	// upstream workflow to honor. attachWorkflowRoot trusts only a still-open
+	// root; anything else (closed, or no longer resolvable) falls back to
+	// self-root, exactly like the no-container case (ga-yov1rr). A live chain
 	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
-	workflowRoot := parentBead
-	if rootBeadID != attachBeadID {
-		rootBead, err := store.Get(rootBeadID)
-		if err != nil && !errors.Is(err, beads.ErrNotFound) {
-			return nil, fmt.Errorf("loading workflow root %s for claimant exclusions: %w", rootBeadID, err)
-		}
-		if err != nil || rootBead.Status == "closed" {
-			rootBeadID = attachBeadID
-		} else {
-			workflowRoot = rootBead
-		}
+	workflowRoot, err := attachWorkflowRoot(store, parentBead)
+	if err != nil {
+		return nil, err
 	}
+	rootBeadID := workflowRoot.ID
 
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
@@ -878,6 +874,19 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		recipe = recipeWithNativeStepDependencies(recipe)
 		opts.nativeStepTopologyPrepared = true
 	}
+	if opts.ExclusionsFrom != "" {
+		source, err := store.Get(opts.ExclusionsFrom)
+		if err != nil {
+			return nil, fmt.Errorf("attach bead %s: %w", opts.ExclusionsFrom, err)
+		}
+		root, err := attachWorkflowRoot(store, source)
+		if err != nil {
+			return nil, err
+		}
+		inheritExcludedClaimants(recipe.Steps, beadmeta.MergeExcludedClaimants(
+			root.Metadata[beadmeta.ExcludeClaimantsMetadataKey],
+			source.Metadata[beadmeta.ExcludeClaimantsMetadataKey]))
+	}
 	inheritExcludedClaimants(recipe.Steps, recipe.Steps[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey])
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
@@ -1388,6 +1397,25 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		IDMapping: idMapping,
 		Created:   len(createdIDs),
 	}, nil
+}
+
+// attachWorkflowRoot resolves the live workflow root to nest new work under
+// parent. It follows only the container keys (workflow_id, gc.root_bead_id),
+// never the molecule_id forward pointer (ga-crz5ege), and ignores a missing or
+// closed root by falling back to parent itself (ga-yov1rr).
+func attachWorkflowRoot(store beads.Store, parent beads.Bead) (beads.Bead, error) {
+	rootID := beadmeta.ResolveNestingRootID(parent.Metadata, parent.ID)
+	if rootID == parent.ID {
+		return parent, nil
+	}
+	root, err := store.Get(rootID)
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return beads.Bead{}, fmt.Errorf("loading workflow root %s for claimant exclusions: %w", rootID, err)
+	}
+	if err != nil || root.Status == "closed" {
+		return parent, nil
+	}
+	return root, nil
 }
 
 // inheritExcludedClaimants decorates recipes before both sequential Create and

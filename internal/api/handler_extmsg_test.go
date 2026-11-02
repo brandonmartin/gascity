@@ -14,7 +14,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type testExtMsgAdapter struct {
@@ -322,8 +324,87 @@ func TestExtmsgNotifyMembersDedupesMaterializedNamedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(worker): %v", err)
 	}
-	if got := countNudgesTo(fs, workerBead.Metadata["session_name"], "dedupe-materialized"); got != 1 {
-		t.Fatalf("worker nudges = %d, want exactly 1; nudge targets=%v", got, nudgeTargets(fs, "dedupe-materialized"))
+	queue, err := nudgequeue.LoadState(fs.cityPath)
+	if err != nil {
+		t.Fatalf("load nudge queue: %v", err)
+	}
+	queued := 0
+	for _, item := range queue.Pending {
+		if item.SessionID == workerID && strings.Contains(item.Message, "dedupe-materialized") {
+			queued++
+		}
+	}
+	direct := countNudgesTo(fs, workerBead.Metadata["session_name"], "dedupe-materialized")
+	if direct+queued != 1 {
+		t.Fatalf("worker reminders: %d direct, %d queued; want exactly one", direct, queued)
+	}
+}
+
+func TestExtmsgNotifyMembersDedupesWhileNamedSessionStarting(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	services := extmsg.NewServices(fs.cityBeadStore)
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "discord",
+		AccountID:      "acct-1",
+		ConversationID: "thread-1",
+		Kind:           extmsg.ConversationThread,
+	}
+	// "myrig/worker" is a configured named session with no live bead yet;
+	// "myrig--worker" is its runtime session name. Both memberships
+	// materialize the same session.
+	ensureDuplicateIdentityMemberships(t, services, ref, "myrig/worker", "myrig--worker")
+	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+		t.Fatal("named session should not be materialized before notify")
+	}
+
+	// Make the named bead visible while its runtime is still starting. Both
+	// memberships can resolve it and the reminder must be queued for delivery.
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	fs.sessionProvider = &blockingStartProvider{Fake: fs.sp, started: started, unblock: unblock}
+	startResult := make(chan error, 1)
+	go func() {
+		_, err := srv.resolveSessionIDMaterializingNamedWithContext(context.Background(), fs.cityBeadStore, "myrig/worker")
+		startResult <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		close(unblock)
+		t.Fatal("session start did not begin")
+	}
+	srv.extmsgNotifyMembers(context.Background(), ref, "Publisher", "agent", "dedupe-materialized", "", "")
+	close(unblock)
+	select {
+	case err := <-startResult:
+		if err != nil {
+			t.Fatalf("materialize named session: %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("session start did not finish")
+	}
+
+	workerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+	if err != nil {
+		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
+	}
+	workerBead, err := fs.cityBeadStore.Get(workerID)
+	if err != nil {
+		t.Fatalf("Get(worker): %v", err)
+	}
+	queue, err := nudgequeue.LoadState(fs.cityPath)
+	if err != nil {
+		t.Fatalf("load nudge queue: %v", err)
+	}
+	if len(queue.Pending) != 1 || queue.Pending[0].SessionID != workerID || !strings.Contains(queue.Pending[0].Message, "dedupe-materialized") {
+		t.Fatalf("queued reminders = %+v, want exactly one for session %s", queue.Pending, workerID)
+	}
+	if got := countNudgesTo(fs, workerBead.Metadata["session_name"], "dedupe-materialized"); got != 0 {
+		t.Fatalf("direct worker nudges = %d, want 0 while starting", got)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -274,8 +275,6 @@ func cloneTimePtr(v *time.Time) *time.Time {
 	return &cloned
 }
 
-const excludeClaimantsMetadataKey = "gc.exclude_claimants"
-
 // coerceMetadata converts raw JSON metadata values to strings. Backing stores
 // may return numbers or booleans; the domain model is map[string]string.
 //
@@ -289,7 +288,7 @@ func coerceMetadata(raw map[string]json.RawMessage) (map[string]string, error) {
 	}
 	m := make(map[string]string, len(raw))
 	for k, v := range raw {
-		if k == excludeClaimantsMetadataKey && (len(v) == 0 || v[0] != '"') {
+		if k == beadmeta.ExcludeClaimantsMetadataKey && (len(v) == 0 || v[0] != '"') {
 			return nil, fmt.Errorf("metadata %s must be a string: %w", k, beads.ErrMetadataParse)
 		}
 		var s string

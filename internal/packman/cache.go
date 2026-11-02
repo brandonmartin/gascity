@@ -248,7 +248,8 @@ func checkoutExistingCache(cachePath, commit string) error {
 	return resetCachedRepo(cachePath, commit)
 }
 
-func cachedRepoDirty(cachePath string) (bool, error) {
+// cachedRepoStatus returns `git status --porcelain` for a cached checkout.
+func cachedRepoStatus(cachePath string) (string, error) {
 	// Intentionally NOT --ignored: gitignored build artifacts written into
 	// the cache in place (e.g. Python __pycache__/*.pyc from running a cached
 	// pack's scripts, or a stray .DS_Store) are not local modifications to the
@@ -257,9 +258,31 @@ func cachedRepoDirty(cachePath string) (bool, error) {
 	// gate (vp-gny3). A reinstall's `git clean -ffdx` still clears them.
 	status, err := runGit(cachePath, "status", "--porcelain")
 	if err != nil {
-		return false, fmt.Errorf("checking cached repo worktree status: %w", err)
+		return "", fmt.Errorf("checking cached repo worktree status: %w", err)
+	}
+	return status, nil
+}
+
+// cachedRepoDirty reports any difference from the pinned commit, including a
+// stray untracked root dotfile. The install path uses it so a reinstall resets
+// and cleans the tree.
+func cachedRepoDirty(cachePath string) (bool, error) {
+	status, err := cachedRepoStatus(cachePath)
+	if err != nil {
+		return false, err
 	}
 	return strings.TrimSpace(status) != "", nil
+}
+
+// cachedRepoHasLocalEdits reports only changes the config loader would act on,
+// matching its cached-import check (config.HasLocalCacheEdits, ga-7t1jo).
+// Read-only checks use it so they agree with config load.
+func cachedRepoHasLocalEdits(cachePath string) (bool, error) {
+	status, err := cachedRepoStatus(cachePath)
+	if err != nil {
+		return false, err
+	}
+	return config.HasLocalCacheEdits(status), nil
 }
 
 func validateCachedRepoCheckout(cachePath, commit string) error {
@@ -270,7 +293,7 @@ func validateCachedRepoCheckout(cachePath, commit string) error {
 	if !gitutil.SameCommit(head, commit) {
 		return fmt.Errorf("cached repository is checked out at %s, expected %s", strings.TrimSpace(head), commit)
 	}
-	dirty, err := cachedRepoDirty(cachePath)
+	dirty, err := cachedRepoHasLocalEdits(cachePath)
 	if err != nil {
 		return err
 	}

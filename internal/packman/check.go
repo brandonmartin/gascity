@@ -417,7 +417,7 @@ func (s *importCheckState) validateCachedGitCheckout(name, source, commit, cache
 		})
 		return false
 	}
-	dirty, err := cachedRepoDirty(cachePath)
+	dirty, err := cachedRepoHasLocalEdits(cachePath)
 	if err != nil {
 		s.closureIncomplete = true
 		s.addIssue(CheckIssue{

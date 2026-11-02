@@ -151,6 +151,54 @@ func TestEnsureRepoInCacheRepairsDirtyMatchingCheckout(t *testing.T) {
 	}
 }
 
+// The read-only checks tolerate a stray untracked root dotfile (ga-7t1jo),
+// but the install path stays strict so a reinstall still resets and cleans it.
+func TestEnsureRepoInCacheCleansUntrackedRootDotfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	path, err := RepoCachePath("https://github.com/example/repo", "abc123")
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "pack.toml"), []byte("[pack]\nname = \"repo\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	var calls [][]string
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case "rev-parse":
+			return "abc123", nil
+		case "status":
+			return "?? .git-merged-sha-tmp", nil
+		case "reset", "clean":
+			return "", nil
+		default:
+			return "", fmt.Errorf("unexpected git call: %v", args)
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+
+	if _, err := EnsureRepoInCache("", "https://github.com/example/repo", "abc123"); err != nil {
+		t.Fatalf("EnsureRepoInCache: %v", err)
+	}
+	want := [][]string{
+		{"rev-parse", "HEAD"},
+		{"status", "--porcelain"},
+		{"reset", "--hard", "--quiet", "abc123"},
+		{"clean", "-ffdx", "--quiet"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("git calls = %#v, want %#v", calls, want)
+	}
+}
+
 func TestEnsureRepoInCacheRepairsExistingCloneCheckout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

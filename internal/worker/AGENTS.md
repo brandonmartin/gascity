@@ -347,3 +347,9 @@ which waits for CN-1b2.
 The worker reads work beads and other state it does not own through lookups
 injected as func values (for example `FactoryConfig.ResolveBead`), and never
 enumerates stores itself.
+
+## Pending create queues
+
+Never-started pending creates deferred by either start budget retain their
+rollback hold for the last completed planner pass. Partial passes retain
+prior holds; holds are fenced by session incarnation and generation.

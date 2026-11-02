@@ -427,24 +427,36 @@ func (p startPhaseTimings) formatLog() string {
 	return " phases=[" + strings.Join(parts, " ") + "]"
 }
 
-// wakeBudgetDeferrals remembers only the last completed start pass. A controller
+// wakeBudgetDeferrals remembers budget deferrals from the last completed start pass. A controller
 // restart forgets the queue and falls back to the ordinary expiry floor.
 type wakeBudgetDeferrals struct {
 	mu   sync.Mutex
-	rows map[string]sessionpkg.Info
+	rows map[string]budgetDeferredStart
+}
+
+type budgetDeferredStart struct {
+	info   sessionpkg.Info
+	reason TraceReasonCode
 }
 
 func (g *wakeBudgetDeferrals) holds(info sessionpkg.Info) bool {
+	return g.reason(info) != ""
+}
+
+func (g *wakeBudgetDeferrals) reason(info sessionpkg.Info) TraceReasonCode {
 	if g == nil {
-		return false
+		return ""
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	old, ok := g.rows[info.ID]
-	return ok && old.InstanceToken == info.InstanceToken && old.Generation == info.Generation
+	if ok && old.info.InstanceToken == info.InstanceToken && old.info.Generation == info.Generation {
+		return old.reason
+	}
+	return ""
 }
 
-func (g *wakeBudgetDeferrals) replace(rows map[string]sessionpkg.Info, partial bool) {
+func (g *wakeBudgetDeferrals) replace(rows map[string]budgetDeferredStart, partial bool) {
 	if g == nil {
 		return
 	}
@@ -452,7 +464,7 @@ func (g *wakeBudgetDeferrals) replace(rows map[string]sessionpkg.Info, partial b
 	defer g.mu.Unlock()
 	if partial {
 		if g.rows == nil {
-			g.rows = make(map[string]sessionpkg.Info)
+			g.rows = make(map[string]budgetDeferredStart)
 		}
 		maps.Copy(g.rows, rows)
 	} else {
@@ -4922,7 +4934,7 @@ func executePlannedStartsTraced(
 		startOpts.wakeBudgetDeferrals.replace(nil, startOpts.wakeBudgetPartial)
 		return 0
 	}
-	deferred := make(map[string]sessionpkg.Info)
+	deferred := make(map[string]budgetDeferredStart)
 	stabilityWaiter := resolveStartStabilityWaiter(startOpts.stabilityWaiter)
 	sessionStaleKeyDetectionWaiter := startOpts.sessionStaleKeyDetectionWaiter
 	cbCfg, cbEnabled := sessionCircuitBreakerConfigFromCity(cfg)
@@ -5013,7 +5025,7 @@ func executePlannedStartsTraced(
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
 					if candidate.info.PendingCreateClaim && strings.TrimSpace(candidate.info.LastWokeAt) == "" {
-						deferred[candidate.info.ID] = candidate.info
+						deferred[candidate.info.ID] = budgetDeferredStart{info: candidate.info, reason: TraceReasonWakeBudget}
 					}
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
 				}
@@ -5045,6 +5057,9 @@ func executePlannedStartsTraced(
 				// A planner call that has spent its prepare budget defers the
 				// rest before any slot, lease, ticket, breaker accounting or write.
 				if prepareSpend.deferIfSpent(stderr, trace, wave, candidate, cfg) {
+					if candidate.info.PendingCreateClaim && strings.TrimSpace(candidate.info.LastWokeAt) == "" {
+						deferred[candidate.info.ID] = budgetDeferredStart{info: candidate.info, reason: TraceReasonPrepareBudgetSpent}
+					}
 					continue
 				}
 				var release func()

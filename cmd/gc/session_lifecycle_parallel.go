@@ -40,12 +40,6 @@ const (
 	// preparation stays chunked so flapping dependencies are observed between batches.
 	defaultStartDependencyRecheckBatchSize = 3
 
-	// defaultStartPrepareBudget bounds the time the control dispatcher's
-	// synchronous planner call spends in prepareStartCandidateForCity, summed
-	// over its candidates. The main tick's async pass prepares on its start
-	// goroutines and opts out with withPrepareBudget unset.
-	defaultStartPrepareBudget = 60 * time.Second
-
 	// Stops and interrupts are teardown paths, so their parallelism is not
 	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3

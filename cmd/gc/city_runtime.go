@@ -4537,7 +4537,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// dispatcher's synchronous dependency checks still see starts the
 		// main tick admitted but has not PreWoken yet.
 		withAdmittedStartLookup(cr.asyncStarts.startInFlight),
-		withPrepareBudget(defaultStartPrepareBudget),
+		withPrepareBudget(cr.cfg.Session.StartPrepareBudgetDuration()),
 		withParkedSeats(parked),
 	)
 	cr.requestDeferredDrainFollowUpTick()

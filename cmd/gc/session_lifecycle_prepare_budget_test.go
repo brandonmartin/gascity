@@ -689,6 +689,25 @@ func TestExecutePlannedStarts_PrepareBudgetDeferralPayload(t *testing.T) {
 	}
 }
 
+// The configured budget changes how many candidates fit in a pass.
+func TestExecutePlannedStarts_ConfiguredPrepareBudget(t *testing.T) {
+	for _, tc := range []struct {
+		budget string
+		want   int
+	}{{"", 1}, {"2m", 2}} {
+		t.Run(tc.budget, func(t *testing.T) {
+			e := newPrepareBudgetEnv(t, "a", "b", "c")
+			e.cfg.Session.StartPrepareBudget = tc.budget
+			a := e.candidate(t, "a", 61*time.Second)
+			b := e.candidate(t, "b", 60*time.Second)
+			c := e.candidate(t, "c", time.Second)
+			if got := e.run(e.cfg.Session.StartPrepareBudgetDuration(), false, nil, a, b, c); got != tc.want {
+				t.Fatalf("started = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // The option is wired into the control dispatcher's synchronous planner call
 // only. The main tick's pass is async, prepares on its start goroutines and
 // is bounded by its start slots, and the one-shot `gc start` does not opt in.

@@ -3165,11 +3165,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 			}
-			if expired && strings.TrimSpace(infoPostZombie.LastWokeAt) == "" && reconcileOpts.wakeBudgetDeferrals.holds(infoPostZombie) {
-				expired = false
-				pendingCreateHeld = true
-				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWakeBudget, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{"session_bead_id": id})
+			if expired && strings.TrimSpace(infoPostZombie.LastWokeAt) == "" {
+				if reason := reconcileOpts.wakeBudgetDeferrals.reason(infoPostZombie); reason != "" {
+					expired = false
+					pendingCreateHeld = true
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, reason, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{"session_bead_id": id})
+					}
 				}
 			}
 			if expired {

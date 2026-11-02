@@ -753,3 +753,62 @@ func TestPrepareMeter(t *testing.T) {
 		}
 	})
 }
+
+func TestPrepareBudgetDeferralPreservesPendingCreateAcrossSlowTicks(t *testing.T) {
+	e := newPrepareBudgetEnv(t, "a", "b", "dead")
+	e.capacityEnv.clk.Time = time.Now().UTC()
+	guard := &wakeBudgetDeferrals{}
+	e.startOptions = append(e.startOptions, withWakeBudgetDeferrals(guard))
+	a := e.candidate(t, "a", testPrepareBudget+time.Second)
+	b := e.pendingCreate(t, "b", "", map[string]string{"state": "creating", "pending_create_started_at": e.clk.Now().Format(time.RFC3339)})
+	dead := e.pendingCreate(t, "dead", "", map[string]string{"state": "creating", "pending_create_started_at": e.clk.Now().Format(time.RFC3339)})
+
+	e.run(testPrepareBudget, false, nil, a, b)
+	e.requireDeferred(t, false, "b")
+	if !guard.holds(b.info) {
+		t.Fatal("prepare-deferred pending create was not held")
+	}
+	e.clk.Advance(11 * time.Minute)
+	hold := pendingCreateHoldForRows(e.cfg, e.guard, guard)
+	if n := reapStaleSessionBeads(e.city, e.store, testSeatWork(e.city, nil, e.store, nil), e.sp, e.dt, hold, e.clk, &e.log); n != 1 {
+		t.Fatalf("reaped %d, want only the unheld dead row", n)
+	}
+	requireHeldPendingCreate(t, e.bead(t, b.info.ID))
+	if got := e.bead(t, dead.info.ID); got.Status != "closed" {
+		t.Fatalf("dead status=%q, want closed", got.Status)
+	}
+	newer := b.info
+	newer.InstanceToken = "new-incarnation"
+	if guard.holds(newer) {
+		t.Fatal("old deferral held a new incarnation")
+	}
+	guard.replace(nil, true)
+	if !guard.holds(b.info) {
+		t.Fatal("partial pass cleared the hold")
+	}
+	// Keep the row from starting in this reconcile so the rollback hold can
+	// be observed separately from the following planner pass.
+	gate := newOnDeathGate()
+	gate.enqueue([]deathEdge{{name: "b"}})
+	e.startOptions = append(e.startOptions, withOnDeathGate(gate))
+	e.reconcileTraced(e.bead(t, b.info.ID))
+	requireHeldPendingCreate(t, e.bead(t, b.info.ID))
+	found := false
+	for _, r := range e.records(TraceSiteReconcilerPendingCreate) {
+		if r.ReasonCode == TraceReasonPrepareBudgetSpent && r.OutcomeCode == TraceOutcomeDeferred {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing prepare-budget rollback deferral trace")
+	}
+
+	e.run(testPrepareBudget, false, nil)
+	if guard.holds(b.info) {
+		t.Fatal("complete empty pass retained the hold")
+	}
+	e.reconcileTraced(e.bead(t, b.info.ID))
+	if got := e.bead(t, b.info.ID); got.Status != "closed" {
+		t.Fatalf("unheld expired row status=%q, want closed", got.Status)
+	}
+}

@@ -124,6 +124,81 @@ esac
 	}
 }
 
+// `bd set-state <id> hold=cleared` releases a hold and leaves hold:cleared
+// behind (ga-azdbu). That label sits inside the reserved hold: namespace but
+// is "no hold": the routed and count queries must keep serving and counting
+// the row, and the descriptor must carry the exception so the controller's
+// demand predicate renders from the same source.
+
+func TestPoolDemandServeRulesCarryTheReleasedHoldException(t *testing.T) {
+	rules := PoolDemandServeRulesForQuery()
+	if !slices.Equal(rules.ExcludeLabelPrefixExceptions, beadmeta.DispatchHoldReleasedLabels) {
+		t.Errorf("PoolDemandServeRulesForQuery().ExcludeLabelPrefixExceptions = %v, want %v",
+			rules.ExcludeLabelPrefixExceptions, beadmeta.DispatchHoldReleasedLabels)
+	}
+	for _, label := range rules.ExcludeLabels {
+		if slices.Contains(beadmeta.DispatchHoldReleasedLabels, label) {
+			t.Errorf("ExcludeLabels names released label %q; bd's exact --exclude-label flag would park it", label)
+		}
+	}
+}
+
+func TestRoutedAndCountQueriesServeAReleasedHold(t *testing.T) {
+	requireJQ(t)
+	a := &Agent{Name: "worker", Dir: "hello-world"}
+	cases := []struct {
+		name   string
+		labels string
+		served bool
+	}{
+		{"released hold", `["hold:cleared"]`, true},
+		{"released hold case folded", `["Hold:Cleared"]`, true},
+		{"released hold beside ordinary label", `["task","hold:cleared"]`, true},
+		{"released then re-held", `["hold:cleared","hold:mayor-go"]`, false},
+		{"re-held then released", `["hold:mayor-go","hold:cleared"]`, false},
+		{"released-label lookalike", `["hold:cleared-by-mayor"]`, false},
+		{"canonical hold", `["hold:mayor"]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeBD := `#!/bin/sh
+set -eu
+case "$1" in
+  ready)
+    case "$*" in
+      *"--metadata-field gc.routed_to=hello-world/worker"*)
+        printf '%s' '[{"id":"row","status":"open","labels":` + tc.labels + `}]'
+        ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  *) printf '[]' ;;
+esac
+`
+			wantIDs, wantCount := []string(nil), "0"
+			if tc.served {
+				wantIDs, wantCount = []string{"row"}, "1"
+			}
+
+			work := strings.TrimSpace(runShellWithFakeBd(t, a.EffectiveWorkQuery(), map[string]string{
+				"GC_SESSION_ORIGIN": "ephemeral",
+			}, fakeBD))
+			var gotIDs []string
+			if work != "" {
+				gotIDs = workQueryOutputIDOrder(t, work)
+			}
+			if !slices.Equal(gotIDs, wantIDs) {
+				t.Errorf("EffectiveWorkQuery() ids = %v, want %v for labels %s", gotIDs, wantIDs, tc.labels)
+			}
+
+			demand := strings.TrimSpace(runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, fakeBD))
+			if demand != wantCount {
+				t.Errorf("EffectivePoolDemandQuery() count = %q, want %q for labels %s", demand, wantCount, tc.labels)
+			}
+		})
+	}
+}
+
 func TestRouteScopedPoolDemandShellsExcludeHumanLabel(t *testing.T) {
 	want := `--exclude-label "human"`
 	for name, got := range map[string]string{

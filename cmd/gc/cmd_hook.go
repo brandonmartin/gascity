@@ -1869,8 +1869,10 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // through (the claim, the cross-store federation, and plain `gc hook`).
 //
 // Every label in the reserved hold: namespace matches, with case and surrounding
-// whitespace ignored. Unrelated labels (`holding-pattern`, `hold`,
-// `mpr-human-hold`, `needs-mayor`) remain ordinary work.
+// whitespace ignored, except the released hold:cleared that `bd set-state <id>
+// hold=cleared` leaves behind (beadmeta.DispatchHoldReleasedLabels). Unrelated
+// labels (`holding-pattern`, `hold`, `mpr-human-hold`, `needs-mayor`) remain
+// ordinary work.
 //
 // An absent or null labels field means "no labels", never "unknown" — bd emits
 // labels:null for an unlabeled bead — so this fails open exactly like the

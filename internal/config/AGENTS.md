@@ -73,5 +73,10 @@ durable and ephemeral work.
 - **Dispatch holds use the reserved `hold:` namespace.** `hold:mayor` and
   `hold:external` are the only supported values, but route-scoped demand,
   hook serving, and route recovery must treat any `hold:<reason>` label as
-  parked. Keep the native predicates and generated query filters aligned;
-  assigned ownership accounting remains hold-transparent.
+  parked, except the released labels (`beadmeta.DispatchHoldReleasedLabels`:
+  `hold:cleared`, which `bd set-state <id> hold=cleared` leaves behind and
+  cannot remove). A hold added beside a released label still parks the bead.
+  Keep the native predicates (`beadmeta.HasDispatchHold`), the generated jq
+  filters and the serve rules' `ExcludeLabelPrefixExceptions` aligned;
+  `TestGoPredicateAndGeneratedQueryAgreeRowByRow` pins the rendered program.
+  Assigned ownership accounting remains hold-transparent.

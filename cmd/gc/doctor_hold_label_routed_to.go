@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -11,15 +12,19 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// holdLabelExternalValue is the one hold:<value> value that never implies a
-// routing gap: it names a human/out-of-system dependency, not an agent.
-const holdLabelExternalValue = "external"
-
-// holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
-// gc.routed_to metadata is missing or does not match <value>. gc.routed_to is
-// the sole persisted routing key (ga-eld2x); a hold:<value> label with no
-// matching gc.routed_to has silently drifted from its intended route.
-// --fix backfills gc.routed_to from the label value.
+// holdLabelRoutedToCheck detects beads carrying a canonical hold:<value> label
+// whose gc.routed_to metadata is missing or does not match <value>.
+// gc.routed_to is the sole persisted routing key (ga-eld2x); a canonical
+// hold:<value> label with no matching gc.routed_to has silently drifted from
+// its intended route. --fix backfills gc.routed_to from the label value.
+//
+// Only the canonical values (beadmeta.DispatchHoldLabels) name a route target,
+// and hold:external is excluded because it names a human/out-of-system
+// dependency, not an agent. Every other label in the hold: namespace parks a
+// bead (beadmeta.HasDispatchHold) but its suffix is not a routing value, so
+// the check neither flags nor backfills it: a typo'd suffix must not become a
+// route, and hold:cleared, which `bd set-state <id> hold=cleared` leaves
+// behind when a hold is released, must not replace a real route (ga-azdbu).
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -36,19 +41,16 @@ func (c *holdLabelRoutedToCheck) CanFix() bool { return true }
 
 func (c *holdLabelRoutedToCheck) WarmupEligible() bool { return false }
 
-// holdLabelValue returns the hold value carried by labels, if any
-// hold:<value> label is present and <value> is not "external".
+// holdLabelValue returns the route target named by the first canonical hold
+// label in labels (beadmeta.DispatchHoldLabels, exact match) other than
+// hold:external. Other labels are skipped, not a stop, so a canonical hold
+// beside a non-canonical or released one is still read.
 func holdLabelValue(labels []string) (string, bool) {
 	for _, l := range labels {
-		val, ok := strings.CutPrefix(l, "hold:")
-		if !ok {
+		if l == beadmeta.HoldExternalLabel || !slices.Contains(beadmeta.DispatchHoldLabels, l) {
 			continue
 		}
-		val = strings.TrimSpace(val)
-		if val == "" || val == holdLabelExternalValue {
-			continue
-		}
-		return val, true
+		return strings.TrimPrefix(l, beadmeta.DispatchHoldLabelPrefix), true
 	}
 	return "", false
 }
@@ -82,12 +84,12 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
 			continue
 		}
-		// hold:<value> carries a dynamic value suffix, so no targeted
-		// label/metadata query is possible; AllowScan is required for a
-		// broad filter (internal/beads/query.go). Status is left unset so the
-		// scan matches every non-closed bead (open, in_progress, blocked,
-		// deferred, ...), not just "open" — an exact Status match would
-		// silently hide hold:<value> drift on any other status (ga-fm2vgd.2).
+		// The hold labels are matched in memory after one broad listing, so
+		// AllowScan is required for a broad filter (internal/beads/query.go).
+		// Status is left unset so the scan matches every non-closed bead
+		// (open, in_progress, blocked, deferred, ...), not just "open" — an
+		// exact Status match would silently hide hold:<value> drift on any
+		// other status (ga-fm2vgd.2).
 		items, err := store.List(beads.ListQuery{AllowScan: true})
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))

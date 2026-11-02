@@ -165,6 +165,40 @@ func agreementRows() []agreementRow {
 			wantServable: false,
 		},
 		{
+			// `bd set-state <id> hold=cleared` releases a hold and leaves
+			// hold:cleared behind (ga-azdbu). The query's hold post-filter
+			// exempts it, so the row is served and demand must count it; a
+			// prefix-only demand predicate would refuse to count work its own
+			// workers will claim.
+			name: "routed bead with a released hold",
+			bead: beads.Bead{
+				ID: "a-18", Status: "open", Type: "task",
+				Labels:   []string{beadmeta.HoldClearedLabel},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
+		},
+		{
+			name: "routed bead with a case-variant released hold",
+			bead: beads.Bead{
+				ID: "a-19", Status: "open", Type: "task",
+				Labels:   []string{" Hold:Cleared "},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
+		},
+		{
+			// A hold added after the release sits beside hold:cleared and still
+			// parks the row.
+			name: "routed bead re-held beside a released hold",
+			bead: beads.Bead{
+				ID: "a-20", Status: "open", Type: "task",
+				Labels:   []string{beadmeta.HoldClearedLabel, beadmeta.HoldMayorLabel},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: false,
+		},
+		{
 			// The discriminating row for a label the worker's query excludes that is
 			// NOT a dispatch hold: bd's native human label, a bead parked for a
 			// person. beadmeta.DispatchHoldLabels names only the two canonical
@@ -643,7 +677,7 @@ func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
 	// query is compared with the sh -c single-quote escaping undone, so the pin
 	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true")) | select(([ (.labels // [])[] | select((if type == "string" then (ascii_downcase | startswith("hold:")) else false end)) ] | length) == 0)] | .[:1]'`
+	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true")) | select(([ (.labels // [])[] | select((if type == "string" then (ascii_downcase | (startswith("hold:") and (IN("hold:cleared") | not))) else false end)) ] | length) == 0)] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}

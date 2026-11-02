@@ -99,6 +99,41 @@ esac
 	}
 }
 
+// TestEphemeralInProgressProbeServesReleasedHoldCandidate pins that a released
+// hold (hold:cleared, left by `bd set-state <id> hold=cleared`, ga-azdbu) does
+// not park an ephemeral candidate, while a hold added beside it still does.
+func TestEphemeralInProgressProbeServesReleasedHoldCandidate(t *testing.T) {
+	requireJQ(t)
+	cases := []struct {
+		name   string
+		labels string
+		served bool
+	}{
+		{"released", `["hold:cleared"]`, true},
+		{"released then re-held", `["hold:cleared","hold:external"]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bdScript := `#!/bin/sh
+case "$1" in
+  query) printf '%s' '[{"id":"wisp-1","status":"in_progress","assignee":"sess-1","labels":` + tc.labels + `}]' ;;
+  *) printf '[]' ;;
+esac
+`
+			script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
+			out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+
+			var rows []map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
+				t.Fatalf("tier output is not a JSON array: %v (output %q)", err, out)
+			}
+			if served := len(rows) == 1 && rows[0]["id"] == "wisp-1"; served != tc.served {
+				t.Fatalf("labels %s: served = %v, want %v (rows %v)", tc.labels, served, tc.served, rows)
+			}
+		})
+	}
+}
+
 // TestEphemeralInProgressProbeServesUnheldCandidate is the load-bearing
 // negative control: non-canonical hold-ish labels must not suppress the
 // re-serve, and a held first row must not shadow an unheld second one — the

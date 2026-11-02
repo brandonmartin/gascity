@@ -1,6 +1,9 @@
 package beadmeta
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // HoldMayorLabel and HoldExternalLabel are the two canonical hold:<value>
 // bd label values (engdocs/contributors/hold-label-conventions.md,
@@ -15,13 +18,27 @@ const (
 	// DispatchHoldLabelPrefix reserves hold:<reason> for work parked until
 	// an agent or condition other than the current worker acts.
 	DispatchHoldLabelPrefix = "hold:"
+	// HoldClearedLabel is the label bd leaves behind when a hold is released:
+	// `bd set-state <id> hold=cleared` replaces the hold: dimension's label with
+	// hold:cleared and cannot remove the dimension (ga-azdbu). It reads "no
+	// hold", so it sits inside the reserved namespace without parking a bead.
+	HoldClearedLabel = "hold:cleared"
 )
+
+// DispatchHoldReleasedLabels lists the exact labels in the reserved hold:
+// namespace that mean the hold was released, so HasDispatchHold and the
+// generated query filters do not treat them as holds. They are not canonical
+// hold values and stay out of DispatchHoldLabels, which bd's exact
+// --exclude-label flags render as holds. A hold added after the release sits
+// beside the released label and still parks the bead.
+var DispatchHoldReleasedLabels = []string{HoldClearedLabel}
 
 // DispatchHoldLabels lists the two canonical hold values understood by bd's
 // exact-match --exclude-label filter. HasDispatchHold also recognizes any
-// label in the reserved hold:<reason> namespace. Two different questions
-// consume the hold predicate, and they answer oppositely — conflating them is
-// what produced both ga-5736js and gas-kg6:
+// label in the reserved hold:<reason> namespace except the released ones
+// (DispatchHoldReleasedLabels). Two different questions consume the hold
+// predicate, and they answer oppositely — conflating them is what produced both
+// ga-5736js and gas-kg6:
 //
 //   - "Is this bead WORK for whoever is asking?" — always no. Route-scoped,
 //     unassigned automatic dispatch (Tier 3 pool-demand queries and the
@@ -61,8 +78,11 @@ var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
 // time (ga-7yfnyv). The assignee-scoped tiers stay transparent to it.
 const HumanLabel = "human"
 
-// HasDispatchHold reports whether labels carry a hold:<reason> label. The
-// prefix comparison is trimmed and case-insensitive. It is the label
+// HasDispatchHold reports whether labels carry a hold:<reason> label other than
+// a released one (DispatchHoldReleasedLabels, today hold:cleared, which
+// `bd set-state <id> hold=cleared` leaves behind). A released label does not
+// shadow a live hold beside it, on either side. The prefix and released-label
+// comparisons are trimmed and case-insensitive. It is the label
 // comparison the hold-aware WORK-SERVING decisions answer with: the
 // hook's serve filter (isHeldHookCandidate), continuation-group pre-assignment
 // (preassignHookContinuationGroup), and three controller gates over OPEN rows —
@@ -88,8 +108,8 @@ const HumanLabel = "human"
 // "Hold:External" row is stripped by the hook, so it is not work either.
 func HasDispatchHold(labels []string) bool {
 	for _, label := range labels {
-		label = strings.TrimSpace(label)
-		if strings.HasPrefix(strings.ToLower(label), DispatchHoldLabelPrefix) {
+		label = strings.ToLower(strings.TrimSpace(label))
+		if strings.HasPrefix(label, DispatchHoldLabelPrefix) && !slices.Contains(DispatchHoldReleasedLabels, label) {
 			return true
 		}
 	}

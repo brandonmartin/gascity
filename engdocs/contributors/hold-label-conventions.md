@@ -70,6 +70,22 @@ with `hold:` as parked, including an unsupported or legacy suffix. That keeps a
 stray label in the reserved namespace from being counted or handed to a worker
 as actionable work; it does not make that suffix a third canonical hold value.
 
+One label in the namespace is not a hold: `hold:cleared`. `bd set-state <id>
+hold=cleared` releases a hold, but it replaces the `hold:` dimension's label
+instead of removing it, and `bd set-state` rejects an empty value, so a released
+bead keeps `hold:cleared`. Gas City's filters
+(`beadmeta.DispatchHoldReleasedLabels`) read that exact label, ignoring case and
+surrounding space, as no hold, so a released bead is served again. A hold added
+afterwards sits beside it and parks the bead as usual. Never use `hold:cleared`
+to pause a bead.
+
+`gc doctor`'s `hold-label-routed-to` check compares `gc.routed_to` with the
+label's value only for the canonical values that name an actor (today
+`hold:mayor`; `hold:external` names a condition, not a route). A non-canonical
+suffix such as `hold:typo` parks a bead without naming a route, so the check
+neither flags it nor backfills a route from it, and `hold:cleared` never
+replaces a bead's real route.
+
 ## Retired labels
 
 These labels are legacy. If you see one on a live bead, treat it as drift
@@ -132,7 +148,8 @@ Restoring a lost pool route is a **do** decision too. A pack that parks
 finished work on a hold usually clears its `gc.routed_to` at the same time,
 because the next actor is not the pool that worked it. The controller's
 route-restore lanes (the detached-orphan sweep and `gc.run_target` route
-recovery) leave a bead with any `hold:` label unrouted. Once the hold lifts,
+recovery) leave a bead with any `hold:` label other than `hold:cleared`
+unrouted. Once the hold lifts,
 the bead is recoverable again. A pack that parks with a label outside the
 `hold:` namespace should also set a bd status (`blocked` or `deferred`) or a
 canonical hold, or the controller will treat the bead as detached and restore

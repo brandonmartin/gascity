@@ -170,20 +170,31 @@ func labelMatchCondsJQ(labels []string) string {
 	return strings.Join(conds, " or ")
 }
 
-// labelPrefixMatchCondsJQ renders a case-insensitive test for any prefix. bd's
-// --exclude-label accepts exact values only, so the hold namespace needs this
-// post-filter in generated query paths.
-func labelPrefixMatchCondsJQ(prefixes []string) string {
+// labelPrefixMatchCondsJQ renders a case-insensitive test for any prefix, except
+// for the exact labels in exceptions (also case-insensitive), which sit inside a
+// prefix's namespace without belonging to it. bd's --exclude-label accepts exact
+// values only, so the hold namespace needs this post-filter in generated query
+// paths.
+func labelPrefixMatchCondsJQ(prefixes, exceptions []string) string {
+	except := ""
+	if len(exceptions) > 0 {
+		quoted := make([]string, len(exceptions))
+		for i, label := range exceptions {
+			quoted[i] = strconv.Quote(strings.ToLower(label))
+		}
+		except = ` and (IN(` + strings.Join(quoted, ", ") + `) | not)`
+	}
 	conds := make([]string, len(prefixes))
 	for i, prefix := range prefixes {
-		conds[i] = `(if type == "string" then (ascii_downcase | startswith(` + strconv.Quote(strings.ToLower(prefix)) + `)) else false end)`
+		conds[i] = `(if type == "string" then (ascii_downcase | (startswith(` + strconv.Quote(strings.ToLower(prefix)) + `)` + except + `)) else false end)`
 	}
 	return strings.Join(conds, " or ")
 }
 
-// holdLabelMatchCondsJQ recognizes the reserved hold:<reason> namespace.
+// holdLabelMatchCondsJQ recognizes the reserved hold:<reason> namespace, minus
+// the released labels (beadmeta.DispatchHoldReleasedLabels).
 func holdLabelMatchCondsJQ() string {
-	return labelPrefixMatchCondsJQ([]string{beadmeta.DispatchHoldLabelPrefix})
+	return labelPrefixMatchCondsJQ([]string{beadmeta.DispatchHoldLabelPrefix}, beadmeta.DispatchHoldReleasedLabels)
 }
 
 // excludeLabelsJQClause returns a jq select(...) clause dropping beads that
@@ -196,26 +207,34 @@ func excludeLabelsJQClause(labels []string) string {
 }
 
 // excludeLabelPrefixesJQClause drops rows carrying any case-insensitive label
-// prefix. It covers open-ended pack hold reasons that cannot be named with bd's
-// exact --exclude-label flags.
-func excludeLabelPrefixesJQClause(prefixes []string) string {
+// prefix, except the exact labels in exceptions. It covers open-ended pack hold
+// reasons that cannot be named with bd's exact --exclude-label flags.
+func excludeLabelPrefixesJQClause(prefixes, exceptions []string) string {
 	if len(prefixes) == 0 {
 		return ""
 	}
-	return ` | select(([ (.labels // [])[] | select(` + labelPrefixMatchCondsJQ(prefixes) + `) ] | length) == 0)`
+	return ` | select(([ (.labels // [])[] | select(` + labelPrefixMatchCondsJQ(prefixes, exceptions) + `) ] | length) == 0)`
 }
 
-// excludeHoldLabelsJQClause excludes the reserved hold namespace in the
-// assignee-scoped in_progress work-serving probes. They must drop a held bead
-// and nothing else, so they never take the pool-demand serve rules' wider label
-// set.
+// excludeHoldLabelsJQClause excludes the reserved hold namespace, minus the
+// released labels, in the assignee-scoped in_progress work-serving probes. They
+// must drop a held bead and nothing else, so they never take the pool-demand
+// serve rules' wider label set.
 func excludeHoldLabelsJQClause() string {
-	return excludeLabelPrefixesJQClause([]string{beadmeta.DispatchHoldLabelPrefix})
+	return excludeLabelPrefixesJQClause([]string{beadmeta.DispatchHoldLabelPrefix}, beadmeta.DispatchHoldReleasedLabels)
 }
 
-// heldLabelCountJQ counts labels in the reserved hold namespace on the FIRST
-// row of a work-query result. The in_progress serve gate reads it off
-// the candidate row it already holds, so the hold check costs no extra bd call.
+// excludePoolDemandLabelPrefixesJQClause renders the pool-demand serve rules'
+// prefix exclusions, exceptions included, as a jq select clause.
+func excludePoolDemandLabelPrefixesJQClause() string {
+	rules := PoolDemandServeRulesForQuery()
+	return excludeLabelPrefixesJQClause(rules.ExcludeLabelPrefixes, rules.ExcludeLabelPrefixExceptions)
+}
+
+// heldLabelCountJQ counts labels in the reserved hold namespace, minus the
+// released labels, on the FIRST row of a work-query result. The in_progress
+// serve gate reads it off the candidate row it already holds, so the hold check
+// costs no extra bd call.
 // `.[0].labels // []` absorbs both an absent row and bd's null-valued labels
 // field; a non-JSON payload makes jq fail and the gate falls back to 0, which is
 // the fail-open behavior TestInProgressTierServesUnparseableHeldCandidateFailOpen
@@ -282,11 +301,12 @@ func excludeClaimantsFilterScript(shellVar string) string {
 // payload is left alone so the existing hook decoder retains its fail-open
 // behavior.
 func excludeLabelPrefixesFilterScript(shellVar string) string {
-	prefixes := PoolDemandServeRulesForQuery().ExcludeLabelPrefixes
+	rules := PoolDemandServeRulesForQuery()
+	prefixes := rules.ExcludeLabelPrefixes
 	if len(prefixes) == 0 {
 		return ""
 	}
-	pred := labelPrefixMatchCondsJQ(prefixes)
+	pred := labelPrefixMatchCondsJQ(prefixes, rules.ExcludeLabelPrefixExceptions)
 	rowHasPrefix := `any((.labels // [])[]; ` + pred + `)`
 	filter := `if type == "array" and any(.[]; ` + rowHasPrefix + `) then [.[] | select((` + rowHasPrefix + `) | not)] else empty end`
 	v := `"$` + shellVar + `"`
@@ -321,6 +341,11 @@ type PoolDemandServeRules struct {
 	// ExcludeLabelPrefixes are case-insensitive post-filters for label namespaces
 	// that bd's exact-match --exclude-label flags cannot express.
 	ExcludeLabelPrefixes []string
+	// ExcludeLabelPrefixExceptions are exact labels inside an
+	// ExcludeLabelPrefixes namespace that the post-filters do not exclude:
+	// today the released hold label, which `bd set-state <id> hold=cleared`
+	// leaves behind. Matched case-insensitively, like the prefixes.
+	ExcludeLabelPrefixExceptions []string
 }
 
 // PoolDemandServeRulesForQuery returns the serving rules of the generated
@@ -332,6 +357,9 @@ func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 		ExcludeTypes:         []string{"epic"},
 		ExcludeLabels:        append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
 		ExcludeLabelPrefixes: []string{beadmeta.DispatchHoldLabelPrefix},
+		// A released hold is served work: bd's exact --exclude-label flags
+		// above never named it, and the prefix post-filters must not park it.
+		ExcludeLabelPrefixExceptions: append([]string(nil), beadmeta.DispatchHoldReleasedLabels...),
 	}
 }
 
@@ -380,7 +408,7 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 
 func poolDemandMigrationFilterJQ(limit int) string {
 	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))` +
-		excludeLabelPrefixesJQClause(PoolDemandServeRulesForQuery().ExcludeLabelPrefixes) + `]`
+		excludePoolDemandLabelPrefixesJQClause() + `]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -444,7 +472,7 @@ func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) stri
 	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
 	if excludeServeLabels {
 		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
-		body += excludeLabelPrefixesJQClause(PoolDemandServeRulesForQuery().ExcludeLabelPrefixes)
+		body += excludePoolDemandLabelPrefixesJQClause()
 	}
 	return body
 }

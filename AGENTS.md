@@ -306,8 +306,9 @@ targets, and a green `go test` is not evidence a change passes CI.
   those exist only for files already there: `touch` each new golden first,
   or the generator writes it under `bazel-out` and the run still passes.
 
-- **Where it runs.** Agent hosts' `~/.bazelrc` names rbe-west's executor, so
-  plain `bazel test` executes remotely. Contributors use
+- **Where it runs.** If `~/.bazelrc` and `.bazelrc.local` name no
+  `remote_executor`, Bazel runs on the host: an agent there never runs
+  `make check` or `bazel test //...` (TESTING.md). Contributors use
   `--config=fork-cache` (anonymous read-only cache, local execution of
   misses); maintainers with an rbe-west client certificate use
   `--config=remote-exec` (ask your human before adding either to
@@ -337,7 +338,7 @@ targets, and a green `go test` is not evidence a change passes CI.
 Before considering any task complete:
 
 - `make check` passes (`bazel test //...` plus the shell guards; nogo is
-  lint and vet)
+  lint and vet), or `make check-affected` per "Where it runs"
 - Acceptance or integration behavior changed: the matching `--config` tier
   above passes
 - `.githooks/pre-commit` is active locally (verify with `make check-hooks`)

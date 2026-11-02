@@ -558,3 +558,19 @@ func TestValidateDurationsBadChatSessionsGracePeriod(t *testing.T) {
 		t.Errorf("warning should mention bad value: %s", warnings[0])
 	}
 }
+
+func TestValidateDurationsStartPrepareBudget(t *testing.T) {
+	for _, raw := range []string{"0s", "-1s", "broken"} {
+		cfg := &City{Session: SessionConfig{StartPrepareBudget: raw}}
+		warnings := ValidateDurations(cfg, "city.toml")
+		if !strings.Contains(strings.Join(warnings, "\n"), "start_prepare_budget") {
+			t.Errorf("budget %q: missing validation warning: %v", raw, warnings)
+		}
+	}
+	cfg := &City{Session: SessionConfig{StartPrepareBudget: "2m"}}
+	for _, warning := range ValidateDurations(cfg, "city.toml") {
+		if strings.Contains(warning, "start_prepare_budget") {
+			t.Errorf("valid budget: %s", warning)
+		}
+	}
+}

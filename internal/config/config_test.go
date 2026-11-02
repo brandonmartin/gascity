@@ -6326,6 +6326,7 @@ name = "test"
 
 [session]
 setup_timeout = "20s"
+start_prepare_budget = "2m"
 nudge_ready_timeout = "15s"
 nudge_retry_interval = "1s"
 nudge_lock_timeout = "45s"
@@ -6341,6 +6342,9 @@ name = "a"
 	}
 	if got := cfg.Session.SetupTimeoutDuration(); got != 20*time.Second {
 		t.Errorf("SetupTimeoutDuration() = %v, want 20s", got)
+	}
+	if got := cfg.Session.StartPrepareBudgetDuration(); got != 2*time.Minute {
+		t.Errorf("StartPrepareBudgetDuration() = %v, want 2m", got)
 	}
 	if got := cfg.Session.NudgeReadyTimeoutDuration(); got != 15*time.Second {
 		t.Errorf("NudgeReadyTimeoutDuration() = %v, want 15s", got)
@@ -8656,5 +8660,25 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 	if DefaultDoltReadTimeoutMillis*2 > DefaultDoltWriteTimeoutMillis {
 		t.Fatalf("DefaultDoltReadTimeoutMillis (%d) leaves less than half of DefaultDoltWriteTimeoutMillis (%d) as headroom for #3101's outer wall-clock deadline to catch a stuck connection pile-up first",
 			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
+	}
+}
+
+func TestSessionStartPrepareBudgetDuration(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", time.Minute},
+		{"3m", 3 * time.Minute},
+		{"0s", time.Minute},
+		{"-1s", time.Minute},
+		{"invalid", time.Minute},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			s := SessionConfig{StartPrepareBudget: tc.raw}
+			if got := s.StartPrepareBudgetDuration(); got != tc.want {
+				t.Errorf("StartPrepareBudgetDuration() = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }

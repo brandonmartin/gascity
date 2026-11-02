@@ -2918,6 +2918,11 @@
           "type": "string",
           "description": "SetupMaxTimeout enables an activity-aware budget for session setup and\npre_start commands. When set (e.g. \"10m\"), a setup command is no longer\nkilled after setup_timeout of wall clock; instead setup_timeout bounds\nhow long it may run without producing output (idle budget) and\nsetup_max_timeout bounds its total runtime regardless of output (the\nrunaway ceiling). A slow but healthy command — a large worktree checkout\nstreaming progress — survives, while a hung one still dies after\nsetup_timeout of silence. Duration string. Empty (the default) keeps\nthe fixed setup_timeout deadline."
         },
+        "start_prepare_budget": {
+          "type": "string",
+          "description": "StartPrepareBudget limits cumulative start preparation in each reconcile\npass. A larger budget can start more sessions per pass, but delays other\nreconciliation work. Duration string; defaults to \"60s\".",
+          "default": "60s"
+        },
         "nudge_ready_timeout": {
           "type": "string",
           "description": "NudgeReadyTimeout is how long to wait for the agent to be ready before\nsending nudge text. Duration string. Defaults to \"10s\".",

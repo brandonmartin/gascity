@@ -39,11 +39,6 @@ const (
 	// preparation stays chunked so flapping dependencies are observed between batches.
 	defaultStartDependencyRecheckBatchSize = 3
 
-	// defaultStartPrepareBudget bounds the time one planner call spends in
-	// prepareStartCandidateForCity, summed over its candidates. The controller
-	// reconcile sites opt in with withPrepareBudget.
-	defaultStartPrepareBudget = 60 * time.Second
-
 	// Stops and interrupts are teardown paths, so their parallelism is not
 	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3

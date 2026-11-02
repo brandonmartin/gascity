@@ -1715,6 +1715,10 @@ type SessionConfig struct {
 	// setup_timeout of silence. Duration string. Empty (the default) keeps
 	// the fixed setup_timeout deadline.
 	SetupMaxTimeout string `toml:"setup_max_timeout,omitempty"`
+	// StartPrepareBudget limits cumulative start preparation in each reconcile
+	// pass. A larger budget can start more sessions per pass, but delays other
+	// reconciliation work. Duration string; defaults to "60s".
+	StartPrepareBudget string `toml:"start_prepare_budget,omitempty" jsonschema:"default=60s"`
 	// NudgeReadyTimeout is how long to wait for the agent to be ready before
 	// sending nudge text. Duration string. Defaults to "10s".
 	NudgeReadyTimeout string `toml:"nudge_ready_timeout,omitempty" jsonschema:"default=10s"`
@@ -1812,6 +1816,12 @@ func (s *SessionConfig) SetupTimeoutDuration() time.Duration {
 // setup_timeout deadline — if empty or unparseable.
 func (s *SessionConfig) SetupMaxTimeoutDuration() time.Duration {
 	return durationOr(s.SetupMaxTimeout, 0)
+}
+
+// StartPrepareBudgetDuration returns the per-pass start preparation budget.
+// Empty, invalid, zero, and negative values use the default of one minute.
+func (s *SessionConfig) StartPrepareBudgetDuration() time.Duration {
+	return durationFloorOr(s.StartPrepareBudget, time.Minute, 0)
 }
 
 // NudgeReadyTimeoutDuration returns the nudge ready timeout as a time.Duration.

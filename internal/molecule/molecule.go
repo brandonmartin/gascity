@@ -324,7 +324,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// anything else (closed, or no longer resolvable) falls back to self-root,
 	// exactly like the no-chain case (ga-yov1rr). A live chain
 	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
-	workflowRoot, err := attachWorkflowRoot(store, parentBead)
+	workflowRoot, err := attachWorkflowRoot(store.Get, parentBead)
 	if err != nil {
 		return nil, err
 	}
@@ -886,7 +886,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		if err != nil {
 			return nil, fmt.Errorf("attach bead %s: %w", opts.ExclusionsFrom, err)
 		}
-		root, err := attachWorkflowRoot(store, source)
+		root, err := attachWorkflowRoot(store.Get, source)
 		if err != nil {
 			return nil, err
 		}
@@ -1408,13 +1408,13 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 }
 
 // attachWorkflowRoot follows the parent's container keys, ignoring missing or
-// closed roots.
-func attachWorkflowRoot(store beads.Store, parent beads.Bead) (beads.Bead, error) {
+// closed roots. get reads one bead by ID from the store being attached to.
+func attachWorkflowRoot(get func(id string) (beads.Bead, error), parent beads.Bead) (beads.Bead, error) {
 	rootID := beadmeta.ResolveNestingRootID(parent.Metadata, parent.ID)
 	if rootID == parent.ID {
 		return parent, nil
 	}
-	root, err := store.Get(rootID)
+	root, err := get(rootID)
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return beads.Bead{}, fmt.Errorf("loading workflow root %s for claimant exclusions: %w", rootID, err)
 	}

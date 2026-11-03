@@ -1044,7 +1044,7 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 	if cfg != nil {
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), effectiveTimeout(a, maxTimeout))
+	ctx, cancel := withOrderTimeout(context.Background(), effectiveTimeout(a, maxTimeout))
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	run, err := front.CreateRun(scoped, orders.RunOpts{Deadline: deadline})

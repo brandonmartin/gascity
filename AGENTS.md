@@ -310,7 +310,7 @@ targets, and a green `go test` is not evidence a change passes CI.
   or the generator writes it under `bazel-out` and the run still passes.
 
 - **Where it runs.** With no `remote_executor` in `~/.bazelrc` or
-  `.bazelrc.local`, Bazel runs locally: agents there never run
+  `.bazelrc.local`, Bazel runs locally: agents never run
   `make check` or `bazel test //...` (TESTING.md). Contributors use
   `--config=fork-cache`; maintainers with an rbe-west certificate use
   `--config=remote-exec` (ask your human before adding either to

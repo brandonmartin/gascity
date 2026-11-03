@@ -1065,6 +1065,9 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 		return beads.Bead{}, err
 	}
 	cityRoot := filepath.Clean(cityPath)
+	openStore := byIDStoreOpener(cfg, cityPath, depID, func(scopeRoot string) (beads.Store, error) {
+		return openStoreAtForCity(scopeRoot, cityPath)
+	})
 	for _, scopeRoot := range convoyStoreCandidates(cfg, cityPath, depID) {
 		scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 		if scopeRoot == cityRoot && cityStore != nil {
@@ -1077,8 +1080,11 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 			}
 			continue
 		}
-		scopeStore, err := openStoreAtForCity(scopeRoot, cityPath)
+		scopeStore, err := openStore(scopeRoot)
 		if err != nil {
+			continue
+		}
+		if scopeStore == nil {
 			continue
 		}
 		dep, err := scopeStore.Get(depID)

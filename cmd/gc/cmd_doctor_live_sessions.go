@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/session"
@@ -15,7 +14,7 @@ func doctorLiveSessionInfos(cityPath string, cfg *config.City) ([]session.Info, 
 	if err != nil {
 		return nil, err
 	}
-	infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
+	infos, err := cliSessionFrontDoor(store, cfg, cityPath).ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		return nil, err
 	}

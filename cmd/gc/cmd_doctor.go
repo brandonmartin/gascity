@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -1256,7 +1255,7 @@ func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegi
 		if err != nil {
 			return nil, err
 		}
-		infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
+		infos, err := cliSessionFrontDoor(store, cfg, cityPath).ListLabeledSessionInfosUnfiltered()
 		if err != nil {
 			return nil, err
 		}

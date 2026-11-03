@@ -231,7 +231,7 @@ complexity-update:
 ## check: fast quality gates: the shell guards below plus `make test` (bazel test //...: nogo lint/vet, formatting, generated artifacts, unit tests)
 check: check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
 
-## check-go: the same gates without Bazel: golangci-lint fmt/lint, go vet, go test (offline convenience; CI does not run it)
+## check-go: Go-native gates; LINT_AFFECTED_BASE=<ref> opts only lint into changed packages + transitive importers (default: full; fmt, vet and tests stay full)
 check-go: fmt-check lint-golangci vet-go check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test-go
 
 ## check-affected: pre-flight scoped to the diff against AFFECTED_BASE: check-go's shell guards, nogo over the changed and importing packages, go test over the packages the diff can affect; runs check-go when the diff touches build configuration
@@ -378,7 +378,8 @@ GOLANGCI_LINT_CACHE ?= $(CURDIR)/.cache/golangci-lint
 LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)"
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
-LINT_CACHE_RUNNER := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lint-with-cache
+LINT_AFFECTED_BASE ?=
+LINT_SCOPE_RUNNER := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/affected-preflight
 
 # Lint and vet run as nogo (//tools/nogo): go vet's analyzers plus the
 # linters .golangci.yml enables, validated beside every Go compile, so
@@ -448,9 +449,9 @@ vet: lint
 ## lint-affected, lint-full: aliases of lint, kept for gate formulas (Bazel re-analyzes only packages whose inputs changed)
 lint-affected lint-full: lint
 
-## lint-golangci: golangci-lint outside Bazel, for hosts nogo does not cover (macOS jobs: darwin-only files)
+## lint-golangci: cached golangci-lint outside Bazel; optional LINT_AFFECTED_BASE=<ref> scopes lint with full fallback on config/tool/selection changes
 lint-golangci: $(GOLANGCI_LINT)
-	$(LINT_ENV) python3 "$(LINT_CACHE_RUNNER)" "$(GOLANGCI_LINT)" run $(LINT_FLAGS) ./...
+	$(LINT_ENV) LINT_AFFECTED_BASE="$(LINT_AFFECTED_BASE)" python3 "$(LINT_SCOPE_RUNNER)" lint "$(GOLANGCI_LINT)" $(LINT_FLAGS)
 
 ## vet-go: plain `go vet` outside Bazel, for hosts nogo does not cover (macOS jobs)
 vet-go:

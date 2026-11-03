@@ -36,6 +36,12 @@ outside every package `go list` reports runs the full `make check-go`, and so
 does any step of the selection that cannot complete. An untracked path that
 Bazel does not declare is skipped only as a Bazel reader candidate; other
 selection failures still widen the check.
+
+`lint <golangci-lint> [flags...]` is the independent lint-only entry point.
+LINT_AFFECTED_BASE opts it into a committed base...HEAD diff and transitive
+importers, using the same package/embed discovery. Unset, tooling changes,
+custom flags, dirty checkouts and selection failures run full lint. Every
+executed lint goes through lint-with-cache.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 FULL_CHECK_NAMES = frozenset(
     {
@@ -162,7 +169,7 @@ def int_setting(name: str, default: int) -> int:
     return value
 
 
-def changed_paths(merge_base: str) -> list[tuple[str, str]]:
+def changed_paths(merge_base: str, end_ref: str = "") -> list[tuple[str, str]]:
     output = command_output(
         [
             "git",
@@ -172,6 +179,7 @@ def changed_paths(merge_base: str) -> list[tuple[str, str]]:
             "--no-renames",
             "--diff-filter=ACDMRT",
             merge_base,
+            *([end_ref] if end_ref else []),
             "--",
         ]
     )
@@ -184,7 +192,9 @@ def changed_paths(merge_base: str) -> list[tuple[str, str]]:
         os.fsdecode(fields[index + 1]): os.fsdecode(fields[index])
         for index in range(0, len(fields), 2)
     }
-    untracked = command_output(["git", "ls-files", "--others", "--exclude-standard", "-z", "--"])
+    untracked = b"" if end_ref else command_output(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--"]
+    )
     for path in untracked.split(b"\0"):
         if path:
             records.setdefault(os.fsdecode(path), "?")
@@ -194,9 +204,11 @@ def changed_paths(merge_base: str) -> list[tuple[str, str]]:
     return sorted((status, path) for path, status in records.items())
 
 
-def load_packages() -> dict[str, Package]:
+def load_packages(strict: bool = False) -> dict[str, Package]:
     go = os.environ.get("GO", "go")
-    output = command_output([go, "list", "-e", f"-json={GO_LIST_FIELDS}", "./..."])
+    output = command_output(
+        [go, "list", *([] if strict else ["-e"]), f"-json={GO_LIST_FIELDS}", "./..."]
+    )
     root = os.getcwd()
     decoder = json.JSONDecoder()
     text = os.fsdecode(output)
@@ -551,9 +563,90 @@ def run(plan: Plan) -> int:
     return 0
 
 
+def lint_packages(records: list[tuple[str, str]], packages: dict[str, Package]) -> list[str]:
+    """Select touched packages and all transitive production/test importers."""
+    touched: set[str] = set()
+    for _, path in records:
+        directory = parent_dir(path)
+        # Native source and headers can change cgo/assembler analysis too.
+        source = path.endswith((".go", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp",
+                                ".m", ".mm", ".s", ".S", ".sx", ".f", ".F", ".for", ".f90", ".syso"))
+        if source and not is_go_ignored(path):
+            if directory not in packages:
+                raise FullCheck(f"{path} is outside every current Go package")
+            touched.add(directory)
+        for pkg in packages.values():
+            if path in pkg.embeds:
+                touched.add(pkg.dir)
+
+    importers: dict[str, set[str]] = {}
+    for pkg in packages.values():
+        for dependency in pkg.imports:
+            importers.setdefault(dependency, set()).add(pkg.dir)
+    pending = list(touched)
+    while pending:
+        directory = pending.pop()
+        for importer in importers.get(packages[directory].import_path, ()):
+            if importer not in touched:
+                touched.add(importer)
+                pending.append(importer)
+    return sorted(go_test_arg(directory) for directory in touched)
+
+
+def run_lint(args: list[str]) -> int:
+    """Keep full lint as the default and the fallback for any selection error."""
+    base = os.environ.get("LINT_AFFECTED_BASE", "")
+    packages = None
+    selected = ["./..."]
+    reason = "LINT_AFFECTED_BASE is unset"
+    try:
+        if base:
+            top = os.fsdecode(command_output(["git", "rev-parse", "--show-toplevel"])).strip()
+            os.chdir(top)
+            merge_base = os.fsdecode(command_output(["git", "merge-base", base, "HEAD"])).strip()
+            records = changed_paths(merge_base, "HEAD")
+            if command_output(["git", "status", "--porcelain", "-z", "--untracked-files=all"]):
+                raise FullCheck("checkout differs from the committed candidate")
+            if len(args) > 1:
+                raise FullCheck("custom LINT_FLAGS may change the package graph")
+            for _, path in records:
+                # All Makefile edits conservatively cover tool version and
+                # lint settings, including recipes and indirect assignments.
+                if (Path(path).name in FULL_CHECK_NAMES
+                        or path.endswith(FULL_CHECK_SUFFIXES)
+                        or path.startswith(FULL_CHECK_TREES)
+                        or path in {"scripts/lint-with-cache", "scripts/affected-preflight"}):
+                    raise FullCheck(f"{path} configures lint or its selection")
+            packages = load_packages(strict=True)
+            selected = lint_packages(records, packages)
+            reason = f"changed packages and transitive importers in {base}...HEAD (merge-base {merge_base[:12]})"
+    except (SelectionError, FullCheck, OSError, ValueError, KeyError, TypeError) as error:
+        reason = f"selection requires full lint: {error}"
+        selected = ["./..."]
+
+    if packages is None:
+        try:
+            packages = load_packages(strict=True)
+        except (SelectionError, OSError, ValueError, KeyError, TypeError) as error:
+            # Counting must never prevent the full linter from reporting its
+            # own verdict when graph discovery failed.
+            reason += f"; package count unavailable: {error}"
+    mode = "full" if selected == ["./..."] else "affected" if selected else "skip"
+    count = (len(packages) if packages is not None else "unknown") if mode == "full" else len(selected)
+    if not selected:
+        reason = f"no affected Go packages in {base}...HEAD; lint explicitly skipped"
+    print(f"lint-scope: mode={mode} packages={count} reason={reason}", flush=True)
+    if not selected:
+        return 0
+    runner = str(Path(__file__).resolve().with_name("lint-with-cache"))
+    return run_step([sys.executable, runner, args[0], "run", *args[1:], *selected])
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) >= 3 and argv[1] == "lint":
+        return run_lint(argv[2:])
     if len(argv) != 2 or argv[1] not in {"plan", "run"}:
-        print("usage: affected-preflight plan|run", file=sys.stderr)
+        print("usage: affected-preflight plan|run | lint <golangci-lint> [flags...]", file=sys.stderr)
         return 2
     try:
         top = os.fsdecode(command_output(["git", "rev-parse", "--show-toplevel"])).strip()

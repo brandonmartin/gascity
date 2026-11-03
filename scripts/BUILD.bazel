@@ -9,6 +9,18 @@ exports_files([
 ])
 
 sh_test(
+    name = "affected_lint_test",
+    size = "medium",
+    srcs = ["affected_lint_test.py"],
+    data = [
+        "affected-preflight",
+        "lint-with-cache",
+        "//:Makefile",
+    ],
+    env = {"PYTHONDONTWRITEBYTECODE": "1"},
+)
+
+sh_test(
     name = "lint_cache_test",
     size = "small",
     srcs = ["lint_cache_test.py"],

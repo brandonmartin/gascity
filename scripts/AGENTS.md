@@ -21,6 +21,21 @@ fallback and caller-provided caches. `lint_cache_test.py` owns seed isolation,
 invalidation, status propagation, cleanup and size-budget proofs; the Go
 cache contract tests own the Makefile's fallback wiring.
 
+## Affected lint fails toward the full tree
+
+`LINT_AFFECTED_BASE` opts `lint-golangci` into the committed
+`base...HEAD` scope in `affected-preflight lint`; unset keeps full lint.
+Package/embed discovery is shared with the preflight selector, but lint
+follows transitive importers (production, test and external-test imports)
+without caps. Tool/config/selector changes, custom lint flags, an unknown
+package, or any selection failure run full lint through `lint-with-cache`.
+Every invocation prints mode, reason and package count; an empty affected
+set must explicitly print its skip. Count failures print `unknown` and
+still execute full lint. Formatting, vet, test and build scopes are
+independent of this opt-in. `affected_lint_test.py` uses real Git/Go
+fixtures and analyzer findings; `LINT_SCOPE_TEST_LINTER` repeats those
+proofs with an installed golangci-lint binary.
+
 ## Hermetic Git test config is mirrored
 
 `Makefile`'s `TEST_ENV` and the nested `env -i` wrappers in

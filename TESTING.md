@@ -125,6 +125,33 @@ BUILD file fails the run until `make bazel-sync` writes one.
 `make check-affected AFFECTED_ACTION=plan` prints the selection without
 running it. The selector is `scripts/affected-preflight`.
 
+For a Go-native gate on a committed candidate, opt into affected lint with
+`LINT_AFFECTED_BASE=origin/develop make check-go`. The default remains full
+`golangci-lint run ./...`. This setting changes only `lint-golangci`;
+formatting, vet, tests and build keep their existing scope.
+
+The lint selector shares package and embed discovery with
+`scripts/affected-preflight`. It compares the merge base with the given
+reference to HEAD, selects changed Go/native-source packages and packages
+embedding changed assets, then follows all transitive importers, including
+test and external-test imports. There is no importer cap: changes to an
+exported type or fact can affect callers beyond the first import edge.
+Run this mode from a clean checkout of the candidate.
+
+Lint falls back to the full tree for changes to either `.golangci.yml` or
+`.golangci.yaml`, `go.mod`, `go.sum`, Makefiles (including the lint tool
+version and settings), workspace/build configuration, `tools/`,
+`third_party/`, `scripts/lint-with-cache`, or the selector itself.
+Custom `LINT_FLAGS` also force full lint because they may change the package
+graph. A missing/unreachable base, unreadable diff, deleted package, or
+failed package discovery also selects full lint. A dirty checkout also
+selects full lint so the live package graph cannot narrow a different
+committed candidate. Each run prints
+`lint-scope: mode=<full|affected|skip> packages=<count> reason=<reason>`;
+if discovery fails, the full-lint count is `unknown`. An empty affected set
+prints an explicit skip. Every executed lint still uses `lint-with-cache`
+and propagates the linter's exit status.
+
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`
 with `GC_FAST_UNIT=0`:

@@ -603,7 +603,7 @@ func TestLegacyReuseRunningSeatWithUnusableEvidenceIsSkipped(t *testing.T) {
 	if _, ok := res.desired["worker-1"]; ok {
 		t.Fatalf("seat with unusable evidence stayed desired; stderr=%s", res.stderr)
 	}
-	if !strings.Contains(res.stderr, errPoolTriggerWorktreeEvidence.Error()) || !strings.Contains(res.stderr, "(skipping)") {
+	if !strings.Contains(res.stderr, errPoolTriggerWorktreeEvidence.Error()) || !strings.Contains(res.stderr, "POOL-STARVATION-SKIP") {
 		t.Fatalf("stderr = %q; want the worktree evidence skip", res.stderr)
 	}
 	row := res.row(t)

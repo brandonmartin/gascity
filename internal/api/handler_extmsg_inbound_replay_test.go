@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -102,7 +103,7 @@ func newInboundReplayFixture(t *testing.T) *inboundReplayFixture {
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
 	store := &transcriptFaultStore{Store: fs.cityBeadStore}
-	services := extmsg.NewServices(store)
+	services := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	fs.extmsgSvc = &services
 	fs.adapterReg = extmsg.NewAdapterRegistry()
 

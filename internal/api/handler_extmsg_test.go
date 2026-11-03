@@ -265,7 +265,7 @@ func TestExtmsgNotifyMembersDedupesMembershipsResolvingToSameSession(t *testing.
 		t.Run(name, func(t *testing.T) {
 			fs := newSessionFakeState(t)
 			srv := New(fs)
-			services := extmsg.NewServices(fs.cityBeadStore)
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 			fs.extmsgSvc = &services
 
 			mayor := createTestSession(t, fs.cityBeadStore, fs.sp, "Mayor")
@@ -295,7 +295,7 @@ func TestExtmsgNotifyMembersDedupesMembershipsResolvingToSameSession(t *testing.
 func TestExtmsgNotifyMembersDedupesMaterializedNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -754,7 +754,7 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 func TestHandleExtMsgBindingListIncludesRoomBoundParticipant(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	seatName := "example-rig/seat-1"

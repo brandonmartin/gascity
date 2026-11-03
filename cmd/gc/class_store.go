@@ -586,3 +586,47 @@ func warnFederationBlindOverrides(stderr io.Writer, a *config.Agent, topo config
 			a.QualifiedName(), key, "gc ready")
 	}
 }
+
+// sessionAvailabilityReader answers exact metadata checks from one live open
+// session union plus exact historical runtime-name reservations. Only List is
+// snapshotted: a repair of a damaged session still reaches the real store.
+type sessionAvailabilityReader struct {
+	beads.Store
+	rows *beads.MemStore
+}
+
+func (s sessionAvailabilityReader) List(q beads.ListQuery) ([]beads.Bead, error) {
+	q.TierMode = beads.FederatedReadTier
+	return s.rows.List(q)
+}
+
+// readSessionAvailability must run under the complete identifier lock set. Open
+// sessions share one type+label read across alias, runtime-name and identity
+// checks. Historical sessions reserve only their exact session_name, so query
+// those names instead of scanning unbounded closed-session history per create.
+func readSessionAvailability(store beads.Store, names []string) (beads.Store, error) {
+	rows, err := session.ListAllSessionBeads(store, beads.ListQuery{Live: true, TierMode: beads.FederatedReadTier})
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		reserved, err := store.List(beads.ListQuery{
+			Status: "closed", IncludeClosed: true, Live: true,
+			TierMode: beads.FederatedReadTier, Metadata: map[string]string{"session_name": name},
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range reserved {
+			if session.IsSessionBeadOrRepairable(row) {
+				rows = append(rows, row)
+			}
+		}
+	}
+	return sessionAvailabilityReader{Store: store, rows: beads.NewMemStoreFrom(0, rows, nil)}, nil
+}

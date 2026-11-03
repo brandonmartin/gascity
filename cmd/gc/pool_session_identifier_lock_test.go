@@ -115,6 +115,67 @@ type toggleListFailStore struct {
 	fail bool
 }
 
+type poolAvailabilityReadStore struct {
+	beads.Store
+	metadataReads int
+	closedReads   int
+	closedErr     error
+}
+
+func (s *poolAvailabilityReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if len(q.Metadata) > 0 {
+		s.metadataReads++
+	}
+	if q.IncludeClosed && q.Live {
+		s.closedReads++
+		if s.closedErr != nil {
+			return nil, s.closedErr
+		}
+	}
+	return s.Store.List(q)
+}
+
+func TestGuardedPoolCreateBatchesPrimaryAvailabilityReads(t *testing.T) {
+	for _, name := range []string{"available", "closed reservation", "partial read"} {
+		t.Run(name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			store := &poolAvailabilityReadStore{Store: mem}
+			cfg := workerCity(2)
+			cfg.Agents[0].TmuxAlias = "crew"
+			if name == "closed reservation" {
+				closedNameOwner(t, mem, "crew")
+			}
+			if name == "partial read" {
+				store.closedErr = &beads.PartialResultError{Op: "availability", Err: errors.New("incomplete primary sessions")}
+			}
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now(), store, io.Discard)
+			bp.sessionBeads = newSessionBeadSnapshot(nil)
+			info, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1, nil)
+			if name == "available" {
+				if err != nil || info.ID == "" {
+					t.Fatalf("create = %+v, %v", info, err)
+				}
+			} else if err == nil || info.ID != "" {
+				t.Fatalf("create = %+v, %v; want refusal before write", info, err)
+			}
+			if store.metadataReads != 1 {
+				t.Fatalf("primary exact metadata reads = %d, want only bounded historical-name probes", store.metadataReads)
+			}
+			if name == "available" && store.closedReads != 1 {
+				t.Fatalf("primary historical reads = %d, want one exact runtime-name probe", store.closedReads)
+			}
+			rows, listErr := mem.List(beads.ListQuery{Type: sessionBeadType})
+			wantRows := 0
+			if name == "available" {
+				wantRows = 1
+			}
+			if listErr != nil || len(rows) != wantRows {
+				t.Fatalf("open sessions = %d, %v; want %d", len(rows), listErr, wantRows)
+			}
+		})
+	}
+}
+
 func (s *toggleListFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if s.fail {
 		return nil, errors.New("cross-store list failed")

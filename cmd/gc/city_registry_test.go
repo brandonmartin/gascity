@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,8 +14,10 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
 func TestCityRegistryEmptySnapshot(t *testing.T) {
@@ -295,6 +300,80 @@ func TestCityRegistryCityState(t *testing.T) {
 	if got := reg.CityState("nonexistent"); got != nil {
 		t.Fatalf("CityState for nonexistent = %v, want nil", got)
 	}
+}
+
+type adoptionTestService struct{}
+
+func (adoptionTestService) Status() workspacesvc.Status {
+	return workspacesvc.Status{State: "ready"}
+}
+func (adoptionTestService) Tick(context.Context, time.Time) {}
+func (adoptionTestService) Close() error                    { return nil }
+func (adoptionTestService) HandleHTTP(w http.ResponseWriter, _ *http.Request, _ string) bool {
+	w.WriteHeader(http.StatusOK)
+	return true
+}
+
+func TestCityRegistryServesAPIDuringAdoption(t *testing.T) {
+	reg := newCityRegistry()
+	workspacesvc.RegisterWorkflowContract("test.adoption-api", func(workspacesvc.RuntimeContext, config.Service) (workspacesvc.Instance, error) {
+		return adoptionTestService{}, nil
+	})
+	cfg := &config.City{Workspace: config.Workspace{Name: "adopting"}, Services: []config.Service{{
+		Name: "probe", Kind: "workflow", Workflow: config.ServiceWorkflowConfig{Contract: "test.adoption-api"},
+	}}}
+	cs := &controllerState{cfg: cfg, eventProv: events.NewFake(), cityName: "adopting", cityPath: t.TempDir()}
+	rt := &CityRuntime{cfg: cfg, cityPath: cs.cityPath, cs: cs}
+	services := workspacesvc.NewManager(&serviceRuntime{cr: rt})
+	cs.services = services
+	if err := services.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = services.Close() })
+	mc := &managedCity{name: "adopting", cr: rt, status: "adopting_sessions"}
+	reg.Add("/adopting", mc)
+	if got := reg.CityState("adopting"); got != nil {
+		t.Fatal("API exposed before controller ownership was acquired")
+	}
+	reg.UpdateCallback("/adopting", func(m *managedCity) { m.apiReady = true })
+	if got := reg.CityState("adopting"); got != cs {
+		t.Fatal("owned city API unavailable during adoption")
+	}
+	if city := reg.ListCities()[0]; city.Running || city.Status != "adopting_sessions" {
+		t.Fatalf("API publication prematurely completed startup: %+v", city)
+	}
+	handler := api.NewSupervisorMux(reg, nil, false, "test", "test", time.Now()).WithAnyHostAllowed().Handler()
+	request := func(path string, want int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v0/city/adopting"+path, nil)
+		req.Header.Set("X-GC-Request", "test")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Errorf("GET %s = %d, want %d: %s", path, rec.Code, want, rec.Body.String())
+		}
+	}
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			request("/events", http.StatusOK)
+			request("/svc/probe/identity", http.StatusOK)
+		}()
+	}
+	reg.UpdateCallback("/adopting", func(m *managedCity) { m.status = "starting_agents" })
+	readers.Wait()
+	reg.UpdateCallback("/adopting", func(m *managedCity) { m.started = true })
+	if !reg.ListCities()[0].Running {
+		t.Fatal("full readiness was not published after adoption")
+	}
+	reg.UpdateCallback("/adopting", func(m *managedCity) { m.tombstoned.Store(true) })
+	if got := reg.CityState("adopting"); got != nil {
+		t.Fatal("API still available after tombstone")
+	}
+	request("/events", http.StatusNotFound)
+	request("/svc/probe/identity", http.StatusNotFound)
 }
 
 func TestCityRegistryTombstoned(t *testing.T) {

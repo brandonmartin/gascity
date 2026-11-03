@@ -32,7 +32,8 @@ type CityInfo struct {
 type CityResolver interface {
 	// ListCities returns all managed cities with status info.
 	ListCities() []CityInfo
-	// CityState returns the State for a named city, or nil if not found/not running.
+	// CityState returns the API-ready State for a named city, including during
+	// startup adoption, or nil when the city cannot serve requests.
 	CityState(name string) State
 }
 

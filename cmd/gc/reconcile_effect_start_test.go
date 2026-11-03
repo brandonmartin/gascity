@@ -362,7 +362,7 @@ var stateWriters = map[string]string{
 	"cmd/gc/session_identity.go:desiredSessionIdentity":                       "create's initial metadata",
 	"cmd/gc/session_index.go:sessionIndex.occupancy":                          "read model, not a write",
 	"cmd/gc/session_lifecycle_parallel.go:executePlannedStartsTraced":         "legacy reconciler (trace payload)",
-	"cmd/gc/session_name_lookup.go:createPoolSessionBeadWithIdentifiers":      "create's initial metadata",
+	"cmd/gc/session_name_lookup.go:createPoolSessionBeadWithAvailability":     "create's initial metadata",
 	"cmd/gc/session_reconcile.go:healStatePatchWithRollbackInfo":              "legacy reconciler",
 	"cmd/gc/session_reconcile.go:providerTerminalErrorPatch":                  "patch builder (C5a2's abandon)",
 	"cmd/gc/session_reconciler.go:reconcileSessionBeadsTracedWithNamedDemand": "legacy reconciler",

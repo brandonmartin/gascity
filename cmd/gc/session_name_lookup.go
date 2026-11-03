@@ -330,6 +330,21 @@ func createPoolSessionBeadWithIdentifiers(
 	identity poolSessionCreateIdentity,
 	identifiers poolSessionIdentifiers,
 ) (sessionpkg.Info, error) {
+	return createPoolSessionBeadWithAvailability(store, store, template, cfg, availabilitySnapshot, writebackSnapshot, now, identity, identifiers)
+}
+
+// createPoolSessionBeadWithAvailability separates the availability reader from
+// the writer. A guarded create can supply a fresh, lock-scoped reader while
+// preserving the real writer's ID minting, conditional writes and repair path.
+func createPoolSessionBeadWithAvailability(
+	store, availabilityStore beads.Store,
+	template string,
+	cfg *config.City,
+	availabilitySnapshot, writebackSnapshot *sessionBeadSnapshot,
+	now time.Time,
+	identity poolSessionCreateIdentity,
+	identifiers poolSessionIdentifiers,
+) (sessionpkg.Info, error) {
 	if store == nil {
 		return sessionpkg.Info{}, fmt.Errorf("session store unavailable for pool template %q", template)
 	}
@@ -349,11 +364,11 @@ func createPoolSessionBeadWithIdentifiers(
 				return err
 			}
 		}
-		if err := ensurePoolSessionIdentifiersAvailable(store, cfg, availabilitySnapshot, template, identity, identifiers); err != nil {
+		if err := ensurePoolSessionIdentifiersAvailable(availabilityStore, cfg, availabilitySnapshot, template, identity, identifiers); err != nil {
 			return err
 		}
 		if identifiers.beadScoped {
-			return ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, template, agentName)
+			return ensurePoolIdentityNotHeldByOpenRow(availabilityStore, cfg, nil, template, agentName)
 		}
 		return nil
 	}()

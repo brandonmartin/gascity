@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestSendNudgeSubmitSequenceSendsEachKeyInOrder is a live-tmux integration
@@ -97,10 +99,10 @@ func TestNudgeSessionUsesDeclaredSequenceForProviderFamily(t *testing.T) {
 	}
 }
 
-// TestCodexBusyNudgeDoesNotSendEscape proves a running codex turn is queued
-// with Enter only. cat -v renders Escape as "^[". The fixture prints the
-// busy footer codex shows, then echoes keys, so an Escape-then-Enter submit
-// would leave that mark.
+// TestCodexBusyNudgeDoesNotSendEscape proves a nudge is deferred while a
+// Codex turn is running because its Escape-led submit would interrupt the
+// turn. The fixture prints the busy footer Codex shows, then echoes keys, so
+// the deferred nudge must leave neither its text nor Escape in the pane.
 func TestCodexBusyNudgeDoesNotSendEscape(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -121,14 +123,17 @@ func TestCodexBusyNudgeDoesNotSendEscape(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	waitForPaneText(t, tm, sessionName, "esc to interrupt")
 
-	if err := tm.NudgeSession(sessionName, "queue-this-nudge"); err != nil {
-		t.Fatalf("NudgeSession: %v", err)
+	err := tm.NudgeSession(sessionName, "queue-this-nudge")
+	if !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("NudgeSession error = %v, want runtime.ErrSessionBusy", err)
 	}
-	waitForPaneText(t, tm, sessionName, "queue-this-nudge")
 
 	out, err := tm.CapturePaneAll(sessionName)
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if strings.Contains(out, "queue-this-nudge") {
+		t.Fatalf("busy codex nudge typed its message into the running turn:\n%s", out)
 	}
 	if strings.Contains(out, "^[") {
 		t.Fatalf("busy codex nudge sent Escape (that cancels the turn):\n%s", out)

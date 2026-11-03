@@ -148,7 +148,7 @@ func promptQueryNamedSessionEnv(t *testing.T, cityDir, qualifiedName string) []s
 		"GC_CITY_PATH="+cityDir,
 		"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 	)
-	if port, ok := ensureManagedDoltPortForTest(cityDir); ok {
+	if port, ok := ensureManagedDoltPortForTestUntil(cityDir, time.Time{}); ok {
 		env = appendManagedDoltEndpointEnv(env, port)
 	}
 	return env

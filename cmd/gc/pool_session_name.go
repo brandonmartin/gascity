@@ -275,7 +275,9 @@ func releaseOrphanedPoolAssignments(
 	fallbackProbeCount := 0
 
 	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
-	legacyAwakeCurrentBeads, awakeCurrentBeads := makeAwakeCurrentBeadIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
+	legacyAwakeCurrentBeads, awakeCurrentBeads := makeAwakeCurrentBeadIndex(cityPath, cfg, func() []string {
+		return assignedWorkClaimRefs(cityPath, cfg, store)
+	}, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
 	for _, info := range openSessionInfos {
 		if info.Closed {
@@ -646,7 +648,10 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, leading bea
 // replacement session that continues a drained predecessor's work leaves the
 // claim naming the predecessor (gascity#6362). A session that is not awake
 // keeps its last pointer while it sleeps, so only awake sessions count.
-func makeAwakeCurrentBeadIndex(cityPath string, cfg *config.City, leading beads.Store, openSessionInfos []session.Info, storeRefAware bool) (map[string]struct{}, map[string]map[string]struct{}) {
+//
+// resolveClaimRefs answers the city's assigned-work claim refs; it runs at most
+// once, and only when an awake session names a bead.
+func makeAwakeCurrentBeadIndex(cityPath string, cfg *config.City, resolveClaimRefs func() []string, openSessionInfos []session.Info, storeRefAware bool) (map[string]struct{}, map[string]map[string]struct{}) {
 	legacy := make(map[string]struct{})
 	scoped := make(map[string]map[string]struct{})
 	var claimRefs []string
@@ -666,7 +671,7 @@ func makeAwakeCurrentBeadIndex(cityPath string, cfg *config.City, leading beads.
 		// A property of the city, resolved only when an awake session names
 		// a bead, so the common no-pointer sweep pays nothing for it.
 		if !claimRefsResolved {
-			claimRefs = assignedWorkClaimRefs(cityPath, cfg, leading)
+			claimRefs = resolveClaimRefs()
 			claimRefsResolved = true
 		}
 		for _, storeRef := range openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info) {

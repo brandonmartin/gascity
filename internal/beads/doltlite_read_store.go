@@ -15,6 +15,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // DoltliteReadStore serves hot read paths in-process for bd/doltlite stores.
@@ -1566,11 +1568,10 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 	b.CloseReason = bdCloseReason(b.Status, closeReason)
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)
 	b.UpdatedAt = parseDBTime(updatedRaw).Truncate(time.Second)
-	if strings.TrimSpace(metadataRaw) != "" {
-		if err := json.Unmarshal([]byte(metadataRaw), &b.Metadata); err != nil {
-			return b, fmt.Errorf("reading bead %s metadata: %w", b.ID, err)
-		}
+	if err := checkClaimantExclusionsJSON(metadataRaw); err != nil {
+		return b, fmt.Errorf("reading bead %s metadata: %w", b.ID, err)
 	}
+	b.Metadata = parseMetadata(metadataRaw)
 	b.Ephemeral = ephemeral != 0
 	b.NoHistory = noHistory != 0
 	if b.From == "" {
@@ -1606,6 +1607,41 @@ func parseTimeString(s string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func parseMetadata(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(decoded))
+	for k, v := range decoded {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			out[k] = s
+		} else {
+			out[k] = strings.TrimSpace(string(v))
+		}
+	}
+	return out
+}
+
+// checkClaimantExclusionsJSON fails a row whose gc.exclude_claimants is not a
+// JSON string, as StringMap does for the other stores. Every other value keeps
+// parseMetadata's bd CLI reading.
+func checkClaimantExclusionsJSON(raw string) error {
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil
+	}
+	if v, ok := decoded[beadmeta.ExcludeClaimantsMetadataKey]; ok && (len(v) == 0 || v[0] != '"') {
+		return fmt.Errorf("metadata %s must be a string", beadmeta.ExcludeClaimantsMetadataKey)
+	}
+	return nil
 }
 
 func (s *DoltliteReadStore) tableExists(name string) bool {

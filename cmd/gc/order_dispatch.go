@@ -97,24 +97,27 @@ const (
 	// effective cleanup against per-tick overhead.
 	orderTrackingRetentionWatchdogInterval = 15 * time.Minute
 	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
-	// closed order-tracking beads deleted per watchdog invocation.
-	orderTrackingRetentionWatchdogDeleteBudget = 100
+	// closed order-tracking beads deleted per watchdog invocation. One chunk
+	// keeps the background pass from doing minutes of serial store work.
+	orderTrackingRetentionWatchdogDeleteBudget = orderTrackingRetentionDeleteChunk
 	// orderTrackingSweepRetentionDeleteBudget bounds one
 	// `gc order sweep-tracking` invocation. That command is the unattended
 	// maintenance order, an exec with no timeout of its own, so the
 	// dispatcher kills it at the exec default (300s). An unbounded prune of
 	// a backlog — or of the whole ~25k in-window corpus, listed twice —
 	// sits on that deadline and then never catches up (ga-qqnb2, ga-xd4bb).
-	// 128 leaves room for the stale-close pass and a created-before read
-	// even when each guarded delete is a few store reads, and at the
-	// order's 1m cooldown it drains above the city's ~1k closes/hour once
-	// runs finish instead of timing out. Refusals (live descendants) do
-	// not consume it.
-	orderTrackingSweepRetentionDeleteBudget = 128
+	// Commit one chunk per pass; guarding several chunks still overruns the
+	// deadline on subprocess-backed stores. Refusals (live descendants) do
+	// not consume the deletion allowance.
+	orderTrackingSweepRetentionDeleteBudget = orderTrackingRetentionDeleteChunk
 	// orderTrackingRetentionDeleteChunk is how many guarded ids one batched
 	// delete commits. Chunks keep a kill at the exec deadline from throwing
 	// away a whole run of successful guards.
 	orderTrackingRetentionDeleteChunk = 32
+	// Each leaf guard performs independent backing-store round trips. Bound
+	// concurrency across roots so those round trips overlap without launching
+	// a goroutine (and several bd processes) per backlog row.
+	orderTrackingRetentionGuardWorkers = 4
 )
 
 // defaultOrderTrackingDeleteAfterClose is derived from the canonical config
@@ -158,10 +161,22 @@ type ExecRunner func(ctx context.Context, command, dir string, env []string) ([]
 // the event bus. The tail is where the error is; the full text stays in the log.
 const maxOrderFailureOutputBytes = 2048
 
-// tailForOrderFailureEvent trims output to the last maxOrderFailureOutputBytes,
-// cutting at a line boundary so the excerpt starts mid-nothing.
+// tailForOrderFailureEvent removes routine config notices, then trims output
+// to the last maxOrderFailureOutputBytes at a line boundary. The full redacted
+// output, including the notices, stays in the supervisor log.
 func tailForOrderFailureEvent(output string) string {
-	trimmed := strings.TrimRight(output, "\n")
+	var diagnostic []string
+	for _, line := range strings.Split(output, "\n") {
+		text := strings.TrimSpace(line)
+		if strings.HasPrefix(text, `named_session "`) && strings.Contains(text, "starts a fresh provider session after every drain;") {
+			continue
+		}
+		if strings.Contains(text, ": [session] setup_max_timeout (") && strings.HasSuffix(text, "setup_timeout now bounds idle/silence time between output, not total setup runtime") {
+			continue
+		}
+		diagnostic = append(diagnostic, line)
+	}
+	trimmed := strings.TrimRight(strings.Join(diagnostic, "\n"), "\n")
 	if len(trimmed) <= maxOrderFailureOutputBytes {
 		return trimmed
 	}
@@ -2079,7 +2094,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, redactedOutput)
 				// "exit status 1" alone tells nobody why. The command's own
 				// diagnostic is the answer, so put it on the event too.
-				execErrMsg += ": " + tailForOrderFailureEvent(redactedOutput)
+				if diagnostic := tailForOrderFailureEvent(redactedOutput); diagnostic != "" {
+					execErrMsg += ": " + diagnostic
+				}
 			}
 		}
 	}
@@ -3746,6 +3763,34 @@ func orderTrackingRetentionDeleteGuard(store beads.Store, id string) error {
 	return nil
 }
 
+// orderTrackingRetentionDeleteGuards waits for every read in a bounded group
+// before returning results in candidate order. Deletion stays on the caller's
+// goroutine, after the guards have finished; a failed read never admits a root.
+func orderTrackingRetentionDeleteGuards(ctx context.Context, store beads.Store, ids []string) []error {
+	errs := make([]error, len(ids))
+	jobs := make(chan int, len(ids))
+	for i := range ids {
+		jobs <- i
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	for range min(orderTrackingRetentionGuardWorkers, len(ids)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := ctx.Err(); err != nil {
+					errs[i] = err
+					continue
+				}
+				errs[i] = orderTrackingRetentionDeleteGuard(store, ids[i])
+			}
+		}()
+	}
+	wg.Wait()
+	return errs
+}
+
 // deleteOrderTrackingRetentionIDs deletes ids that have already passed the
 // stranding guard. A BatchDeleter commits the chunk in one call. A wrapper
 // that only forwards the capability returns ErrBatchDeleteUnsupported and
@@ -3804,10 +3849,7 @@ func deleteClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.
 		deleted += n
 		return err
 	}
-	for _, id := range ids {
-		if deleted+len(safe) >= limit {
-			break
-		}
+	for len(ids) > 0 && deleted+len(safe) < limit {
 		if err := ctx.Err(); err != nil {
 			if ferr := flush(); ferr != nil {
 				logRetainedForLiveDescendants(retained)
@@ -3816,19 +3858,27 @@ func deleteClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.
 			logRetainedForLiveDescendants(retained)
 			return deleted, errors.Join(sweepErr, err)
 		}
-		if err := orderTrackingRetentionDeleteGuard(store, id); err != nil {
-			if errors.Is(err, errWorkflowDeleteLiveDescendants) {
-				retained = append(retained, id)
+		// Never guard more roots than the remaining allowance. Refused roots
+		// leave room for another bounded group, preserving the delete budget.
+		n := min(len(ids), orderTrackingRetentionDeleteChunk, limit-deleted-len(safe))
+		group := ids[:n]
+		ids = ids[n:]
+		guardErrs := orderTrackingRetentionDeleteGuards(ctx, store, group)
+		for i, id := range group {
+			if err := guardErrs[i]; err != nil {
+				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+					retained = append(retained, id)
+					continue
+				}
+				sweepErr = errors.Join(sweepErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", id, err))
 				continue
 			}
-			sweepErr = errors.Join(sweepErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", id, err))
-			continue
-		}
-		safe = append(safe, id)
-		if len(safe) >= orderTrackingRetentionDeleteChunk || deleted+len(safe) >= limit {
-			if err := flush(); err != nil {
-				logRetainedForLiveDescendants(retained)
-				return deleted, errors.Join(sweepErr, err)
+			safe = append(safe, id)
+			if len(safe) >= orderTrackingRetentionDeleteChunk || deleted+len(safe) >= limit {
+				if err := flush(); err != nil {
+					logRetainedForLiveDescendants(retained)
+					return deleted, errors.Join(sweepErr, err)
+				}
 			}
 		}
 	}
@@ -3837,7 +3887,7 @@ func deleteClosedOrderTrackingRetentionBounded(ctx context.Context, store beads.
 		return deleted, errors.Join(sweepErr, err)
 	}
 	logRetainedForLiveDescendants(retained)
-	return deleted, sweepErr
+	return deleted, errors.Join(sweepErr, ctx.Err())
 }
 
 func orderTrackingRetentionBucket(run orders.OrderRun, onlyOrders map[string]struct{}) (string, bool) {

@@ -388,6 +388,38 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 	}
 }
 
+// bd's SQL filter serializes its date arguments as RFC3339, at second
+// precision. The backing bound must remain a superset at that precision.
+type secondPrecisionListStore struct{ beads.Store }
+
+func (s secondPrecisionListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	q.CreatedBefore = q.CreatedBefore.Truncate(time.Second)
+	return s.Store.List(q)
+}
+
+func TestStaleOpenRunsBoundsBackingRead(t *testing.T) {
+	cutoff := time.Date(2026, 11, 3, 12, 0, 0, 123, time.UTC)
+	spy := &listSpyStore{Store: secondPrecisionListStore{Store: beads.NewMemStoreFrom(10, []beads.Bead{
+		{ID: "old", Title: "order:old", Status: "open", CreatedAt: cutoff.Add(-time.Hour), Labels: []string{"order-tracking"}},
+		{ID: "boundary", Title: "order:boundary", Status: "open", CreatedAt: cutoff, Labels: []string{"order-tracking"}, Ephemeral: true},
+		{ID: "fresh", Title: "order:fresh", Status: "open", CreatedAt: cutoff.Add(time.Nanosecond), Labels: []string{"order-tracking"}},
+	}, nil)}}
+	runs, err := NewStore(beads.OrdersStore{Store: spy}).StaleOpenRuns(cutoff, cutoff.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 || runs[0].ID != "boundary" || runs[1].ID != "old" {
+		t.Fatalf("stale runs = %+v, want boundary and old", runs)
+	}
+	if len(spy.queries) != 1 {
+		t.Fatalf("List calls = %d, want one age-predicated read", len(spy.queries))
+	}
+	q := spy.queries[0]
+	if q.Label != "order-tracking" || q.IncludeClosed || q.TierMode != beads.TierBoth || !q.CreatedBefore.Equal(cutoff.Add(time.Second)) {
+		t.Fatalf("backing read = %+v, want non-closed tracking in both tiers at or before cutoff", q)
+	}
+}
+
 // TestOrphanedOpenRunsExcludesTriggerEnvFailed proves the pre-dispatch
 // trigger-env-failure markers are excluded from the orphaned sweep read.
 func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {

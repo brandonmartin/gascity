@@ -7,9 +7,45 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func TestBdStoreListWispsCreatedBeforeAgainstRealBd(t *testing.T) {
+	seed, dir := newConditionalIntegrationBdStore(t)
+	b, err := seed.Create(beads.Bead{Title: "tracking", Type: "task", Ephemeral: true, Labels: []string{"order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	realBd := newConditionalIntegrationRunner(t, dir)
+	var queryOut []byte
+	store := beads.NewBdStore(dir, func(d, name string, args ...string) ([]byte, error) {
+		out, err := realBd(d, name, args...)
+		if len(args) > 0 && args[0] == "query" {
+			queryOut = out
+		}
+		return out, err
+	})
+	for _, delta := range []time.Duration{-time.Hour, time.Hour + time.Nanosecond} {
+		cutoff := b.CreatedAt.Add(delta)
+		got, err := store.List(beads.ListQuery{Label: "order-tracking", CreatedBefore: cutoff, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var raw []json.RawMessage
+		if err := json.Unmarshal(queryOut, &raw); err != nil {
+			t.Fatalf("decoding bd query: %v", err)
+		}
+		want := 0
+		if delta > 0 {
+			want = 1
+		}
+		if len(got) != want || len(raw) != want {
+			t.Fatalf("cutoff %s: backing returned %d, client kept %d; want %d at both layers", cutoff, len(raw), len(got), want)
+		}
+	}
+}
 
 // The wisp-leg bd query carries a value outside the bare-token set as a quoted
 // string. This runs the real bd on PATH: for a slash assignee, a slash label

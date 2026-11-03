@@ -3233,7 +3233,7 @@ older than --stale-after so a fresh in-flight order is not interrupted.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
-Each invocation deletes at most 128 expired closed tracking beads so the
+Each invocation deletes at most 32 expired closed tracking beads so the
 maintenance order finishes inside its exec timeout; later invocations drain
 a backlog. Controller startup and the retention watchdog also bound each pass.
 

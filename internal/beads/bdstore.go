@@ -3212,6 +3212,11 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	// every metadata filter, and canApplyWispsServerLimit keeps the limit
 	// client-side whenever one is set.
 	clauses = appendBdQueryMetadataClauses(clauses, serverQuery.Metadata)
+	// Retention must narrow BOTH tier reads before hydration. A client-only
+	// cutoff here fetches every retained wisp even when bd list is bounded.
+	if !serverQuery.CreatedBefore.IsZero() {
+		clauses = append(clauses, "created<"+quoteBdQueryValue(serverQuery.CreatedBefore.UTC().Format(time.RFC3339Nano)))
+	}
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {

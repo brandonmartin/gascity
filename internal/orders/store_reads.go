@@ -148,7 +148,15 @@ func (s *Store) StaleOpenRuns(cutoff, now time.Time) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	// CreatedBefore is strict and bd serializes SQL date bounds at second
+	// precision. Read a one-second superset so the inclusive cutoff survives
+	// that rounding, then apply the exact cutoff below.
+	all, err := s.store.List(beads.ListQuery{
+		Label:         labelOrderTracking,
+		CreatedBefore: cutoff.Add(time.Second),
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	})
 	if err != nil {
 		return nil, err
 	}

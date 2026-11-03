@@ -4809,6 +4809,10 @@ func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T)
 		t.Fatal(err)
 	}
 	queryCmd := firstCommandWithPrefix(calls, "bd list ")
+	wispCmd := firstCommandWithPrefix(calls, "bd query ")
+	if !strings.Contains(wispCmd, `created<"2026-05-02T00:00:00Z"`) {
+		t.Fatalf("wisp query = %q, want CreatedBefore pushed to bd as well as client filtering", wispCmd)
+	}
 	if !strings.Contains(queryCmd, "--limit 0") {
 		t.Fatalf("bd list query = %q, want unlimited --limit 0 before CreatedBefore client filtering", queryCmd)
 	}

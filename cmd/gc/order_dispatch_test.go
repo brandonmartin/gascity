@@ -10764,12 +10764,139 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 // which is where CreatedBefore has to show up (ga-qqnb2).
 type retentionListSpy struct {
 	beads.Store
+	mu      sync.Mutex
 	queries []beads.ListQuery
 }
 
 func (s *retentionListSpy) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
 	s.queries = append(s.queries, query)
+	s.mu.Unlock()
 	return s.Store.List(query)
+}
+
+type retentionGuardBarrierStore struct {
+	beads.Store
+	arrived chan string
+	release <-chan struct{}
+}
+
+func (s *retentionGuardBarrierStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if id := q.Metadata[beadmeta.RootBeadIDMetadataKey]; id != "" {
+		s.arrived <- id
+		<-s.release
+	}
+	return s.Store.List(q)
+}
+
+func (s *retentionGuardBarrierStore) DeleteBatch(ids []string) error {
+	for _, id := range ids {
+		if err := s.Delete(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestRetentionChecksLeavesWithBoundedParallelismBeforeDeleting(t *testing.T) {
+	mem := beads.NewMemStoreFrom(10, []beads.Bead{
+		{ID: "a", Status: "closed"},
+		{ID: "b", Status: "closed"},
+		{ID: "c", Status: "closed"},
+		{ID: "d", Status: "closed"},
+		{ID: "e", Status: "closed"},
+		{ID: "live", Status: "open", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "b"}},
+	}, nil)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	store := &retentionGuardBarrierStore{Store: mem, arrived: make(chan string, 20), release: release}
+	done := make(chan struct{})
+	var deleted int
+	var err error
+	go func() {
+		defer close(done)
+		deleted, err = deleteClosedOrderTrackingRetentionBounded(context.Background(), store, []string{"a", "b", "c", "d", "e"}, 5)
+	}()
+	// Four independent store guards must reach the backing together. Holding
+	// them also proves neither a fifth guard nor a delete outruns the bound.
+	timer := time.NewTimer(hangBudget)
+	defer timer.Stop()
+	for range 4 {
+		select {
+		case <-store.arrived:
+		case <-timer.C:
+			t.Fatal("retention serialized independent leaf checks")
+		}
+	}
+	select {
+	case id := <-store.arrived:
+		t.Fatalf("guard %s exceeded four concurrent backing checks", id)
+	default:
+	}
+	for _, id := range []string{"a", "b", "c", "d", "e"} {
+		if _, err := mem.Get(id); err != nil {
+			t.Fatalf("%s deleted before its guard batch finished: %v", id, err)
+		}
+	}
+	unblock()
+	awaitClose(t, done, "retention guards")
+	if err != nil || deleted != 4 {
+		t.Fatalf("retention = (%d, %v), want four safe leaves deleted", deleted, err)
+	}
+	for _, id := range []string{"b", "live"} {
+		if _, err := mem.Get(id); err != nil {
+			t.Fatalf("live workflow member %s deleted: %v", id, err)
+		}
+	}
+}
+
+func TestRetentionMaintenanceBudgetsCommitOneChunk(t *testing.T) {
+	for _, budget := range []int{orderTrackingRetentionWatchdogDeleteBudget, orderTrackingSweepRetentionDeleteBudget} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) {
+			seed := make([]beads.Bead, 1000)
+			ids := make([]string, len(seed))
+			for i := range seed {
+				ids[i] = fmt.Sprintf("leaf-%04d", i)
+				seed[i] = beads.Bead{ID: ids[i], Status: "closed"}
+			}
+			store := &retentionBatchSpy{MemStore: beads.NewMemStoreFrom(1001, seed, nil)}
+			deleted, err := deleteClosedOrderTrackingRetentionBounded(context.Background(), store, ids, budget)
+			if err != nil || deleted != 32 || len(store.batches) != 1 {
+				t.Fatalf("maintenance pass = (%d, %v), %d commits; want one 32-leaf commit", deleted, err, len(store.batches))
+			}
+		})
+	}
+}
+
+func TestRetentionGuardErrorKeepsTheAffectedRoot(t *testing.T) {
+	mem := beads.NewMemStoreFrom(10, []beads.Bead{{ID: "safe", Status: "closed"}, {ID: "unknown", Status: "closed"}}, nil)
+	failure := errors.New("child tier unavailable")
+	store := parentListFailStore{Store: mem, failParentID: "unknown", err: failure}
+	deleted, err := deleteClosedOrderTrackingRetentionBounded(context.Background(), store, []string{"safe", "unknown"}, 2)
+	if deleted != 1 || !errors.Is(err, failure) {
+		t.Fatalf("retention = (%d, %v), want one deletion and the guard failure", deleted, err)
+	}
+	if _, err := mem.Get("unknown"); err != nil {
+		t.Fatalf("root with failed guard deleted: %v", err)
+	}
+	if _, err := mem.Get("safe"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("safe root survived: %v", err)
+	}
+}
+
+func TestRetentionCanceledBeforeGuardsDeletesNothing(t *testing.T) {
+	mem := beads.NewMemStoreFrom(10, []beads.Bead{{ID: "safe", Status: "closed"}}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	deleted, err := deleteClosedOrderTrackingRetentionBounded(ctx, mem, []string{"safe"}, 1)
+	if deleted != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("retention = (%d, %v), want no deletion and cancellation", deleted, err)
+	}
+	if _, err := mem.Get("safe"); err != nil {
+		t.Fatalf("unguarded root deleted: %v", err)
+	}
 }
 
 // TestSweepClosedOrderTrackingRetentionBoundedSkipsInWindowCorpus is the
@@ -10917,7 +11044,7 @@ func TestSweepClosedOrderTrackingRetentionBoundedBatchesSafeDeletes(t *testing.T
 	deleted, err := sweepClosedOrderTrackingRetentionBounded(context.Background(), spy, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
 		retainLast:       minClosedOrderTrackingRetained,
-	}, nil, orderTrackingSweepRetentionDeleteBudget)
+	}, nil, eligible)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionBounded: %v", err)
 	}
@@ -11261,6 +11388,47 @@ func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
 		if e.Type == events.OrderFailed && len(e.Message) > maxOrderFailureOutputBytes*2 {
 			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
 		}
+	}
+}
+
+func TestOrderDispatchExecFailureEventOmitsRoutineConfigWarnings(t *testing.T) {
+	warning := `named_session "service": mode "always" with wake_mode "fresh" on template "service" starts a fresh provider session after every drain; use only for a deliberate restart-per-cycle actor` + "\n"
+	setupWarning := "/city/city.toml: [session] setup_max_timeout (3m0s) is set: setup_timeout now bounds idle/silence time between output, not total setup runtime\n"
+	for _, diagnostic := range []string{"gc order sweep-tracking: listing closed tracking: database unavailable\n", ""} {
+		t.Run(fmt.Sprintf("diagnostic=%t", diagnostic != ""), func(t *testing.T) {
+			store := beads.NewMemStore()
+			var rec memRecorder
+			m := &memoryOrderDispatcher{
+				aa:      []orders.Order{{Name: "sweep", Trigger: "cooldown", Interval: "1m", Exec: "sweep"}},
+				storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+				execRun: func(context.Context, string, string, []string) ([]byte, error) {
+					return []byte(diagnostic + strings.Repeat(warning, 30) + setupWarning), errors.New("exit status 1")
+				},
+				rec: &rec, stderr: io.Discard, cfg: &config.City{},
+			}
+			m.dispatch(context.Background(), t.TempDir(), time.Now())
+			m.drain(context.Background())
+			var msg string
+			for _, e := range rec.events {
+				if e.Type == events.OrderFailed {
+					msg = e.Message
+				}
+			}
+			want := "exit status 1"
+			if diagnostic != "" {
+				want += ": " + strings.TrimSpace(diagnostic)
+			}
+			if msg != want {
+				t.Fatalf("order.failed = %q, want %q", msg, want)
+			}
+		})
+	}
+}
+
+func TestOrderFailureExcerptKeepsConfigurationErrors(t *testing.T) {
+	const diagnostic = `named_session "service": unknown template "missing"`
+	if got := tailForOrderFailureEvent(diagnostic); got != diagnostic {
+		t.Fatalf("failure excerpt = %q, want configuration error %q", got, diagnostic)
 	}
 }
 

@@ -12,3 +12,13 @@ Session availability storage adapters belong at the per-class composition edge
 (`cmd/gc/class_store.go`); the desired-state builder keeps using session-owned
 name checks. Keep API publication and full city readiness as separate barriers;
 see `internal/api/AGENTS.md`.
+
+Order-tracking retention maintenance commits at most one guarded delete chunk
+per pass. Independent guards run with bounded concurrency; all guard reads finish
+before that chunk is deleted. Preserve live-member, parent-child and dependent
+checks, including the full traversal fallback for non-leaves. Store errors keep
+the affected root intact, and cancellation flushes only roots already guarded.
+
+Failure-event excerpts omit routine startup configuration notices before
+truncation. Keep complete redacted output in the supervisor log and preserve the
+execution error, including the effective timeout, when no diagnostic remains.

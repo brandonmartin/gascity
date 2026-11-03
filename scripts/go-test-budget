@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print the per-package `go test` budget for the unsharded unit sweeps
+# Print the per-package `go test` budget for the unit sweeps
 # (`make test-go`, `make test-mac`): GO_TEST_TIMEOUT when the caller set one,
 # otherwise the default scripts/test-local-parallel applies to its unit sweep
 # and cmd/gc shards (ga-9au). The number lives only in that runner; reading it

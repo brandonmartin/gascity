@@ -122,3 +122,7 @@ Shard discovery includes examples and fuzz seeds as well as tests, so
 splitting a sweep cannot drop coverage. Observable JSON logs are separate
 per job. `unit_package_runner_test.py` exercises the real fan-out with a
 fake Go tool; its Bazel target is `//scripts:unit_package_runner_test`.
+Large test selectors factor shared identifier prefixes through Python 3 before
+exec, preserving exact shard membership within the single-argument size limit.
+Selections still over the argument budget fail closed with a request for more
+shards; never replace them with a wildcard that could duplicate or omit tests.

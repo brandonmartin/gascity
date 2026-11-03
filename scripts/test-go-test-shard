@@ -243,6 +243,35 @@ join_regex() {
 }
 
 regex="^($(join_regex "${selected[@]}"))$"
+# Linux limits each exec argument to 128 KiB, even when ARG_MAX has room.
+# Factor common identifier prefixes before the selection reaches env/go. Small
+# inventories retain their plain alternation; large ones still run in one
+# process, with one timeout, coverage profile and observable log per shard.
+regex_bytes="$(LC_ALL=C; printf '%s' "${#regex}")"
+if (( regex_bytes > 60000 )); then
+  regex="$(printf '%s\n' "${selected[@]}" | python3 -c '
+import itertools
+import os
+import sys
+
+def compact(names):
+    if len(names) == 1:
+        return names[0]
+    prefix = os.path.commonprefix((names[0], names[-1]))
+    if prefix:
+        return prefix + compact([name[len(prefix):] for name in names])
+    groups = itertools.groupby(names, lambda name: name[:1])
+    return "(" + "|".join(
+        key + compact([name[1:] for name in group]) if key else ""
+        for key, group in groups
+    ) + ")"
+
+pattern = "^(" + compact(sorted(set(sys.stdin.read().splitlines()))) + ")$"
+if len(pattern.encode()) > 120 * 1024:
+    sys.exit("go test selection exceeds the exec argument budget; increase the shard total")
+print(pattern)
+')"
+fi
 echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
 printf '  %s\n' "${selected[@]}"
 # External watchdog budget. `-timeout` bounds only the test binary, and only

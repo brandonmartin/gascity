@@ -1784,8 +1784,11 @@ per-job package parallelism divided across that budget. All jobs use
 from `scripts/go-test-budget`. A package-list failure fails the sweep.
 The runner retains its slice enrollment, cross-invocation slot limit and
 process cleanup. This keeps the breadth of `cmd/gc` from consuming a single
-package's entire timeout. The Mac core sweep (`make test-mac`) excludes
-`cmd/gc` and reads the same timeout default.
+package's entire timeout. Large selections use Python 3 to factor common
+identifier prefixes into an exact regular expression below exec's argument
+limit. If that selection remains too large, increase `CMD_GC_PROCESS_TOTAL`;
+the runner fails closed rather than broadening the selection. The Mac core
+sweep (`make test-mac`) excludes `cmd/gc` and reads the same timeout default.
 
 `GO_TEST_TIMEOUT=30m make test-go` overrides the budget for every job.
 With `OBSERVABLE_TEST_LOG=/path/tests.jsonl`, unit mode writes separate

@@ -206,7 +206,7 @@ func assertRuntimeTmuxIntegrationShardUsesDynamicDiscoveryOnShard(t *testing.T, 
 			"-tags", "integration",
 			"-timeout", "17s",
 			"./internal/runtime/tmux",
-			"-list", "^Test",
+			"-list", "^(Test|Example|Fuzz)",
 		},
 		{
 			"test",

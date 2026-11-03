@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Exercise the unit sweep's real fan-out with an isolated fake Go tool."""
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -39,13 +41,16 @@ elif args[0] == 'list':
     if (root / 'list-fail').exists():
         print('broken package enumeration', file=sys.stderr)
         sys.exit(19)
-    print('github.com/gastownhall/gascity/internal/config')
+    if './cmd/gc' not in args:
+        print('github.com/gastownhall/gascity/internal/config')
     if './internal/config' not in args:
         print('github.com/gastownhall/gascity/cmd/gc')
 elif args[0] == 'test':
     if '-list' in args:
-        print('\\n'.join(['TestAlpha', 'TestBeta', 'TestGamma', 'TestDelta',
-                          'ExampleUsage', 'FuzzInput']))
+        inventory = root / 'inventory.json'
+        names = json.loads(inventory.read_text()) if inventory.exists() else [
+            'TestAlpha', 'TestBeta', 'TestGamma', 'TestDelta', 'ExampleUsage', 'FuzzInput']
+        print('\\n'.join(names))
     else:
         (root / 'calls' / str(os.getpid())).write_text(json.dumps(dict(args=args, env=dict(os.environ))))
         print(json.dumps(dict(Action='pass', Package='fixture', Elapsed=0.01)))
@@ -106,16 +111,60 @@ else:
         self.assertEqual(len(self.records()), 1)
         self.assertNotIn('-run', self.records()[0]['args'])
 
+    def test_large_inventory_executes_exact_shards_without_oversized_arguments(self):
+        # Each uncompressed shard exceeds Linux's 128 KiB single-argument cap.
+        names = [f'TestControllerReconciliationPreservesConfiguredSessionIdentity{i:05d}'
+                 for i in range(6000)]
+        # A test name can be the prefix of another; neither may be lost or widened.
+        names += [names[0] + 'Extra', 'ExampleUsage', 'FuzzInput']
+        (self.root / 'inventory.json').write_text(json.dumps(names))
+        run = self.run_sweep('./cmd/gc')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        records = self.records()
+        self.assertEqual(len(records), 2)
+        selected = []
+        for record in records:
+            pattern = record['args'][record['args'].index('-run') + 1]
+            self.assertLess(len(pattern.encode()), 128 * 1024)
+            matches = [name for name in names if re.fullmatch(pattern, name)]
+            shard = int(record['env']['GC_TEST_SHARD_INDEX'])
+            self.assertEqual(matches, names[shard - 1::2])
+            self.assertIsNone(re.fullmatch(pattern, 'TestUnselected'))
+            self.assertIsNone(re.fullmatch(pattern, names[0] + 'UnselectedSuffix'))
+            selected += matches
+        self.assertCountEqual(selected, names)
+
     def test_cmd_gc_only_has_no_core_sweep(self):
         # go list supplies canonical import paths, including for relative selectors.
-        fake = self.bin / 'go'
-        fake.write_text(fake.read_text().replace(
-            "    print('github.com/gastownhall/gascity/internal/config')",
-            "    if './cmd/gc' not in args: print('github.com/gastownhall/gascity/internal/config')"))
         run = self.run_sweep('./cmd/gc')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(len(self.records()), 2)
         self.assertTrue(all('-run' in r['args'] for r in self.records()))
+
+    def test_unicode_inventory_measures_argument_bytes(self):
+        # Go identifiers allow these four-byte letters. Character counts alone
+        # leave each shard below the compaction threshold but above exec's cap.
+        names = ['Test' + '\U00020000' * 80 + str(i) for i in range(900)]
+        (self.root / 'inventory.json').write_text(json.dumps(names))
+        run = self.run_sweep('./cmd/gc')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        records = self.records()
+        self.assertEqual(len(records), 2)
+        for record in records:
+            pattern = record['args'][record['args'].index('-run') + 1]
+            self.assertLess(len(pattern.encode()), 128 * 1024)
+            shard = int(record['env']['GC_TEST_SHARD_INDEX'])
+            self.assertEqual([name for name in names if re.fullmatch(pattern, name)],
+                             names[shard - 1::2])
+
+    def test_selection_that_cannot_fit_fails_before_running_tests(self):
+        names = ['Test' + hashlib.sha256(str(i).encode()).hexdigest() * 3
+                 for i in range(2000)]
+        (self.root / 'inventory.json').write_text(json.dumps(names))
+        run = self.run_sweep('./cmd/gc')
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('increase the shard total', run.stderr)
+        self.assertEqual(self.records(), [])
 
     def test_enumeration_failure_is_not_an_empty_pass(self):
         (self.root / 'list-fail').touch()

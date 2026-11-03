@@ -1774,15 +1774,26 @@ inherits Go's 10m. Raise it on a slow or heavily shared host:
 GO_TEST_TIMEOUT=30m make test-fast-parallel
 ```
 
-The unsharded sweeps, `make test-go` (behind `make check-go`, the refinery
-gate's plan) and `make test-mac`, read the same default through
-`scripts/go-test-budget` and take the same override
-(`GO_TEST_TIMEOUT=30m make test-go`). They carried their own 15m until
-ga-3w9i: `cmd/gc` crossed it on a loaded host with every test passing, and
-the gate could only report a red with no failing test to name. When a
-package does hit its budget, `scripts/go-test-observable` prints the test
-binary's own "running tests" header and the count of top-level tests that
-started but never finished, ahead of the goroutine dump.
+`make test-go` (behind `make check-go` and the full fallback in
+`check-affected`) and `make test-go-pkgs` use the same runner in `unit` mode.
+It resolves the selected packages, sweeps non-`cmd/gc` packages together, and
+partitions `cmd/gc` across `CMD_GC_PROCESS_TOTAL` shards (default 6). The
+sweep runs at most `UNIT_TEST_JOBS` jobs concurrently (default 4), with
+per-job package parallelism divided across that budget. All jobs use
+`GC_FAST_UNIT=1`, `-count=1`, the scrubbed environment, and the same timeout
+from `scripts/go-test-budget`. A package-list failure fails the sweep.
+The runner retains its slice enrollment, cross-invocation slot limit and
+process cleanup. This keeps the breadth of `cmd/gc` from consuming a single
+package's entire timeout. The Mac core sweep (`make test-mac`) excludes
+`cmd/gc` and reads the same timeout default.
+
+`GO_TEST_TIMEOUT=30m make test-go` overrides the budget for every job.
+With `OBSERVABLE_TEST_LOG=/path/tests.jsonl`, unit mode writes separate
+`tests-unit-core.jsonl` and `tests-unit-cmd-gc-N-of-M.jsonl` sibling logs;
+concurrent jobs never truncate each other's evidence. A failed job prints
+its log path and failure details. When a package hits its budget,
+`scripts/go-test-observable` prints the test binary's running-tests header
+and the count of top-level tests that started but never finished.
 
 For one package, shard top-level Go tests directly:
 

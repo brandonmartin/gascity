@@ -68,7 +68,7 @@ configure_cgo_platform_paths
 extra_env=()
 while IFS='=' read -r name _; do
   case "$name" in
-    ANTHROPIC_*|CLAUDE_CODE_*|GC_ACCEPTANCE_KEEP|GC_ACCEPTANCE_BD_BIN|GC_ACCEPTANCE_LEGACY_GC_BIN|GC_ACCEPTANCE_SPLIT_RC1_GC_BIN|GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC|GC_TIERC_FORCE|GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX)
+    ANTHROPIC_*|CLAUDE_CODE_*|OLLAMA_API_KEY|XIAOMI_API_KEY|ZCODE_*|GC_ACCEPTANCE_KEEP|GC_ACCEPTANCE_BD_BIN|GC_ACCEPTANCE_LEGACY_GC_BIN|GC_ACCEPTANCE_SPLIT_RC1_GC_BIN|GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC|GC_TIERC_FORCE|GC_TUTORIAL_GOLDENS_USE_CLAUDE_FOR_CODEX)
       extra_env+=("${name}=${!name}")
       ;;
   esac
@@ -126,7 +126,7 @@ run_go_test() {
 run_observable_go_test() {
   local timing_name="${GO_TEST_TIMING_NAME:-${test_pkg#./}-shard-${shard_index}-of-${shard_total}}"
   local observable_env=(
-    OBSERVABLE_TIMING_FILE="${GO_TEST_TIMING_FILE}"
+    OBSERVABLE_TIMING_FILE="${GO_TEST_TIMING_FILE:-}"
     OBSERVABLE_SHARD_ID="${timing_name}"
     OBSERVABLE_VARIANT="${GO_TEST_TIMING_VARIANT:-default}"
     OBSERVABLE_COMMIT_SHA="${GITHUB_SHA:-}"
@@ -140,6 +140,12 @@ run_observable_go_test() {
     OBSERVABLE_RUNNER_ARCH="${RUNNER_ARCH:-}"
     OBSERVABLE_RUNNER_CPU_COUNT="${GO_TEST_RUNNER_CPU_COUNT:-}"
   )
+  if [[ -n "${OBSERVABLE_TEST_LOG:-}" ]]; then
+    observable_env+=("OBSERVABLE_TEST_LOG=$OBSERVABLE_TEST_LOG")
+  fi
+  if [[ -n "${OBSERVABLE_FAILURE_LINES:-}" ]]; then
+    observable_env+=("OBSERVABLE_FAILURE_LINES=$OBSERVABLE_FAILURE_LINES")
+  fi
   if [[ "${GC_TEST_NO_SLICE:-0}" == "1" ]]; then
     observable_env+=(GC_TEST_NO_SLICE=1)
   fi
@@ -202,13 +208,13 @@ else
   # assignment's non-zero status is swallowed by `set -e` (the script dies before
   # the "no tests discovered" branch below), producing an undebuggable empty
   # shard failure. Check the status explicitly and print what go printed.
-  if ! list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^Test' 2>&1)"; then
+  if ! list_output="$(run_go_test "${go_test_args[@]}" "$test_pkg" -list '^(Test|Example|Fuzz)' 2>&1)"; then
     echo "go test -list failed for ${test_pkg} (build/compile error); output:" >&2
     printf '%s\n' "$list_output" >&2
     exit 1
   fi
   while IFS= read -r line; do
-    [[ "$line" == Test* ]] || continue
+    [[ "$line" == Test* || "$line" == Example* || "$line" == Fuzz* ]] || continue
     tests+=("$line")
   done <<< "$list_output"
 
@@ -259,7 +265,7 @@ if [[ "$watchdog_grace" != "off" ]]; then
 fi
 
 shard_label="${test_pkg#./} shard ${shard_index} of ${shard_total}"
-if [[ -n "${GO_TEST_TIMING_FILE:-}" ]]; then
+if [[ -n "${GO_TEST_TIMING_FILE:-}${OBSERVABLE_TEST_LOG:-}" ]]; then
   gc_harness_run_supervised "$shard_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
     run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
 else

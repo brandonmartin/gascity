@@ -561,20 +561,20 @@ test: bazel-tmpdir
 ## test-go: fast unit tests with plain go test (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and in CI by bazel.yml's integration-packages lane.
-## Bound package parallelism so subprocess-heavy packages do not starve each
-## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
-## reports actual test results instead of hanging after PASS while Go computes
-## cache input hashes over local working files.
+## Partition cmd/gc across CMD_GC_PROCESS_TOTAL shards using the shared runner,
+## bounded by UNIT_TEST_JOBS (default 4). Other packages keep one sweep; every
+## job uses -count=1 so the run reports actual results.
 ## The per-package -timeout is GO_TEST_BUDGET (below): the fan-out's number,
 ## or GO_TEST_TIMEOUT=30m make test-go on a loaded host.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
+UNIT_TEST_RUNNER = GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=$(UNIT_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_BUDGET) ./scripts/test-local-parallel unit
 test-go: test-fsys-darwin-compile
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout $(GO_TEST_BUDGET) ./...
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(UNIT_TEST_RUNNER) ./...
 
 ## test-go-pkgs: test-go over only the packages in GO_TEST_PKGS (check-affected's go test step)
 test-go-pkgs: test-fsys-darwin-compile
 	@test -n "$(strip $(GO_TEST_PKGS))" || { echo "test-go-pkgs: set GO_TEST_PKGS to the packages to test" >&2; exit 2; }
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout $(GO_TEST_BUDGET) $(GO_TEST_PKGS)
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(UNIT_TEST_RUNNER) $(GO_TEST_PKGS)
 
 ## test-bazel-targets: bazel test the targets in BAZEL_TEST_TARGETS (check-affected's step for test targets go test cannot run)
 test-bazel-targets: bazel-tmpdir
@@ -614,6 +614,9 @@ COARSE_CLOCK_RUN ?= .
 test-coarse-clock:
 	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-coarse-clock -- -tags gc_coarse_clock -count=1 -timeout 60m -run '$(COARSE_CLOCK_RUN)' ./internal/beads/ ./cmd/gc/
 
+# Preserve the unit sweeps' four-process ceiling while sharding cmd/gc.
+UNIT_TEST_JOBS ?= 4
+
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
 # Deliberately empty: scripts/test-local-parallel owns the default per-package
@@ -623,7 +626,7 @@ LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 # does; the sibling *-parallel targets below run without env -i and inherit an
 # override from the environment directly.
 GO_TEST_TIMEOUT ?=
-## GO_TEST_BUDGET: the -timeout the unsharded sweeps (test-go, test-mac) hand
+## GO_TEST_BUDGET: the -timeout the unit sweeps (test-go, test-mac) hand
 ## to go test: GO_TEST_TIMEOUT when set, else the fan-out's default, which
 ## scripts/go-test-budget reads out of scripts/test-local-parallel so the sweeps
 ## cannot drift onto a smaller budget than the shards. They carried their own

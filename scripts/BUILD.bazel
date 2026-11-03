@@ -16,6 +16,20 @@ sh_test(
     env = {"PYTHONDONTWRITEBYTECODE": "1"},
 )
 
+sh_test(
+    name = "unit_package_runner_test",
+    size = "small",
+    srcs = ["unit_package_runner_test.py"],
+    data = [
+        "go-test-observable",
+        "push-gate-lock-lib.sh",
+        "test-gitconfig-path",
+        "test-go-test-shard",
+        "test-local-parallel",
+    ] + glob(["lib/*.sh"]),
+    env = {"PYTHONDONTWRITEBYTECODE": "1"},
+)
+
 # The repo's shell guards (formerly preflight-static steps), each with
 # exactly the inputs it reads.
 

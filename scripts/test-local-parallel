@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
+usage: scripts/test-local-parallel <fast|unit|cmd-gc-process|integration|full> [packages...]
 
 Environment:
   LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
@@ -15,12 +15,13 @@ Environment:
 USAGE
 }
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -lt 1 || ( "$1" != "unit" && $# -ne 1 ) ]]; then
   usage
   exit 1
 fi
 
 mode="$1"
+package_selectors=("${@:2}")
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
@@ -145,6 +146,38 @@ add_unit_core_job() {
     "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')"
 }
 
+# The Makefile's unit sweeps use the same bounded fan-out as fast, while
+# retaining check-affected's package selection. Resolve selectors before
+# partitioning so relative and canonical cmd/gc paths share one owner. A
+# failed/empty enumeration must never become a successful empty sweep.
+add_unit_package_jobs() {
+  local packages package quoted core_command="" has_cmd_gc=0
+  if (( ${#package_selectors[@]} == 0 )); then
+    echo "unit mode requires at least one package selector" >&2
+    return 1
+  fi
+  packages="$(go list "${package_selectors[@]}")" || return 1
+  if [[ -z "$packages" ]]; then
+    echo "unit package enumeration returned no packages" >&2
+    return 1
+  fi
+  while IFS= read -r package; do
+    if [[ "$package" == "github.com/gastownhall/gascity/cmd/gc" ]]; then
+      has_cmd_gc=1
+    else
+      printf -v quoted '%q' "$package"
+      core_command+=" $quoted"
+    fi
+  done <<< "$packages"
+  if [[ -n "$core_command" ]]; then
+    add_job "unit-core" \
+      "GC_FAST_UNIT=1 scripts/go-test-observable unit-core -- -count=1 -timeout ${go_test_timeout}${core_command}"
+  fi
+  if (( has_cmd_gc )); then
+    add_cmd_gc_shards "unit-cmd-gc" "1" ""
+  fi
+}
+
 # Runs as a direct shell job rather than through a `go test` wrapper because a
 # Go _test.go file invoking exec.Command to run this script would itself add
 # one os/exec call to the resourcecensus subprocess census (both the untagged
@@ -210,6 +243,9 @@ add_integration_jobs() {
 }
 
 case "$mode" in
+  unit)
+    add_unit_package_jobs
+    ;;
   fast)
     add_fsys_compile_job
     add_unit_core_job
@@ -265,6 +301,7 @@ export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+export TEST_LOCAL_MODE="$mode"
 
 # Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
 # yields to interactive work and does not livelock constrained hosts during the
@@ -315,6 +352,18 @@ run_fan_out() {
   safe_label="$(printf "%s" "$label" | tr -c "A-Za-z0-9._-" "_")"
   log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
+  # Unit mode replaces the single TEST_ENV go-test process. Retain its provider
+  # inputs across this second scrub; live session and Dolt variables stay out.
+  extra_env=()
+  if [[ "$TEST_LOCAL_MODE" == "unit" ]]; then
+    while IFS="=" read -r name _; do
+      case "$name" in
+        ANTHROPIC_*|CLAUDE_CODE_*|OLLAMA_API_KEY|XIAOMI_API_KEY|ZCODE_*)
+          extra_env+=("${name}=${!name}")
+          ;;
+      esac
+    done < <(env)
+  fi
   echo "[$label] start"
   # The pane shell is pinned to /bin/sh, not forwarded from the caller: a test
   # tmux or herdr pane running zsh under a fresh HOME opens the new-user wizard,
@@ -329,7 +378,7 @@ run_fan_out() {
     GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/var/tmp}" \
-    OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
+    OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG:+${OBSERVABLE_TEST_LOG%.jsonl}-${safe_label}.jsonl}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
     GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
@@ -352,7 +401,7 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    ${extra_env[@]+"${extra_env[@]}"} bash -lc "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?

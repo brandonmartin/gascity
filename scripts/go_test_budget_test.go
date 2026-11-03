@@ -10,30 +10,39 @@ import (
 	"time"
 )
 
-// sweepTargets are the unsharded `go test ./...` sweeps the Makefile runs
-// through scripts/go-test-observable: the Linux unit sweep behind
-// `make check-go` (the refinery gate's plan) and its Mac twin.
+// sweepTargets are the unit sweeps sharing the fan-out timeout budget.
 var sweepTargets = []struct {
 	target         string
 	observableName string
 }{
 	{target: "test-go", observableName: "test"},
+	{target: "test-go-pkgs", observableName: "test"},
 	{target: "test-mac", observableName: "test-mac"},
 }
 
 // sweepTimeoutFlag dry-runs a sweep target with GO_TEST_TIMEOUT set to
-// override and returns the -timeout its go-test-observable line carries.
+// override and returns the timeout its runner command carries.
 func sweepTimeoutFlag(t *testing.T, target, observableName, override string) string {
 	t.Helper()
-	cmd := makeCommand("-n", target)
+	cmd := makeCommand("-n", target, "GO_TEST_PKGS=./cmd/gc")
 	cmd.Dir = repoRoot(t)
-	cmd.Env = append(os.Environ(), "GO_TEST_TIMEOUT="+override)
+	cmd.Env = append(os.Environ(), "GO_TEST_TIMEOUT="+override, "UNIT_TEST_JOBS=4", "CMD_GC_PROCESS_TOTAL=6")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("make -n %s failed: %v\n%s", target, err, out)
 	}
 	marker := "scripts/go-test-observable " + observableName + " -- "
 	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "./scripts/test-local-parallel unit ") {
+			if !strings.Contains(line, "LOCAL_TEST_JOBS=4 ") || !strings.Contains(line, "CMD_GC_PROCESS_TOTAL=6 ") {
+				t.Fatalf("unit sweep must retain bounded shard fan-out: %s", line)
+			}
+			match := regexp.MustCompile(`GO_TEST_TIMEOUT=(\S+)`).FindStringSubmatch(line)
+			if match == nil {
+				t.Fatalf("unit sweep drops the timeout override: %s", line)
+			}
+			return match[1]
+		}
 		if strings.Contains(line, marker) {
 			return goTestFlagValue(t, line, "timeout")
 		}
@@ -53,12 +62,8 @@ func runnerTimeoutDefault(t *testing.T) string {
 	return want
 }
 
-// TestSweepTargetsShareTheFanOutTimeoutBudget guards ga-3w9i. `make test-go`
-// and `make test-mac` sweep every package in one `go test`, the same shape as
-// test-fast-parallel's unit-core job, but carried their own 15m while the
-// fan-out moved to 20m (ga-9au). cmd/gc crossed 15m on a loaded host with
-// every test green, and the refinery gate could only report a red with no
-// failing test to name. The sweeps must resolve the budget the runner applies.
+// TestSweepTargetsShareTheFanOutTimeoutBudget keeps both the unit sweep's
+// cmd/gc shards and the Mac core sweep on the shared runner's budget.
 func TestSweepTargetsShareTheFanOutTimeoutBudget(t *testing.T) {
 	want := runnerTimeoutDefault(t)
 	wantDuration, err := time.ParseDuration(want)
@@ -90,15 +95,14 @@ func TestSweepTargetsForwardTimeoutOverride(t *testing.T) {
 }
 
 // TestMakefileLeavesSweepTimeoutDefaultToTheRunner keeps the number in one
-// place: no sweep recipe (a go-test-observable line over ./... or the Mac
-// package list) may spell its own -timeout literal again. Opt-in targets that
-// run one package, such as test-herdr-live, keep their own budgets.
+// place: no sweep recipe may spell its own -timeout literal again. Opt-in
+// targets that run one package, such as test-herdr-live, keep their own budgets.
 func TestMakefileLeavesSweepTimeoutDefaultToTheRunner(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
 	}
-	literal := regexp.MustCompile(`scripts/go-test-observable (test|test-mac) -- [^\n]*-timeout [0-9][^\n]*(\./\.\.\.|\$\(MAC_UNIT_PKGS\))`)
+	literal := regexp.MustCompile(`(scripts/go-test-observable (test|test-mac) -- [^\n]*-timeout [0-9][^\n]*(\./\.\.\.|\$\(MAC_UNIT_PKGS\))|GO_TEST_TIMEOUT=[0-9][^\n]*scripts/test-local-parallel unit)`)
 	if match := literal.Find(data); match != nil {
 		t.Fatalf("a sweep recipe hardcodes its -timeout; use $(GO_TEST_BUDGET):\n%s", match)
 	}

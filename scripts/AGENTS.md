@@ -109,3 +109,16 @@ lines only; a new integration-only test file costs one sorted record line.
 The shard rule is `i % shard_total == shard_index - 1` in
 `scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
 restates it and runs each shard through the real script).
+
+## Unit sweeps share the bounded shard runner
+
+`make test-go` and `test-go-pkgs` call `test-local-parallel unit` with their
+package selectors. Resolve selectors with `go list` before partitioning:
+`cmd/gc` runs only in its shards, all other selected packages run in one
+core sweep, and failed or empty enumeration fails closed. Preserve the
+four-job default (`UNIT_TEST_JOBS`), shared timeout, `-count=1`,
+`GC_FAST_UNIT=1`, hermetic environment, slot and process-cleanup boundaries.
+Shard discovery includes examples and fuzz seeds as well as tests, so
+splitting a sweep cannot drop coverage. Observable JSON logs are separate
+per job. `unit_package_runner_test.py` exercises the real fan-out with a
+fake Go tool; its Bazel target is `//scripts:unit_package_runner_test`.

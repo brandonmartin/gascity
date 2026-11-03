@@ -25,12 +25,14 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
@@ -4516,6 +4518,51 @@ func TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads(t *testing.T) 
 				t.Fatalf("wait status = %q, want %q", updatedWait.Status, tc.wantStatus)
 			}
 		})
+	}
+}
+
+func TestLoadWaitDependencyBeadLeavesUnrelatedSuspendedRigUnopened(t *testing.T) {
+	cityPath := convoyCheckRigCity(t, `
+[[rigs]]
+name = "dormant"
+path = "dormant"
+prefix = "DM"
+
+[[rigs]]
+name = "ops"
+path = "ops"
+prefix = "OP"
+`, "dormant", "ops")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "dormant", &suspended); err != nil {
+		t.Fatal(err)
+	}
+
+	const depID = "zz-task-1"
+	depStore := beads.NewMemStoreFrom(1, []beads.Bead{{ID: depID, Title: "awake task"}}, nil)
+	var opened []string
+	previousOpen := waitDependencyScopeStore
+	waitDependencyScopeStore = func(scopeRoot, _ string) (beads.Store, error) {
+		opened = append(opened, filepath.Base(scopeRoot))
+		if filepath.Base(scopeRoot) == "ops" {
+			return depStore, nil
+		}
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() { waitDependencyScopeStore = previousOpen })
+
+	got, err := loadWaitDependencyBead(cityPath, beads.NewMemStore(), depID)
+	if err != nil {
+		t.Fatalf("loadWaitDependencyBead(%s): %v", depID, err)
+	}
+	if got.ID != depID {
+		t.Fatalf("resolved %q, want %q", got.ID, depID)
+	}
+	if slices.Contains(opened, "dormant") {
+		t.Errorf("opened unrelated suspended rig; opened scopes = %v", opened)
+	}
+	if !slices.Contains(opened, "ops") {
+		t.Errorf("did not open the awake rig containing the dependency; opened scopes = %v", opened)
 	}
 }
 

@@ -4283,10 +4283,16 @@ func TestBuildDesiredStateFreshNamepoolSkipsExcludedClaimants(t *testing.T) {
 		t.Fatalf("desired sessions = %d, want 1; stderr=%s", len(result.State), stderr.String())
 	}
 	for _, tp := range result.State {
-		if tp.Alias != "pack.e" || tp.Env["GC_TRIGGER_BEAD_ID"] != work.ID {
-			t.Fatalf("fresh session alias=%q trigger=%q, want pack.e serving %s; stderr=%s",
-				tp.Alias, tp.Env["GC_TRIGGER_BEAD_ID"], work.ID, stderr.String())
+		if tp.Alias != "pack.e" {
+			t.Fatalf("fresh session alias=%q, want pack.e; stderr=%s", tp.Alias, stderr.String())
 		}
+	}
+	rows, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.TriggerBeadIDMetadataKey: work.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Metadata["alias"] != "pack.e" {
+		t.Fatalf("session rows triggered by %s = %+v, want pack.e's; stderr=%s", work.ID, rows, stderr.String())
 	}
 }
 

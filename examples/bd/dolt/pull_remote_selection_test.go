@@ -33,17 +33,16 @@ import (
 func writePullFakeDoltMultiRemote(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
-	body := `#!/bin/sh
-printf '%s\n' "$*" >> "` + logPath + `"
-case "$*" in
-  *"SELECT name, url FROM dolt_remotes"*)
-    printf 'name,url\nalpha,file:///data/remotes/alpha\ninternal,file:///data/remotes/internal\npublic,https://public.example.invalid/repo\n'
-    ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake dolt: %v", err)
+	// Publish an immutable fixture so a writable descriptor inherited by a
+	// concurrent fork cannot make exec return ETXTBSY. Replacing the symlink
+	// also keeps any writable old destination separate from the executed inode.
+	fixture := filepath.Join(repoRoot(t), "testdata", "pull-multi-remote-dolt.sh")
+	next := filepath.Join(dir, "dolt.next")
+	if err := os.Symlink(fixture, next); err != nil {
+		t.Fatalf("link fake dolt: %v", err)
+	}
+	if err := os.Rename(next, filepath.Join(dir, "dolt")); err != nil {
+		t.Fatalf("publish fake dolt: %v", err)
 	}
 	return logPath
 }
@@ -223,6 +222,18 @@ func TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds(t *testing.T
 	}
 
 	binDir := t.TempDir()
+	// Keep a writable reference to the old executable, as a concurrent fork
+	// can do while a generated fake is being written. Installing the fake
+	// must give exec a different inode, or Linux returns ETXTBSY.
+	oldDolt, err := os.OpenFile(filepath.Join(binDir, "dolt"), os.O_CREATE|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := oldDolt.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	doltLog := writePullFakeDoltMultiRemote(t, binDir)
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 

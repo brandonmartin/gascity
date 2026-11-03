@@ -159,6 +159,9 @@ func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
 
 	var calls []string
 	deps := sessionWakeDeps{
+		resolveTarget: func(_ string, _ *config.City, _ beads.Store, target string, _ func(string) error) (string, error) {
+			return target, nil
+		},
 		store:        store,
 		cityPath:     "/city",
 		cityResolved: true,

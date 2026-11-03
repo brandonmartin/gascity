@@ -39,12 +39,14 @@ func TestCmdExtMsgBindUsesSupervisorForSupervisorManagedCity(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
 	t.Cleanup(func() {
-		apiRouteControllerAliveHook = origAlive
+		apiRouteControllerIdentityHook = origIdentity
 		apiRouteSupervisorClientHook = origSup
 	})
-	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
 	apiRouteSupervisorClientHook = func(string) *api.Client {
 		return api.NewCityScopedClient(srv.URL, "test-city")
 	}

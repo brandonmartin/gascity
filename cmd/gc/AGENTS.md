@@ -23,3 +23,16 @@ and parent-root link must resolve, including after CAS and at final delivery.
 Wrapped `ErrNotFound` on an ancestry or teardown read is a failure, even after
 the initial explicit-root lookup succeeded. Root lookup and candidate residence
 may advance to another work leg on proven absence; ancestry failures must not.
+
+# Order-tracking maintenance
+
+Order-tracking retention maintenance commits at most one guarded delete chunk
+per pass. Independent per-root stranding guards run with bounded concurrency;
+all guard reads finish before that chunk is deleted, and the set-level recheck
+in `deleteWorkflowBeadsBatch` still runs right before the delete. Keep the full
+`storeOpenDescendantIDs` guard for every root. Store errors keep the affected
+root intact.
+
+Failure-event excerpts omit routine startup configuration notices before
+truncation. Keep complete redacted output in the supervisor log and preserve the
+execution error, including the effective timeout, when no diagnostic remains.

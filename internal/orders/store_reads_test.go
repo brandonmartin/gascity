@@ -436,6 +436,50 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 	}
 }
 
+// secondPrecisionListStore truncates CreatedBefore to whole seconds, as bd's SQL
+// filter does when it serializes its date argument as RFC3339.
+type secondPrecisionListStore struct{ beads.Store }
+
+func (s secondPrecisionListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	q.CreatedBefore = q.CreatedBefore.Truncate(time.Second)
+	return s.Store.List(q)
+}
+
+// TestStaleRunsBoundBackingReadInclusively proves both stale readers narrow
+// their backing reads by age before hydration, with a strict bound one second
+// past the cutoff so a second-precision backend still returns a bead created
+// exactly at the cutoff, and then apply the exact inclusive cutoff.
+func TestStaleRunsBoundBackingReadInclusively(t *testing.T) {
+	cutoff := time.Date(2026, 11, 3, 12, 0, 0, 123, time.UTC)
+	for name, read := range map[string]func(*Store) ([]OrderRun, error){
+		"StaleOpenRuns":      func(st *Store) ([]OrderRun, error) { return st.StaleOpenRuns(cutoff, cutoff.Add(time.Hour)) },
+		"StaleNotClosedRuns": func(st *Store) ([]OrderRun, error) { return st.StaleNotClosedRuns(cutoff, cutoff.Add(time.Hour)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			spy := &listSpyStore{Store: secondPrecisionListStore{Store: beads.NewMemStoreFrom(10, []beads.Bead{
+				{ID: "old", Title: "order:old", Status: "open", CreatedAt: cutoff.Add(-time.Hour), Labels: []string{"order-tracking"}},
+				{ID: "boundary", Title: "order:boundary", Status: "open", CreatedAt: cutoff, Labels: []string{"order-tracking"}, Ephemeral: true},
+				{ID: "fresh", Title: "order:fresh", Status: "open", CreatedAt: cutoff.Add(time.Nanosecond), Labels: []string{"order-tracking"}},
+			}, nil)}}
+			runs, err := read(NewStore(beads.OrdersStore{Store: spy}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := runIDs(runs), []string{"old", "boundary"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("stale runs = %v, want %v", got, want)
+			}
+			if len(spy.queries) == 0 {
+				t.Fatal("stale read issued no List call")
+			}
+			for _, q := range spy.queries {
+				if q.Label != "order-tracking" || q.IncludeClosed || q.Status == "closed" || q.TierMode != beads.TierBoth || !q.CreatedBefore.Equal(cutoff.Add(time.Second)) {
+					t.Fatalf("backing read = %+v, want not-closed tracking in both tiers created before cutoff+1s", q)
+				}
+			}
+		})
+	}
+}
+
 // TestStaleNotClosedRunsListsEveryNotClosedStatusAtOrBeforeCutoff proves the
 // on-demand sweep's read: every tracking bead the strict open-work gate counts
 // that is at or before the cutoff, oldest-first. That includes one parked by

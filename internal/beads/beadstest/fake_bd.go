@@ -312,7 +312,8 @@ func unquoteBdQueryValue(v string) string {
 
 // query answers bd's wisp-tier query: `bd query --json "ephemeral=true AND
 // k=v AND ..." [--all] [--limit N]`, ephemeral rows only, for the keys a
-// BdStore sends (id, parent, status, type, label, assignee, metadata.<key>).
+// BdStore sends (id, parent, status, type, label, assignee, metadata.<key>)
+// and its created<"<RFC3339>" age bound.
 func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, error) {
 	if len(positional) != 1 {
 		return nil, fmt.Errorf("fake bd query: want one expression, got %v", positional)
@@ -323,6 +324,14 @@ func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, 
 	}
 	ephemeral := false
 	for _, clause := range splitBdQueryAnd(positional[0]) {
+		if bound, ok := strings.CutPrefix(strings.TrimSpace(clause), "created<"); ok {
+			before, err := time.Parse(time.RFC3339Nano, unquoteBdQueryValue(bound))
+			if err != nil {
+				return nil, fmt.Errorf("fake bd query: created bound %q: %w", bound, err)
+			}
+			query.CreatedBefore = before
+			continue
+		}
 		k, v, ok := strings.Cut(strings.TrimSpace(clause), "=")
 		if !ok {
 			return nil, fmt.Errorf("fake bd query: unsupported clause %q", clause)

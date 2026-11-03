@@ -197,8 +197,13 @@ func (s *Store) StaleNotClosedRuns(cutoff, now time.Time) ([]OrderRun, error) {
 // whose CreatedAt is at or before cutoff, oldest-first, read through live. A
 // bead with no CreatedAt is never stale, and a dispatch still inside its
 // persisted deadline plus completion grace at now is not returned.
+//
+// The backing read is narrowed by age before hydration. CreatedBefore is
+// strict and bd serializes its date bound at second precision, so the read
+// asks for a one-second superset and the exact inclusive cutoff is applied
+// below.
 func staleRuns(live beads.LiveReader, cutoff, now time.Time, statuses ...string) ([]OrderRun, error) {
-	all, err := sweepTrackingBeads(live, statuses...)
+	all, err := sweepTrackingBeads(live, cutoff.Add(time.Second), statuses...)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +240,7 @@ func (s *Store) OrphanedOpenRuns(now time.Time) ([]OrderRun, error) {
 	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	all, err := sweepTrackingBeads(beads.LiveFor(s.store), everyNotClosed)
+	all, err := sweepTrackingBeads(beads.LiveFor(s.store), time.Time{}, everyNotClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -263,19 +268,21 @@ const everyNotClosed = ""
 
 // sweepTrackingBeads is the sweep readers' shared LIVE read through live: the
 // tracking beads in each of statuses, one query per status across both tiers.
-// A bead two queries both read is listed once, and the list is oldest-first so
-// the caller's close budget drains the oldest jam rather than letting newer
-// beads starve it. No query carries a backing limit: callers post-filter
-// before applying their close budget.
-func sweepTrackingBeads(live beads.LiveReader, statuses ...string) ([]beads.Bead, error) {
+// A non-zero createdBefore is pushed to the backing query as its strict
+// CreatedBefore bound. A bead two queries both read is listed once, and the
+// list is oldest-first so the caller's close budget drains the oldest jam
+// rather than letting newer beads starve it. No query carries a backing limit:
+// callers post-filter before applying their close budget.
+func sweepTrackingBeads(live beads.LiveReader, createdBefore time.Time, statuses ...string) ([]beads.Bead, error) {
 	var out []beads.Bead
 	seen := make(map[string]bool)
 	for _, status := range statuses {
 		list, err := live.List(beads.ListQuery{
-			Label:    labelOrderTracking,
-			Status:   status,
-			Sort:     beads.SortCreatedAsc,
-			TierMode: beads.TierBoth,
+			Label:         labelOrderTracking,
+			Status:        status,
+			CreatedBefore: createdBefore,
+			Sort:          beads.SortCreatedAsc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return nil, err

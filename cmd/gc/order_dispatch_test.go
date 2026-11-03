@@ -11122,12 +11122,147 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 // which is where CreatedBefore has to show up.
 type retentionListSpy struct {
 	beads.Store
+	mu      sync.Mutex
 	queries []beads.ListQuery
 }
 
 func (s *retentionListSpy) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
 	s.queries = append(s.queries, query)
+	s.mu.Unlock()
 	return s.Store.List(query)
+}
+
+// retentionGuardBarrierStore holds every gc.root_bead_id membership read (the
+// first read of each per-root stranding guard) until release is closed,
+// reporting the root on arrived as it blocks.
+type retentionGuardBarrierStore struct {
+	beads.Store
+	arrived chan string
+	release <-chan struct{}
+}
+
+func (s *retentionGuardBarrierStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if id := q.Metadata[beadmeta.RootBeadIDMetadataKey]; id != "" {
+		s.arrived <- id
+		<-s.release
+	}
+	return s.Store.List(q)
+}
+
+func (s *retentionGuardBarrierStore) DeleteBatch(ids []string) error {
+	for _, id := range ids {
+		if err := s.Delete(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TestRetentionGuardsOverlapWithBoundedParallelismBeforeDeleting pins the
+// maintenance pass's guard concurrency: independent per-root guards reach the
+// backing store together, never more than orderTrackingRetentionGuardWorkers
+// at once, and nothing is deleted until every guard of the pass has finished.
+// The root that still owns an open step is retained.
+func TestRetentionGuardsOverlapWithBoundedParallelismBeforeDeleting(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	const eligible = orderTrackingRetentionGuardWorkers + 1
+	seeded := newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+eligible, "alpha-03")
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	store := &retentionGuardBarrierStore{Store: seeded.MemStore, arrived: make(chan string, 64), release: release}
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+	done := make(chan struct{})
+	var deleted int
+	var err error
+	go func() {
+		defer close(done)
+		deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, eligible)
+	}()
+	timer := time.NewTimer(hangBudget)
+	defer timer.Stop()
+	for range orderTrackingRetentionGuardWorkers {
+		select {
+		case <-store.arrived:
+		case <-timer.C:
+			t.Fatal("retention serialized independent root guards")
+		}
+	}
+	select {
+	case id := <-store.arrived:
+		t.Fatalf("guard %s exceeded %d concurrent backing reads", id, orderTrackingRetentionGuardWorkers)
+	default:
+	}
+	for i := range eligible {
+		id := fmt.Sprintf("alpha-%02d", i)
+		if _, gerr := seeded.Get(id); gerr != nil {
+			t.Fatalf("%s deleted before every guard finished: %v", id, gerr)
+		}
+	}
+	unblock()
+	awaitClose(t, done, "retention guards")
+	if err != nil || deleted != eligible-1 {
+		t.Fatalf("sweep = (%d, %v), want (%d, nil)", deleted, err, eligible-1)
+	}
+	for _, id := range []string{"alpha-03", "open-step"} {
+		if _, gerr := seeded.Get(id); gerr != nil {
+			t.Fatalf("live workflow member %s deleted: %v", id, gerr)
+		}
+	}
+}
+
+// TestRetentionMaintenanceBudgetsCommitOneChunk pins both maintenance passes
+// (the watchdog and gc order sweep-tracking) to one guarded delete chunk, even
+// with a large expired backlog.
+func TestRetentionMaintenanceBudgetsCommitOneChunk(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	for name, budget := range map[string]int{
+		"watchdog": orderTrackingRetentionWatchdogDeleteBudget,
+		"sweep":    orderTrackingSweepRetentionDeleteBudget,
+	} {
+		t.Run(name, func(t *testing.T) {
+			const n = minClosedOrderTrackingRetained + 200
+			seed := make([]beads.Bead, 0, n)
+			for i := range n {
+				seed = append(seed, beads.Bead{
+					ID:        fmt.Sprintf("leaf-%04d", i),
+					Title:     "order:leaf",
+					Status:    "closed",
+					Type:      "task",
+					CreatedAt: now.Add(-48*time.Hour + time.Duration(i)*time.Second),
+					Labels:    []string{"order-run:leaf", labelOrderTracking},
+					Ephemeral: true,
+				})
+			}
+			store := &retentionBatchSpy{MemStore: beads.NewMemStoreFrom(n, seed, nil)}
+			deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}, nil, budget)
+			if err != nil || deleted != orderTrackingRetentionDeleteChunk || len(store.batches) != 1 || len(store.batches[0]) != orderTrackingRetentionDeleteChunk {
+				t.Fatalf("maintenance pass = (%d, %v), %d commits; want one %d-root commit", deleted, err, len(store.batches), orderTrackingRetentionDeleteChunk)
+			}
+		})
+	}
+}
+
+// TestRetentionGuardReadErrorKeepsTheAffectedRoot proves a failed guard read
+// refuses only its own root: the concurrent guards still admit the readable
+// root, and the error is reported.
+func TestRetentionGuardReadErrorKeepsTheAffectedRoot(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	seeded := newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+2, "")
+	failure := errors.New("child tier unavailable")
+	store := parentListFailStore{Store: seeded.MemStore, failParentID: "alpha-01", err: failure}
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}, nil, 2)
+	if deleted != 1 || !errors.Is(err, failure) {
+		t.Fatalf("sweep = (%d, %v), want one deletion and the guard failure", deleted, err)
+	}
+	if _, gerr := seeded.Get("alpha-01"); gerr != nil {
+		t.Fatalf("root with a failed guard read deleted: %v", gerr)
+	}
+	if _, gerr := seeded.Get("alpha-00"); !errors.Is(gerr, beads.ErrNotFound) {
+		t.Fatalf("Get(alpha-00) = %v, want the readable root deleted", gerr)
+	}
 }
 
 // TestSweepClosedOrderTrackingRetentionBoundedSkipsInWindowCorpus is the
@@ -11272,10 +11407,12 @@ func TestSweepClosedOrderTrackingRetentionBoundedBatchesSafeDeletes(t *testing.T
 	}
 	spy := &retentionBatchSpy{MemStore: beads.NewMemStoreFrom(n, seed, nil)}
 
+	// A limit above one chunk: the maintenance budgets are one chunk, so this
+	// pins how a larger allowance splits into chunks.
 	deleted, err := sweepClosedOrderTrackingRetentionBounded(spy, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
 		retainLast:       minClosedOrderTrackingRetained,
-	}, nil, orderTrackingSweepRetentionDeleteBudget)
+	}, nil, eligible)
 	if err != nil {
 		t.Fatalf("sweepClosedOrderTrackingRetentionBounded: %v", err)
 	}
@@ -11351,7 +11488,7 @@ func TestOrderTrackingRetentionLaterChunkFailureCountsNothingDeleted(t *testing.
 			var deleted int
 			var err error
 			if bounded {
-				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, orderTrackingSweepRetentionDeleteBudget)
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, eligible)
 			} else {
 				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
 			}
@@ -11577,6 +11714,60 @@ func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
 		if mBad.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
 			t.Errorf("maxDispatchesPerTick with configured %d = %d, want default %d", bad, mBad.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
 		}
+	}
+}
+
+// TestOrderDispatchExecFailureEventOmitsRoutineConfigWarnings proves the
+// order.failed excerpt drops the startup config notices every gc invocation
+// prints, so they neither crowd out nor replace the command's own diagnostic,
+// and that the execution error survives alone when no diagnostic remains.
+func TestOrderDispatchExecFailureEventOmitsRoutineConfigWarnings(t *testing.T) {
+	warning := `named_session "service": mode "always" with wake_mode "fresh" on template "service" starts a fresh provider session after every drain; use only for a deliberate restart-per-cycle actor` + "\n"
+	setupWarning := "/city/city.toml: [session] setup_max_timeout (3m0s) is set: setup_timeout now bounds idle/silence time between output, not total setup runtime\n"
+	for _, diagnostic := range []string{"gc order sweep-tracking: listing closed tracking: database unavailable\n", ""} {
+		t.Run(fmt.Sprintf("diagnostic=%t", diagnostic != ""), func(t *testing.T) {
+			store := beads.NewMemStore()
+			var rec memRecorder
+			var stderr bytes.Buffer
+			m := &memoryOrderDispatcher{
+				aa:      []orders.Order{{Name: "sweep", Trigger: "cooldown", Interval: "1m", Exec: "sweep"}},
+				storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+				execRun: func(context.Context, string, string, []string) ([]byte, error) {
+					return []byte(diagnostic + strings.Repeat(warning, 30) + setupWarning), errors.New("exit status 1")
+				},
+				rec:    &rec,
+				stderr: &stderr,
+				cfg:    &config.City{},
+			}
+			m.dispatch(context.Background(), t.TempDir(), time.Now())
+			m.drain(context.Background())
+			var msg string
+			for _, e := range rec.events {
+				if e.Type == events.OrderFailed && e.Subject == "sweep" {
+					msg = e.Message
+				}
+			}
+			want := "exit status 1"
+			if diagnostic != "" {
+				want += ": " + strings.TrimSpace(diagnostic)
+			}
+			if msg != want {
+				t.Fatalf("order.failed = %q, want %q", msg, want)
+			}
+			// The supervisor log keeps the full output, notices included.
+			if !strings.Contains(stderr.String(), "setup_max_timeout (3m0s)") {
+				t.Fatalf("supervisor log dropped the full output: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// TestOrderFailureExcerptKeepsConfigurationErrors proves only the routine
+// notices are dropped: a named_session configuration error stays.
+func TestOrderFailureExcerptKeepsConfigurationErrors(t *testing.T) {
+	const diagnostic = `named_session "service": unknown template "missing"`
+	if got := tailForOrderFailureEvent(diagnostic); got != diagnostic {
+		t.Fatalf("failure excerpt = %q, want configuration error %q", got, diagnostic)
 	}
 }
 

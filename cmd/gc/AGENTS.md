@@ -22,3 +22,9 @@ the affected root intact, and cancellation flushes only roots already guarded.
 Failure-event excerpts omit routine startup configuration notices before
 truncation. Keep complete redacted output in the supervisor log and preserve the
 execution error, including the effective timeout, when no diagnostic remains.
+
+The v2 reconciler's fresh runtime read judges agent-process liveness using
+the process names recorded at launch, not the current template. Provider configuration can
+change while a session is running. If launch names cannot be read, a dead
+agent process is unproven; do not recycle it as a zombie on template hints.
+Fresh reads must still bracket identity and verify the same runtime object.

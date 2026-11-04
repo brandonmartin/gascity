@@ -22,3 +22,8 @@ the affected root intact, and cancellation flushes only roots already guarded.
 Failure-event excerpts omit routine startup configuration notices before
 truncation. Keep complete redacted output in the supervisor log and preserve the
 execution error, including the effective timeout, when no diagnostic remains.
+
+Session-model ownership diagnostics inspect work separately from message beads:
+mail assignees are delivery recipients and may name historical sessions. Resolve
+known session aliases and alias history before treating an owner token as a
+missing bead ID, and report failures from either coordination-class store.

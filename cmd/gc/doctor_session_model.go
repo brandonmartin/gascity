@@ -197,7 +197,7 @@ func isRetiredSessionModelOwner(b beads.Bead) bool {
 }
 
 func looksLikeSessionBeadID(s string) bool {
-	return strings.HasPrefix(s, "gc-") || strings.HasPrefix(s, "bd-") || strings.HasPrefix(s, "mc-")
+	return !strings.Contains(s, "/") && looksLikeBeadID(s)
 }
 
 func legacySessionTokenMatches(token string, byAlias, bySessionName map[string][]beads.Bead) []beads.Bead {

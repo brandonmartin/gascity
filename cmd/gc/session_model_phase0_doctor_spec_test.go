@@ -86,7 +86,7 @@ func TestPhase0DoctorReportsMissingBeadOwner(t *testing.T) {
 		Type:     "task",
 		Status:   "open",
 		Title:    "missing owner",
-		Assignee: "gc-missing-session",
+		Assignee: "gc-missing1",
 	}); err != nil {
 		t.Fatalf("create work bead: %v", err)
 	}
@@ -98,6 +98,48 @@ func TestPhase0DoctorReportsMissingBeadOwner(t *testing.T) {
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "missing-bead-owner") {
 		t.Fatalf("doctor output missing missing-bead-owner finding:\n%s", out)
+	}
+}
+
+func TestPhase0DoctorResolvesRigQualifiedSessionAlias(t *testing.T) {
+	cityPath, store := newPhase0DoctorCityWithConfig(t, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "gc-packs"
+`)
+
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Status: "open",
+		Metadata: map[string]string{
+			"alias":        "gc-packs/smith",
+			"session_name": "s-gc-packs-smith",
+			"template":     "worker",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "rig-qualified session owner",
+		Assignee: "gc-packs/smith",
+	}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(doctorOpts{Verbose: true}, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "session ownership is consistent") || strings.Contains(out, "missing-bead-owner") {
+		t.Fatalf("doctor did not resolve the rig-qualified session alias:\n%s", out)
 	}
 }
 

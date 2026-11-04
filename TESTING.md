@@ -51,9 +51,10 @@ took a 96-core host to load 600. An agent there never runs the first row
 (`bazel test //...`, `make test`, `make check`). It runs named targets and
 subtrees while iterating, and
 `make check-affected AFFECTED_BASE=origin/<target branch>` as its pre-flight,
-the one sanctioned route to `go test`. The merge gate and CI run the whole
-repo. Pre-push still starts the whole-repo suite on Go changes unless the
-destination ref matches `git config gascity.prePushSkipRef`.
+which runs selected Bazel targets. If selection requires the whole repo, the
+runner refuses and requires `make check` on a remote executor or CI. The merge
+gate and CI run the whole repo. Pre-push still starts the whole-repo suite on
+Go changes unless the destination ref matches `git config gascity.prePushSkipRef`.
 
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
@@ -108,22 +109,33 @@ which engine it uses.
 working tree against the merge base with `AFFECTED_BASE` (default
 `origin/HEAD`), untracked files included, and runs:
 
-- `make check-go`'s shell guards, with formatting limited to the changed Go files;
-- nogo over the changed packages and every package that imports them (`make lint-targets`);
-- `go test` over the changed packages, test targets that list a changed file, importers while
-  there are at most `AFFECTED_MAX_RDEP_TESTS` (5), and test targets that read a changed file
-  through a filegroup, such as the repository-wide scanners, while there are at most
-  `AFFECTED_MAX_READER_TESTS` (5) (`make test-go-pkgs`); a selected test target that `go test`
-  cannot run goes to `make test-bazel-targets`.
+- the shell guards shared with `make check`, with formatting limited to changed Go files;
+- nogo over changed packages and every package that imports them (`make lint-targets`);
+- `bazel test` over every registered unit test target in each selected Go package,
+  including auxiliary `go_test` and variant targets (`make test-bazel-targets`).
+  Selection includes changed packages, packages containing a direct reader of a changed
+  file, and importers while there are at most `AFFECTED_MAX_RDEP_TESTS` (5). Aggregate
+  readers through filegroups run while there are at most `AFFECTED_MAX_READER_TESTS` (5).
+  Direct readers outside Go packages run as their declared Bazel test targets.
+
+Target names come from Bazel's graph, never a guessed `<package>_test` name.
+Manual targets remain in their explicitly invoked tiers, and the runner does not
+add integration or acceptance configuration. Those tiers still require their
+matching commands above. Packages with untagged Go tests but no registered
+`go_test` fail closed with a `make bazel-sync` remedy.
 
 A diff that touches the Go module, Bazel's module or workspace configuration,
 a `.bzl` file, `tools/`, `third_party/`, the Makefile, the linter
-configuration, the root BUILD file, or a BUILD file outside a Go package runs
-the full `make check-go` instead. The same holds for a Go file outside every
-package and for any selection step that fails. A changed package without a
-BUILD file fails the run until `make bazel-sync` writes one.
+configuration, the root BUILD file, or a BUILD file outside a Go package requires
+the full `make check` on a remote executor or CI. The same holds for a Go file
+outside every package and any failed, unsupported or ambiguous selection.
+`check-affected` exits nonzero with the reason and recovery command; it never
+starts a whole-repository local suite or invokes `check-go` as a fallback.
+A changed package without a BUILD file fails until `make bazel-sync` writes one.
+Human/offline Go-native checks remain explicit: `make check-go` or
+`make test-go-pkgs GO_TEST_PKGS='./internal/config'`; they are not the Bazel gate.
 `make check-affected AFFECTED_ACTION=plan` prints the selection without
-running it. The selector is `scripts/affected-preflight`.
+running checks. The selector is `scripts/affected-preflight`.
 
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`

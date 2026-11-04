@@ -234,7 +234,7 @@ check: check-release-dist-ignore check-routed-test-rows check-split-topology-row
 ## check-go: the same gates without Bazel: golangci-lint fmt/lint, go vet, go test (offline convenience; CI does not run it)
 check-go: fmt-check lint-golangci vet-go check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test-go
 
-## check-affected: pre-flight scoped to the diff against AFFECTED_BASE: check-go's shell guards, nogo over the changed and importing packages, go test over the packages the diff can affect; runs check-go when the diff touches build configuration
+## check-affected: branch pre-flight: shell guards, nogo over changed/importing packages, all selected Bazel unit test targets; unbounded scope requires a remote/CI full gate
 # scripts/affected-preflight documents the selection. AFFECTED_ACTION=plan
 # prints it without running anything. Importer and aggregate-reader tests run
 # only up to their caps; nogo still builds every importer.
@@ -571,12 +571,12 @@ UNIT_TEST_RUNNER = GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_
 test-go: test-fsys-darwin-compile
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(UNIT_TEST_RUNNER) ./...
 
-## test-go-pkgs: test-go over only the packages in GO_TEST_PKGS (check-affected's go test step)
+## test-go-pkgs: human/offline Go-native sweep over GO_TEST_PKGS (check-affected uses Bazel)
 test-go-pkgs: test-fsys-darwin-compile
 	@test -n "$(strip $(GO_TEST_PKGS))" || { echo "test-go-pkgs: set GO_TEST_PKGS to the packages to test" >&2; exit 2; }
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(UNIT_TEST_RUNNER) $(GO_TEST_PKGS)
 
-## test-bazel-targets: bazel test the targets in BAZEL_TEST_TARGETS (check-affected's step for test targets go test cannot run)
+## test-bazel-targets: bazel test every target in BAZEL_TEST_TARGETS (check-affected's test step)
 test-bazel-targets: bazel-tmpdir
 	@test -n "$(strip $(BAZEL_TEST_TARGETS))" || { echo "test-bazel-targets: set BAZEL_TEST_TARGETS to the Bazel test targets" >&2; exit 2; }
 	$(BAZEL_TEST) $(BAZEL_TEST_TARGETS)

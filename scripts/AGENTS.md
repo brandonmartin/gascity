@@ -126,3 +126,18 @@ Large test selectors factor shared identifier prefixes through Python 3 before
 exec, preserving exact shard membership within the single-argument size limit.
 Selections still over the argument budget fail closed with a request for more
 shards; never replace them with a wildcard that could duplicate or omit tests.
+
+## Affected preflight keeps Bazel target coverage
+
+`check-affected` executes shell guards, nogo for changed packages and their
+importers, and selected Bazel test targets. Resolve every selected package's
+registered unit test targets from the graph, including auxiliary Go tests and
+variants; never substitute `go test` or assume `<leaf>_test` covers a package.
+Keep direct readers, importer/aggregate-reader caps and manual/tagged-tier
+boundaries. An unsupported, ambiguous or failed mapping cannot pass.
+
+When the diff requires a full check, return nonzero with a remote-executor/CI
+`make check` requirement. Never silently start a whole-repo local suite or fall
+back to `check-go`. Go-native runners remain explicit human/offline commands.
+`affected_preflight_test.go` drives the real selector and Makefile with command
+recorders; test selection and failures without executing a full suite.

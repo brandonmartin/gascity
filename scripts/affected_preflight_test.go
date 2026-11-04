@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,7 +9,7 @@ import (
 )
 
 // The affected pre-flight (make check-affected, scripts/affected-preflight)
-// replaces a cold whole-repository check-go in a cat's pre-flight. These
+// bounds a branch pre-flight without launching a whole-repository suite. These
 // tests drive the real Makefile target and selector over a temporary module
 // with real git and go list; make and bazel are recorders, and the fake bazel
 // answers the reader queries from files the test writes.
@@ -32,11 +33,10 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.requireMakeCalls(t,
 			f.guards(),
 			[]string{"lint-targets", "LINT_TARGETS=//alpha:all //beta:all"},
-			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//:format_test"},
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./alpha ./beta"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//:format_test //alpha:alpha_test //beta:beta_test"},
 		)
 		queries := f.bazelCalls(t)
-		if len(queries) != 2 || !strings.Contains(strings.Join(queries[0], " "), `set("//alpha:alpha.go")`) {
+		if len(queries) != 3 || !strings.Contains(strings.Join(queries[0], " "), `set("//alpha:alpha.go")`) {
 			t.Errorf("bazel calls = %v, want a direct and an aggregate query over //alpha:alpha.go", queries)
 		}
 	})
@@ -57,7 +57,7 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.requireMakeCalls(t,
 			f.guards(),
 			[]string{"lint-targets", "LINT_TARGETS=//gamma:all"},
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./gamma"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//gamma:gamma_test"},
 		)
 	})
 
@@ -69,7 +69,7 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.requireMakeCalls(t,
 			f.guards(),
 			[]string{"lint-targets", "LINT_TARGETS=//gamma:all"},
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./gamma"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//gamma:gamma_test"},
 		)
 	})
 
@@ -95,8 +95,8 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.git(t, "git add .cursor/hooks.json")
 		writeTestFile(t, filepath.Join(f.queryDir, "undeclared"), "//:.cursor/hooks.json\n")
 
-		out := f.mustRun(t)
-		f.requireMakeCalls(t, []string{"check-go"})
+		out := f.mustRefuse(t)
+		f.requireMakeCalls(t)
 		if !strings.Contains(out, "affected-preflight: full check: selection failed:") ||
 			!strings.Contains(out, "no such target '//:.cursor/hooks.json'") {
 			t.Errorf("tracked undeclared file did not select the full check:\n%s", out)
@@ -109,8 +109,8 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		writeTestFile(t, filepath.Join(f.queryDir, "undeclared"), "//:.cursor/hooks.json\n")
 		writeTestFile(t, filepath.Join(f.queryDir, "fail"), "")
 
-		out := f.mustRun(t)
-		f.requireMakeCalls(t, []string{"check-go"})
+		out := f.mustRefuse(t)
+		f.requireMakeCalls(t)
 		if !strings.Contains(out, "affected-preflight: full check: selection failed:") ||
 			!strings.Contains(out, "fake query failure") {
 			t.Errorf("unrelated Bazel error did not select the full check:\n%s", out)
@@ -125,7 +125,7 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.requireMakeCalls(t,
 			f.guards(),
 			[]string{"lint-targets", "LINT_TARGETS=//alpha:all //beta:all"},
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./alpha ./beta"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//alpha:alpha_test //beta:beta_test"},
 		)
 	})
 
@@ -137,7 +137,7 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.mustRun(t)
 		f.requireMakeCalls(t,
 			f.guards(),
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./gamma"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//gamma:gamma_test"},
 		)
 		queries := f.bazelCalls(t)
 		if len(queries) == 0 || !strings.Contains(strings.Join(queries[0], " "), `set("//:docs/guide.md")`) {
@@ -154,9 +154,11 @@ func TestAffectedPreflightSelectsTheDiff(t *testing.T) {
 		f.mustRun(t)
 		f.requireMakeCalls(t,
 			f.guards(),
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./gamma"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//gamma:gamma_test"},
 		)
-		f.requireNoBazelCalls(t)
+		if calls := f.bazelCalls(t); len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "//gamma:all") {
+			t.Errorf("deleted data queries = %v, want the owning package target query", calls)
+		}
 	})
 
 	t.Run("no change runs the guards only", func(t *testing.T) {
@@ -177,7 +179,7 @@ func TestAffectedPreflightCapsIndirectTests(t *testing.T) {
 		f.requireMakeCalls(t,
 			f.guards(),
 			[]string{"lint-targets", "LINT_TARGETS=//alpha:all //beta:all"},
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./alpha"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//alpha:alpha_test"},
 		)
 		if !strings.Contains(out, "importer tests not run (1 > AFFECTED_MAX_RDEP_TESTS=0") || !strings.Contains(out, "./beta") {
 			t.Errorf("output does not name the untested importer:\n%s", out)
@@ -193,7 +195,7 @@ func TestAffectedPreflightCapsIndirectTests(t *testing.T) {
 		f.requireMakeCalls(t,
 			f.guards(),
 			[]string{"lint-targets", "LINT_TARGETS=//gamma:all"},
-			[]string{"test-go-pkgs", "GO_TEST_PKGS=./gamma"},
+			[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//gamma:gamma_test"},
 		)
 		if !strings.Contains(out, "aggregate-reader tests not run (2 > AFFECTED_MAX_READER_TESTS=1): ./alpha //:format_test") {
 			t.Errorf("output does not name the untested readers:\n%s", out)
@@ -201,7 +203,7 @@ func TestAffectedPreflightCapsIndirectTests(t *testing.T) {
 	})
 }
 
-func TestAffectedPreflightFailsClosedToCheckGo(t *testing.T) {
+func TestAffectedPreflightRequiresFullGate(t *testing.T) {
 	for name, change := range map[string]func(t *testing.T, f affectedFixture){
 		"go.mod":               func(t *testing.T, f affectedFixture) { appendTestFile(t, f, "go.mod", "\n") },
 		"MODULE.bazel":         func(t *testing.T, f affectedFixture) { appendTestFile(t, f, "MODULE.bazel", "# x\n") },
@@ -229,8 +231,8 @@ func TestAffectedPreflightFailsClosedToCheckGo(t *testing.T) {
 			f := newAffectedFixture(t)
 			change(t, f)
 
-			out := f.mustRun(t)
-			f.requireMakeCalls(t, []string{"check-go"})
+			out := f.mustRefuse(t)
+			f.requireMakeCalls(t)
 			if !strings.Contains(out, "affected-preflight: full check: ") {
 				t.Errorf("output does not say why it ran the full check:\n%s", out)
 			}
@@ -272,9 +274,114 @@ func TestAffectedPreflightPlanRunsNothing(t *testing.T) {
 
 	out := f.mustRun(t, "AFFECTED_ACTION=plan")
 	f.requireMakeCalls(t)
-	if !strings.Contains(out, "affected-preflight: go test: ./gamma") {
+	if !strings.Contains(out, "affected-preflight: bazel test: //gamma:gamma_test") {
 		t.Errorf("plan does not list the selected tests:\n%s", out)
 	}
+}
+
+func TestAffectedPreflightCoversEveryRegisteredUnitTarget(t *testing.T) {
+	f := newAffectedFixture(t)
+	appendTestFile(t, f, "gamma/gamma.go", "// changed\n")
+	f.answerPackage(t, "gamma", "go_test rule //gamma:gamma_test\ngo_test rule //gamma:auxiliary_test\ngo_variant_test rule //gamma:variant_test\ngo_variant_test rule //gamma:integration_test manual\n")
+
+	f.mustRun(t)
+	f.requireMakeCalls(t,
+		f.guards(),
+		[]string{"lint-targets", "LINT_TARGETS=//gamma:all"},
+		[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//gamma:auxiliary_test //gamma:gamma_test //gamma:variant_test"},
+	)
+}
+
+func TestAffectedPreflightDirectReadersKeepAllPackageTargets(t *testing.T) {
+	f := newAffectedFixture(t)
+	appendTestFile(t, f, "docs/guide.md", "changed\n")
+	f.answerQueries(t, "go_test rule //gamma:gamma_test\nsh_test rule //checks:reader_test\ngo_variant_test rule //gamma:slow_test manual\n", "")
+	f.answerPackage(t, "gamma", "go_test rule //gamma:gamma_test\ngo_test rule //gamma:other_test\n")
+
+	f.mustRun(t)
+	f.requireMakeCalls(t,
+		f.guards(),
+		[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//checks:reader_test //gamma:gamma_test //gamma:other_test"},
+	)
+}
+
+func TestAffectedPreflightManualReadersStayInTheirTier(t *testing.T) {
+	f := newAffectedFixture(t)
+	appendTestFile(t, f, "docs/guide.md", "changed\n")
+	f.answerQueries(t, "go_test rule //gamma:integration_test manual\n", "go_variant_test rule //gamma:acceptance_test manual\n")
+
+	out := f.mustRun(t)
+	f.requireMakeCalls(t, f.guards())
+	if !strings.Contains(out, "manual") {
+		t.Errorf("plan must explain excluded manual targets:\n%s", out)
+	}
+}
+
+func TestAffectedPreflightRefusesMissingRegisteredTests(t *testing.T) {
+	f := newAffectedFixture(t)
+	appendTestFile(t, f, "alpha/alpha.go", "// changed\n")
+	f.answerPackage(t, "alpha", "")
+
+	out := f.mustRefuse(t)
+	f.requireMakeCalls(t)
+	if !strings.Contains(out, "./alpha") || !strings.Contains(out, "make bazel-sync") {
+		t.Errorf("missing-target refusal lacks package and recovery command:\n%s", out)
+	}
+}
+
+func TestAffectedPreflightRejectsMalformedTargetMapping(t *testing.T) {
+	for name, query := range map[string]string{
+		"foreign label":    `<query><rule class="go_test" name="@foreign//gamma:gamma_test"/></query>`,
+		"unsupported rule": `<query><rule class="go_test_run" name="//gamma:run"/></query>`,
+		"ambiguous label":  `<query><rule class="go_test" name="//gamma:gamma_test"/><rule class="sh_test" name="//gamma:gamma_test"/></query>`,
+		"truncated XML":    `<query><rule`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAffectedFixture(t)
+			appendTestFile(t, f, "docs/guide.md", "changed\n")
+			writeTestFile(t, filepath.Join(f.queryDir, "direct"), query)
+
+			f.mustRefuse(t)
+			f.requireMakeCalls(t)
+		})
+	}
+}
+
+func TestAffectedPreflightImporterKeepsAuxiliaryTargets(t *testing.T) {
+	f := newAffectedFixture(t)
+	appendTestFile(t, f, "alpha/alpha.go", "// changed\n")
+	f.answerPackage(t, "beta", "go_test rule //beta:beta_test\ngo_test rule //beta:aux_test\n")
+
+	f.mustRun(t)
+	f.requireMakeCalls(t,
+		f.guards(),
+		[]string{"lint-targets", "LINT_TARGETS=//alpha:all //beta:all"},
+		[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//alpha:alpha_test //beta:aux_test //beta:beta_test"},
+	)
+}
+
+func TestAffectedPreflightGuardFailureStopsBeforeBazel(t *testing.T) {
+	f := newAffectedFixture(t)
+	appendTestFile(t, f, "gamma/gamma.go", "// changed\n")
+	out, err := f.run("AFFECTED_FAKE_MAKE_FAIL=check-release-dist-ignore")
+	if err == nil || !strings.Contains(out, "Error 3") {
+		t.Fatalf("guard failure was not propagated:\n%s\n%v", out, err)
+	}
+	f.requireMakeCalls(t, f.guards())
+}
+
+func TestAffectedPreflightPropagatesTestFailure(t *testing.T) {
+	f := newAffectedFixture(t)
+	appendTestFile(t, f, "gamma/gamma.go", "// changed\n")
+	out, err := f.run("AFFECTED_FAKE_MAKE_FAIL=test-bazel-targets")
+	if err == nil || !strings.Contains(out, "Error 3") {
+		t.Fatalf("test failure was not propagated:\n%s\n%v", out, err)
+	}
+	f.requireMakeCalls(t,
+		f.guards(),
+		[]string{"lint-targets", "LINT_TARGETS=//gamma:all"},
+		[]string{"test-bazel-targets", "BAZEL_TEST_TARGETS=//gamma:gamma_test"},
+	)
 }
 
 type affectedFixture struct {
@@ -347,11 +454,23 @@ if [ -e "$AFFECTED_FAKE_QUERY_DIR/undeclared" ]; then
   done < "$AFFECTED_FAKE_QUERY_DIR/undeclared"
 fi
 case "$*" in
+  *'tests(set('*)
+    echo '<query>'
+    for pkg in alpha beta gamma; do
+      case "$*" in
+        *"//$pkg:all"*) cat "$AFFECTED_FAKE_QUERY_DIR/package-$pkg" ;;
+      esac
+    done
+    echo '</query>'
+    ;;
   *filegroup*) cat "$AFFECTED_FAKE_QUERY_DIR/aggregate" ;;
   *) cat "$AFFECTED_FAKE_QUERY_DIR/direct" ;;
 esac
 `)
 	f.answerQueries(t, "", "")
+	for _, pkg := range []string{"alpha", "beta", "gamma"} {
+		f.answerPackage(t, pkg, "go_test rule //"+pkg+":"+pkg+"_test\n")
+	}
 	f.git(t,
 		"git init -q -b main",
 		"git config user.email affected@example.invalid",
@@ -376,8 +495,43 @@ func appendTestFile(t *testing.T, f affectedFixture, name, content string) {
 
 func (f affectedFixture) answerQueries(t *testing.T, direct, aggregate string) {
 	t.Helper()
-	writeTestFile(t, filepath.Join(f.queryDir, "direct"), direct)
-	writeTestFile(t, filepath.Join(f.queryDir, "aggregate"), aggregate)
+	writeTestFile(t, filepath.Join(f.queryDir, "direct"), "<query>"+affectedQueryRules(direct)+"</query>")
+	writeTestFile(t, filepath.Join(f.queryDir, "aggregate"), "<query>"+affectedQueryRules(aggregate)+"</query>")
+}
+
+// Query fixtures include tags so an explicit Bazel label cannot accidentally
+// opt a manual integration/acceptance target into the unit pre-flight.
+func affectedQueryRules(lines string) string {
+	var out strings.Builder
+	for _, line := range strings.Split(strings.TrimSpace(lines), "\n") {
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			continue
+		}
+		fmt.Fprintf(&out, `<rule class=%q name=%q><list name="tags">`, words[0], words[2])
+		for _, tag := range words[3:] {
+			fmt.Fprintf(&out, `<string value=%q/>`, tag)
+		}
+		out.WriteString(`</list></rule>`)
+	}
+	return out.String()
+}
+
+func (f affectedFixture) answerPackage(t *testing.T, pkg, targets string) {
+	t.Helper()
+	writeTestFile(t, filepath.Join(f.queryDir, "package-"+pkg), affectedQueryRules(targets))
+}
+
+func (f affectedFixture) mustRefuse(t *testing.T) string {
+	t.Helper()
+	out, err := f.run()
+	if err == nil {
+		t.Fatalf("check-affected passed an unbounded or unsupported selection:\n%s", out)
+	}
+	if !strings.Contains(out, "full check:") || !strings.Contains(out, "remote executor or CI") {
+		t.Errorf("refusal lacks an actionable full-gate requirement:\n%s", out)
+	}
+	return out
 }
 
 func (f affectedFixture) git(t *testing.T, commands ...string) string {

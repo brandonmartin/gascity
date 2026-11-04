@@ -24,18 +24,18 @@ Selection:
   changed Go files.
 
 The steps run through make: the guards, `lint-targets` (the nogo build),
-`test-bazel-targets` and `test-go-pkgs`. A selected Go package is tested with
-`go test`; a selected test target that is not a `go_test` of a root-module
-package runs under `bazel test`. A changed package without a BUILD file fails
-the run: `make bazel-sync` writes it, and CI's BUILD-sync gate would fail too.
+and `test-bazel-targets`. Every selected Go package resolves to all registered
+Bazel unit test targets, including auxiliary Go tests and variants. Manual
+targets stay in their explicitly invoked tiers. A changed package without a
+BUILD file fails the run: `make bazel-sync` writes it, and CI's BUILD-sync gate
+would fail too.
 
-The selection fails closed: a diff touching the Go module, Bazel's module or
-workspace configuration, a `.bzl` file, `tools/`, `third_party/`, the Makefile,
-the linter configuration, a BUILD file outside a Go package, or a Go file
-outside every package `go list` reports runs the full `make check-go`, and so
-does any step of the selection that cannot complete. An untracked path that
-Bazel does not declare is skipped only as a Bazel reader candidate; other
-selection failures still widen the check.
+The selection fails closed: a diff touching build configuration or tooling,
+a Go file outside every package, or an incomplete/failed target lookup
+requires the full `make check` on a remote executor or CI. It never launches
+a whole-repository local suite or falls back to Go-native execution. An
+untracked path Bazel does not declare is skipped only as a reader candidate;
+other selection failures still require the full gate.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 FULL_CHECK_NAMES = frozenset(
@@ -113,6 +114,7 @@ class Package:
     dir: str
     import_path: str
     testable: bool
+    has_tests: bool
     imports: frozenset[str]
     embeds: tuple[str, ...]
 
@@ -128,7 +130,7 @@ class Plan:
     refusal: str = ""
     touched: list[str] = field(default_factory=list)
     build_targets: list[str] = field(default_factory=list)
-    go_test_packages: list[str] = field(default_factory=list)
+    test_packages: list[str] = field(default_factory=list)
     bazel_tests: list[str] = field(default_factory=list)
     untested_rdeps: list[str] = field(default_factory=list)
     untested_readers: list[str] = field(default_factory=list)
@@ -224,6 +226,7 @@ def load_packages() -> dict[str, Package]:
             dir=rel_dir,
             import_path=raw["ImportPath"],
             testable=any(raw.get(key) for key in ("GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles")),
+            has_tests=any(raw.get(key) for key in ("TestGoFiles", "XTestGoFiles")),
             imports=frozenset(
                 name
                 for key in ("Imports", "TestImports", "XTestImports")
@@ -288,22 +291,37 @@ def bazel_all(directory: str) -> str:
     return f"//{directory}:all"
 
 
-def query_test_targets(bazel: str, labels: list[str], aggregate: bool) -> list[tuple[str, str]]:
+def query_tests(bazel: str, expression: str) -> list[tuple[str, str, bool]]:
+    """Read test rules and tier tags without guessing target names."""
+    output = command_output([bazel, "query", "--output=xml", expression])
+    try:
+        root = ET.fromstring(output)
+    except ET.ParseError as error:
+        raise SelectionError(f"bazel query produced malformed XML: {error}") from error
+    if root.tag != "query":
+        raise SelectionError(f"bazel query produced an unexpected root {root.tag!r}")
+    targets = []
+    seen: set[str] = set()
+    for rule in root:
+        kind, label = rule.get("class", ""), rule.get("name", "")
+        if rule.tag != "rule" or not kind.endswith("_test"):
+            raise SelectionError(f"unsupported Bazel test mapping: {kind!r} {label!r}")
+        target_package(label)
+        if label in seen:
+            raise SelectionError(f"ambiguous Bazel test mapping for {label!r}")
+        seen.add(label)
+        tags = {tag.get("value") for tag in rule.findall("./list[@name='tags']/string")}
+        targets.append((kind, label, "manual" in tags))
+    return targets
+
+
+def query_test_targets(bazel: str, labels: list[str], aggregate: bool) -> list[tuple[str, str, bool]]:
     files = " ".join(json.dumps(label) for label in labels)
     if aggregate:
-        expression = f'kind("_test rule$", rdeps(//..., kind(filegroup, rdeps(//..., set({files}))), 1))'
+        expression = f'tests(rdeps(//..., kind(filegroup, rdeps(//..., set({files}))), 1))'
     else:
-        expression = f'kind("_test rule$", rdeps(//..., set({files}), 1))'
-    output = os.fsdecode(command_output([bazel, "query", "--output=label_kind", expression]))
-    targets = []
-    for line in output.splitlines():
-        words = line.split()
-        if not words:
-            continue
-        if len(words) != 3 or words[1] != "rule":
-            raise SelectionError(f"bazel query produced an unexpected line {line!r}")
-        targets.append((words[0], words[2]))
-    return targets
+        expression = f'tests(rdeps(//..., set({files}), 1))'
+    return query_tests(bazel, expression)
 
 
 def bazel_target_exists(bazel: str, label: str) -> bool:
@@ -410,7 +428,12 @@ def select(plan: Plan) -> None:
     bazel_tests: set[str] = set()
     plan_notes = plan.notes
 
-    def place(kind: str, label: str, into_pkgs: set[str], into_bazel: set[str]) -> None:
+    def place(kind: str, label: str, manual: bool, into_pkgs: set[str], into_bazel: set[str]) -> None:
+        if manual:
+            note = f"{label}: manual target stays in its explicitly invoked tier"
+            if note not in plan_notes:
+                plan_notes.append(note)
+            return
         package = target_package(label)
         if kind == "go_test" and package in packages:
             if packages[package].testable:
@@ -423,8 +446,8 @@ def select(plan: Plan) -> None:
             into_bazel.add(label)
 
     if labels:
-        for kind, label in query_test_targets(bazel, labels, aggregate=False):
-            place(kind, label, test_pkgs, bazel_tests)
+        for kind, label, manual in query_test_targets(bazel, labels, aggregate=False):
+            place(kind, label, manual, test_pkgs, bazel_tests)
 
     importers = {
         pkg.dir
@@ -441,8 +464,8 @@ def select(plan: Plan) -> None:
     if labels and max_reader_tests > 0:
         reader_pkgs: set[str] = set()
         reader_bazel: set[str] = set()
-        for kind, label in query_test_targets(bazel, labels, aggregate=True):
-            place(kind, label, reader_pkgs, reader_bazel)
+        for kind, label, manual in query_test_targets(bazel, labels, aggregate=True):
+            place(kind, label, manual, reader_pkgs, reader_bazel)
         reader_pkgs -= test_pkgs
         reader_bazel -= bazel_tests
         if len(reader_pkgs) + len(reader_bazel) <= max_reader_tests:
@@ -455,7 +478,7 @@ def select(plan: Plan) -> None:
 
     missing_build = sorted(
         directory
-        for directory in code_touched | importers
+        for directory in code_touched | importers | test_pkgs
         if not any(os.path.isfile(os.path.join(directory or ".", name)) for name in BUILD_NAMES)
     )
     if missing_build:
@@ -465,7 +488,29 @@ def select(plan: Plan) -> None:
             + "; run 'make bazel-sync'"
         )
     plan.build_targets = sorted(bazel_all(directory) for directory in code_touched | importers)
-    plan.go_test_packages = sorted(go_test_arg(directory) for directory in test_pkgs)
+    plan.test_packages = sorted(go_test_arg(directory) for directory in test_pkgs)
+    if test_pkgs:
+        package_labels = " ".join(json.dumps(bazel_all(directory)) for directory in sorted(test_pkgs))
+        registered = query_tests(bazel, f"tests(set({package_labels}))")
+        go_test_owners = {target_package(label) for kind, label, _ in registered if kind == "go_test"}
+        for directory in sorted(test_pkgs):
+            if packages[directory].has_tests and directory not in go_test_owners:
+                raise SelectionError(
+                    f"{go_test_arg(directory)} has Go tests but no registered go_test; run 'make bazel-sync'"
+                )
+        for kind, label, manual in registered:
+            if manual:
+                note = f"{label}: manual target stays in its explicitly invoked tier"
+                if note not in plan_notes:
+                    plan_notes.append(note)
+            elif (
+                kind == "go_test"
+                and target_package(label) in packages
+                and not packages[target_package(label)].testable
+            ):
+                plan_notes.append(f"{label}: package has no untagged Go files; the tagged tiers cover it")
+            else:
+                bazel_tests.add(label)
     plan.bazel_tests = sorted(bazel_tests)
 
 
@@ -497,7 +542,7 @@ def print_plan(plan: Plan) -> None:
     for title, items in (
         ("touched packages", plan.touched),
         ("nogo build", plan.build_targets),
-        ("go test", plan.go_test_packages),
+        ("test packages", plan.test_packages),
         ("bazel test", plan.bazel_tests),
     ):
         say(f"{title}: {' '.join(items) if items else '(none)'}")
@@ -529,7 +574,13 @@ def run(plan: Plan) -> int:
     if plan.refusal:
         return 1
     if plan.full_reason:
-        return run_step([*make, "check-go"])
+        print(
+            "affected-preflight: full gate required: run 'make check' with a configured "
+            "remote executor or CI (TESTING.md). No whole-repository local suite was started. "
+            "Humans working offline may explicitly use 'make check-go'; that is not the Bazel gate.",
+            file=sys.stderr,
+        )
+        return 1
     steps = [
         [
             *make,
@@ -542,8 +593,6 @@ def run(plan: Plan) -> int:
         steps.append([*make, "lint-targets", f"LINT_TARGETS={' '.join(plan.build_targets)}"])
     if plan.bazel_tests:
         steps.append([*make, "test-bazel-targets", f"BAZEL_TEST_TARGETS={' '.join(plan.bazel_tests)}"])
-    if plan.go_test_packages:
-        steps.append([*make, "test-go-pkgs", f"GO_TEST_PKGS={' '.join(plan.go_test_packages)}"])
     for step in steps:
         status = run_step(step)
         if status != 0:

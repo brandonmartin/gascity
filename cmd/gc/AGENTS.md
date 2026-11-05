@@ -1,5 +1,9 @@
 # CLI and supervisor implementation
 
+Pack-command dispatch consumes root-owned `--city` and `--rig` before a
+leaf, exports the resolved city and rig to the child environment, and passes
+the leaf's own arguments unchanged. Keep eager and lazy discovery equivalent.
+
 Pool creates prove availability under the complete city-scoped identifier lock
 set. The cross-store census must be live and complete. Within that fence,
 primary alias, runtime-name and identity checks share a fresh type+label session

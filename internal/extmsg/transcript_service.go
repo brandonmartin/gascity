@@ -93,6 +93,14 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		if err != nil {
 			return err
 		}
+		var attributionJSON string
+		if len(input.Attribution) > 0 {
+			encoded, err := json.Marshal(input.Attribution)
+			if err != nil {
+				return fmt.Errorf("encode transcript attribution: %w", err)
+			}
+			attributionJSON = string(encoded)
+		}
 		entry := func(sequence int64) beads.Bead {
 			fields := encodeMetadataFields(input.Metadata, map[string]string{
 				"schema_version":         strconv.Itoa(schemaVersion),
@@ -113,6 +121,9 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				"actor_json":             actorJSON,
 				"attachments_json":       attachmentsJSON,
 			})
+			if attributionJSON != "" {
+				fields["attribution_json"] = attributionJSON
+			}
 			labels := []string{
 				labelTranscriptBase,
 				transcriptConversationLabel(ref),
@@ -334,6 +345,16 @@ func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput)
 		}
 		if state == nil || state.NextSequence <= 1 {
 			out = nil
+			return nil
+		}
+		if id := strings.TrimSpace(input.ProviderMessageID); id != "" {
+			record, err := s.findTranscriptByProviderMessageLocked(ref, id)
+			if err != nil {
+				return err
+			}
+			if record != nil && record.Sequence > after {
+				out = []ConversationTranscriptRecord{*record}
+			}
 			return nil
 		}
 		out, err = s.listTranscriptLocked(ref, after, limit, order)
@@ -1119,6 +1140,12 @@ func decodeTranscriptBead(b beads.Bead) (ConversationTranscriptRecord, error) {
 	if err != nil {
 		return ConversationTranscriptRecord{}, err
 	}
+	var attribution map[string]string
+	if encoded := b.Metadata["attribution_json"]; encoded != "" {
+		if err := json.Unmarshal([]byte(encoded), &attribution); err != nil {
+			return ConversationTranscriptRecord{}, fmt.Errorf("decode transcript %q attribution: %w", b.ID, err)
+		}
+	}
 	return ConversationTranscriptRecord{
 		ID:                b.ID,
 		SchemaVersion:     parseInt(b.Metadata, "schema_version"),
@@ -1128,6 +1155,7 @@ func decodeTranscriptBead(b beads.Bead) (ConversationTranscriptRecord, error) {
 		Provenance:        TranscriptProvenance(strings.TrimSpace(b.Metadata["provenance"])),
 		ProviderMessageID: strings.TrimSpace(b.Metadata["provider_message_id"]),
 		Actor:             actor,
+		Attribution:       attribution,
 		Text:              b.Description,
 		ExplicitTarget:    normalizeHandle(b.Metadata["explicit_target"]),
 		ReplyToMessageID:  strings.TrimSpace(b.Metadata["reply_to_message_id"]),

@@ -84,6 +84,21 @@ conflicting header/body keys or same-key changed bodies are refused. The key is
 also forwarded to the adapter. Cache expiry and process restarts end gc's replay
 protection; durable delivery deduplication remains the adapter's responsibility.
 
+## External-message attribution
+
+Inbound `message.attribution` is an optional dictionary of adapter-defined
+strings. Persist it separately from transcript metadata and carry the original
+persisted assertion into inbound reminders, including duplicate deliveries.
+Treat it as adapter-asserted evidence, trusted only as far as the submitting
+adapter; authority decisions belong to the consuming pack.
+
+`GET /v0/city/{cityName}/extmsg/transcript` accepts `provider_message_id`
+alongside the full conversation reference for an indexed exact lookup. It
+returns zero or one persisted entry, including attribution; the sequence
+cursor still applies. Never look up a provider message ID across conversations
+or accounts. Missing attribution is omitted from the wire and must leave
+existing reminder text and transcript storage unchanged.
+
 ## Dashboard and API-schema gates
 
 - `make dashboard-check` passes for any change touching `internal/api/`,

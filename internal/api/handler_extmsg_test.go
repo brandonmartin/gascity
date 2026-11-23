@@ -468,7 +468,7 @@ func TestExtmsgNotifyMembersDedupesMaterializedNamedSession(t *testing.T) {
 func TestExtmsgNotifyMembersDedupesWhileNamedSessionStarting(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -482,7 +482,7 @@ func TestExtmsgNotifyMembersDedupesWhileNamedSessionStarting(t *testing.T) {
 	// "myrig--worker" is its runtime session name. Both memberships
 	// materialize the same session.
 	ensureDuplicateIdentityMemberships(t, services, ref, "myrig/worker", "myrig--worker")
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named session should not be materialized before notify")
 	}
 
@@ -493,7 +493,7 @@ func TestExtmsgNotifyMembersDedupesWhileNamedSessionStarting(t *testing.T) {
 	fs.sessionProvider = &blockingStartProvider{Fake: fs.sp, started: started, unblock: unblock}
 	startResult := make(chan error, 1)
 	go func() {
-		_, err := srv.resolveSessionIDMaterializingNamedWithContext(context.Background(), fs.cityBeadStore, "myrig/worker")
+		_, err := srv.resolveSessionIDMaterializingNamedWithContext(context.Background(), beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 		startResult <- err
 	}()
 	select {
@@ -513,7 +513,7 @@ func TestExtmsgNotifyMembersDedupesWhileNamedSessionStarting(t *testing.T) {
 		t.Fatal("session start did not finish")
 	}
 
-	workerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+	workerID, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -959,7 +959,7 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 func TestHandleExtMsgBindingListIncludesRoomBoundParticipant(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	seatName := "example-rig/seat-1"

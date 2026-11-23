@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -258,6 +259,12 @@ type hookClaimOps struct {
 	// provider meta: reconciler-tracked drains never set GC_DRAIN, so provider
 	// meta does not cover the population this fence exists for.
 	DrainPending hookDrainPendingFunc
+	// InputAdmission shares the native-input gate with ready/demand and control
+	// dispatch. Production supplies the named class handles at composition.
+	InputAdmission func(context.Context, string, []string, beads.Bead) (sourceworkflow.InputAdmission, error)
+	// InputWorkStores composes the serving work scopes for admission. It keeps
+	// graph routing separate from the work frame that owns live prerequisites.
+	InputWorkStores func(context.Context, string, []string, beads.WorkStore) ([]beads.WorkStore, error)
 	// InputVerdict resolves a candidate to its workflow root and reports the
 	// state of that root's input convoy: pending, complete (tracked work
 	// terminal or handed off), or purged (proven absent by the prover it is
@@ -1055,6 +1062,16 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if stopped {
 			continue
 		}
+		if ops.InputAdmission != nil {
+			admission, err := ops.InputAdmission(ctx, dir, opts.Env, candidate)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "gc hook --claim: input admission for %s: %v\n", candidate.ID, err)
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			if !admission.Ready {
+				continue
+			}
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// re-stamp and the workflow re-check below spend any more store time.
@@ -1270,6 +1287,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		if stopped {
 			continue
+		}
+		if ops.InputAdmission != nil {
+			admission, err := ops.InputAdmission(ctx, dir, opts.Env, candidate)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "gc hook --claim: input admission for %s: %v\n", candidate.ID, err)
+				return hookClaimResult{terminal: true, code: 1}
+			}
+			if !admission.Ready {
+				continue
+			}
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		// The straddle fence asks when the CAS landed; stamp it before the
@@ -1734,6 +1761,26 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		}
 		bead = canonical
 		result.SchemaVersion = "2"
+	}
+	// The input may have been parked, or gained a prerequisite, across the
+	// claim CAS. Revalidate before starting/stamping/delivering new execution.
+	// An adopted obligation stays owned; only an undelivered minted claim is
+	// conditionally released through the existing unwind protocol.
+	if ops.InputAdmission != nil {
+		ctx, cancel := ops.claimMutationContext()
+		admission, err := ops.InputAdmission(ctx, dir, opts.Env, bead)
+		cancel()
+		if err != nil || !admission.Ready {
+			cause := fmt.Sprintf("input admission for %s withheld: %s", bead.ID, admission.Reason)
+			if err != nil {
+				cause = fmt.Sprintf("input admission for %s unavailable: %v", bead.ID, err)
+			}
+			if minted {
+				return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
+			}
+			fmt.Fprintln(stderr, cause) //nolint:errcheck
+			return 1
+		}
 	}
 	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
 	// window plus its reserved claim budget: the claim-write child carries its own

@@ -13481,7 +13481,7 @@ func TestReconcileSessionBeads_ResetBehindLongTickIsNotStalled(t *testing.T) {
 			t.Fatalf("recorded %s for a reset the same pass started: %#v", e.Type, e)
 		}
 	}
-	if got := restartRequestFakeCallCount(env.sp, "Start", "worker"); got != 1 {
+	if got := env.sp.CountCalls("Start", "worker"); got != 1 {
 		t.Fatalf("Start calls = %d, want 1 (the pass enqueued a start on the reset session)", got)
 	}
 }

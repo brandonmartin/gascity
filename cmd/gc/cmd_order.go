@@ -2034,7 +2034,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		}
 		if runRetention {
 			n, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-				stores, now, retentionPolicy, onlyOrders,
+				context.Background(), stores, now, retentionPolicy, onlyOrders,
 				orderTrackingSweepRetentionDeleteBudget)
 			retentionResult.deleted = n
 			retentionErr = err

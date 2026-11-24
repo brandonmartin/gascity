@@ -3820,7 +3820,12 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 // propagated. A store whose delete batch fails counts none of its cleared runs,
 // so those deletes are not charged against limit and later stores may still
 // spend their own allowance: the worst case is len(stores)*limit per pass.
-func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+// It also stops before the next store once ctx is done, returning the partial
+// count joined with ctx's error.
+func sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx context.Context, stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -3832,6 +3837,10 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, 
 		}
 		remaining := limit - deleted
 		if remaining <= 0 {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
 			break
 		}
 		// Enforce the global budget by passing the remaining allowance to the

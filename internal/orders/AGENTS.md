@@ -31,3 +31,7 @@ A failed chunk stops that store's pass and counts none of its cleared runs;
 the per-bead fallback stops at its first failure. The cross-store bounded
 sweep therefore does not charge a failing store's deletes against its budget,
 and its worst case is stores times limit per pass.
+
+Order dispatch must progress independently of tracking and retention sweeps.
+Each maintenance lane owns its cadence, suspension gate, pressure episode, and
+shutdown cancellation; stop and join the lanes when the runtime exits.

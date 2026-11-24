@@ -498,15 +498,12 @@ var bdRelocatedClassMintPaths = map[string]string{
 // against it). Title, priority, description and assignee are absent because
 // classification does not read them — they are stepped over, not modeled.
 var bdRelocatedClassCreateShapeFlags = map[string]func(shape *beads.Bead, scopeRoot, value string) error{
-	"--type":   bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType)),
-	"-t":       bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType)),
-	"--labels": bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
-	"-l":       bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
-	"--label":  bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
-	"--metadata": func(shape *beads.Bead, scopeRoot, value string) error {
-		bdRelocatedClassCreateAddMetadata(shape, scopeRoot, value)
-		return nil
-	},
+	"--type":     bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType)),
+	"-t":         bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType)),
+	"--labels":   bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
+	"-l":         bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
+	"--label":    bdRelocatedClassCreateIgnoringScope(bdRelocatedClassCreateAddLabels),
+	"--metadata": bdRelocatedClassCreateInfallibleScoped(bdRelocatedClassCreateAddMetadata),
 }
 
 // bdRelocatedClassCreateIgnoringScope adapts a shape recorder that reads only
@@ -522,6 +519,15 @@ func bdRelocatedClassCreateIgnoringScope(apply func(*beads.Bead, string) error) 
 func bdRelocatedClassCreateInfallible(apply func(*beads.Bead, string)) func(*beads.Bead, string) error {
 	return func(shape *beads.Bead, value string) error {
 		apply(shape, value)
+		return nil
+	}
+}
+
+// bdRelocatedClassCreateInfallibleScoped adapts a shape recorder that reads
+// the scope root and cannot fail to the table's signature.
+func bdRelocatedClassCreateInfallibleScoped(apply func(*beads.Bead, string, string)) func(*beads.Bead, string, string) error {
+	return func(shape *beads.Bead, scopeRoot, value string) error {
+		apply(shape, scopeRoot, value)
 		return nil
 	}
 }

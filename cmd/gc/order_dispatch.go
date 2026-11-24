@@ -3969,7 +3969,9 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 		n := min(len(ids), orderTrackingRetentionDeleteChunk, limit-len(cleared))
 		group := ids[:n]
 		ids = ids[n:]
-		guardErrs := guardOrderTrackingRetentionRoots(store, group)
+		guardErrs := guardOrderTrackingRetentionRoots(group, func(id string) error {
+			return assertWorkflowDeleteLeavesNothingStranded(store, id, nil)
+		})
 		for i, id := range group {
 			if err := guardErrs[i]; err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
@@ -3991,12 +3993,12 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	return len(cleared), deleteErr
 }
 
-// guardOrderTrackingRetentionRoots runs the per-root stranding guard for each
-// id, at most orderTrackingRetentionGuardWorkers at a time, and returns the
-// results in id order. It returns only after every guard has finished, so the
+// guardOrderTrackingRetentionRoots runs guard, the per-root stranding guard,
+// for each id, at most orderTrackingRetentionGuardWorkers at a time, and
+// returns the results in id order. It returns only after every guard has finished, so the
 // caller deletes nothing while a guard read is still in flight. A guard whose
 // read fails reports that error, and the caller keeps the root.
-func guardOrderTrackingRetentionRoots(store beads.Store, ids []string) []error {
+func guardOrderTrackingRetentionRoots(ids []string, guard func(id string) error) []error {
 	errs := make([]error, len(ids))
 	jobs := make(chan int, len(ids))
 	for i := range ids {
@@ -4009,7 +4011,7 @@ func guardOrderTrackingRetentionRoots(store beads.Store, ids []string) []error {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				errs[i] = assertWorkflowDeleteLeavesNothingStranded(store, ids[i], nil)
+				errs[i] = guard(ids[i])
 			}
 		}()
 	}

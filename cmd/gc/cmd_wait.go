@@ -1079,9 +1079,9 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 		return beads.Bead{}, err
 	}
 	cityRoot := filepath.Clean(cityPath)
-	openStore := byIDStoreOpener(cfg, cityPath, depID, func(scopeRoot string) (beads.Store, error) {
-		return waitDependencyScopeStore(scopeRoot, cityPath)
-	})
+	// Suspended scopes that are not the dependency's own are skipped, as
+	// byIDStoreOpener does, so an unrelated suspended rig is never opened.
+	asleep := byIDSuspendedStoreRoots(cfg, cityPath, depID)
 	// A scope whose store will not open is not a scope that lacks the
 	// dependency. It is remembered, and if no other scope holds the id the read
 	// fails with it rather than answering ErrNotFound — which the wait consumes
@@ -1100,7 +1100,10 @@ func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string
 			}
 			continue
 		}
-		scopeStore, err := openStore(scopeRoot)
+		if len(asleep[normalizePathForCompare(scopeRoot)]) > 0 {
+			continue
+		}
+		scopeStore, err := waitDependencyScopeStore(scopeRoot, cityPath)
 		if err != nil {
 			if openErr == nil {
 				openErr = fmt.Errorf("opening the bead store at %s to read wait dependency %s: %w", scopeRoot, depID, err)

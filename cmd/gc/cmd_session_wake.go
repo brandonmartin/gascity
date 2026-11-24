@@ -58,10 +58,10 @@ type sessionWakeDeps struct {
 	// cfgErr is the city config's load error, when cfg did not load.
 	cfgErr error
 	store  beads.Store
-	// resolveSessionID resolves the wake target, reopening a closed named
-	// session's row through beforeReopen; production wires
-	// resolveSessionIDMaterializingNamedBeforeReopen, and nil means that.
-	resolveSessionID func(cityPath string, cfg *config.City, store beads.Store, target string, beforeReopen func(id string) error) (string, error)
+	// resolveSessionID resolves the wake target against the session store,
+	// reopening a closed named session's row through beforeReopen; nil means
+	// resolveSessionIDMaterializingNamedBeforeReopen over the city.
+	resolveSessionID func(target string, beforeReopen func(id string) error) (string, error)
 	// willNotStart is the will-not-start predicate; nil means wakeWillNotStart.
 	willNotStart             func(session.Info, wakeVerdictDeps, time.Time) (string, bool)
 	cfg                      *config.City
@@ -103,15 +103,14 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 	cityPath, cityErr := resolveCity()
 	cfg, cfgErr := cliCityConfig(cityPath, cityErr, stderr)
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
-		opKey:            key,
-		cfgErr:           cfgErr,
-		sp:               wakeVerdictProvider(),
-		store:            store,
-		resolveSessionID: resolveSessionIDMaterializingNamedBeforeReopen,
-		willNotStart:     wakeWillNotStart,
-		cfg:              cfg,
-		cityPath:         cityPath,
-		cityResolved:     cityErr == nil,
+		opKey:        key,
+		cfgErr:       cfgErr,
+		sp:           wakeVerdictProvider(),
+		store:        store,
+		willNotStart: wakeWillNotStart,
+		cfg:          cfg,
+		cityPath:     cityPath,
+		cityResolved: cityErr == nil,
 		rigStores: func() map[string]beads.Store {
 			return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 		},
@@ -290,9 +289,11 @@ func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target st
 	admitted, start := "", cliOpStart(0)
 	resolve := deps.resolveSessionID
 	if resolve == nil {
-		resolve = resolveSessionIDMaterializingNamedBeforeReopen
+		resolve = func(target string, beforeReopen func(id string) error) (string, error) {
+			return resolveSessionIDMaterializingNamedBeforeReopen(deps.cityPath, deps.cfg, sessStore, target, beforeReopen)
+		}
 	}
-	id, err := resolve(deps.cityPath, deps.cfg, sessStore, target, func(closedID string) error {
+	id, err := resolve(target, func(closedID string) error {
 		admitted, start = closedID, op.retarget(closedID)
 		if start != cliOpExecute {
 			return errWakeNotAdmitted

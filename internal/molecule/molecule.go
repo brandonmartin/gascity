@@ -1393,7 +1393,7 @@ func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe
 
 // attachWorkflowRoot follows the parent's container keys
 // (beadmeta.ResolveNestingRootID), ignoring missing or closed roots.
-func attachWorkflowRoot(store beads.Store, parent beads.Bead) (beads.Bead, error) {
+func attachWorkflowRoot(store beads.MoleculeTarget, parent beads.Bead) (beads.Bead, error) {
 	rootID := beadmeta.ResolveNestingRootID(parent.Metadata, parent.ID)
 	if rootID == parent.ID {
 		return parent, nil

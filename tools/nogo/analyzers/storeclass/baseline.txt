@@ -210,7 +210,6 @@ cmd/gc/build_desired_state.go	listOpenForControllerDemandLive	raw-param	1
 cmd/gc/build_desired_state.go	liveReadyForControllerDemandQuery	raw-param	1
 cmd/gc/build_desired_state.go	ownScaleCheckTarget	raw-param	3
 cmd/gc/build_desired_state.go	poolCreateView	raw-field	2
-cmd/gc/build_desired_state.go	readyAssignedWorkAssignees	raw-param	1
 cmd/gc/build_desired_state.go	readyDemandCache	raw-field	2
 cmd/gc/build_desired_state.go	readyDemandCache.cachedSnapshot	raw-param	1
 cmd/gc/build_desired_state.go	readyDemandCache.controllerDemandReady	raw-param	1

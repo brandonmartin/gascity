@@ -2124,7 +2124,9 @@ func collectAssignedWorkBeadsWithStores(
 	go func() {
 		defer wg.Done()
 		defer func() { closedIdxPanic = recover() }()
-		closedIdx = readyAssigneesClosedNamedIndex(cfg, closedNamedStore, pass, point, reads)
+		closedIdx = readyAssigneesClosedNamedIndex(cfg, pass, point, pass.storeLabel(closedNamedStore, "city"), func() (session.ClosedNamedSessionBeadIndex, error) {
+			return demandReadsOrLegacy(reads).ClosedNamedIndex(closedNamedStore)
+		})
 	}()
 	wg.Wait()
 	if closedIdxPanic != nil {
@@ -2315,13 +2317,16 @@ func cfgHasOnDemandNamedSession(cfg *config.City) bool {
 // probed under its qualified name; a partial read keeps the rows it did get.
 // It reads nothing that the assigned-work census writes, so the census runs it
 // alongside its own legs rather than after them.
-func readyAssigneesClosedNamedIndex(cfg *config.City, sessionsStore beads.Store, pass *demandPassTrace, point string, reads demandReads) session.ClosedNamedSessionBeadIndex {
+//
+// readIndex performs the read against the session-class store; leg is that
+// store's trace label.
+func readyAssigneesClosedNamedIndex(cfg *config.City, pass *demandPassTrace, point, leg string, readIndex func() (session.ClosedNamedSessionBeadIndex, error)) session.ClosedNamedSessionBeadIndex {
 	if !cfgHasOnDemandNamedSession(cfg) {
 		return session.ClosedNamedSessionBeadIndex{}
 	}
 	start := pass.now()
-	closedIdx, idxErr := demandReadsOrLegacy(reads).ClosedNamedIndex(sessionsStore)
-	pass.read(demandStoreRead{point: point, leg: pass.storeLabel(sessionsStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
+	closedIdx, idxErr := readIndex()
+	pass.read(demandStoreRead{point: point, leg: leg, op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 	return closedIdx
 }
 

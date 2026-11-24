@@ -32,7 +32,9 @@ import (
 // readyAssignedWorkAssignees is the assigned census's assignee enumeration
 // with its closed named-session index read, as one call.
 func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, pass *demandPassTrace, point string, reads demandReads) []string {
-	closedIdx := readyAssigneesClosedNamedIndex(cfg, cityStore, pass, point, reads)
+	closedIdx := readyAssigneesClosedNamedIndex(cfg, pass, point, pass.storeLabel(cityStore, "city"), func() (session.ClosedNamedSessionBeadIndex, error) {
+		return demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
+	})
 	return readyAssignedWorkAssigneesFromIndex(cfg, sessionBeads, nil, closedIdx)
 }
 

@@ -123,7 +123,6 @@ func TestDoSessionWake_DemandOnlySingletonReportsItWillNotStart(t *testing.T) {
 			}
 			deps := sessionWakeDeps{
 				willNotStart:              wakeWillNotStart,
-				resolveSessionID:          resolveSessionIDMaterializingNamedBeforeReopen,
 				store:                     store,
 				cfg:                       demandOnlySingletonCfg(tt.named),
 				cityPath:                  "/city",

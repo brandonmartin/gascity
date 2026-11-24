@@ -305,21 +305,36 @@ func TestAssignedReadyServesUnheldAssignmentBehindHeldHead(t *testing.T) {
 }
 
 // TestAssignedReadyStaysHumanTransparent: bd's human label is not a dispatch
-// hold, nor is a non-canonical hold:human label, so a task assigned to the seat
-// that carries one is still served ahead of routed work on every reader shape.
+// hold, so a task assigned to the seat that carries it is still served ahead of
+// routed work on every reader shape.
 func TestAssignedReadyStaysHumanTransparent(t *testing.T) {
 	for topoName, topo := range assignedHoldTopologies() {
-		for _, label := range []string{beadmeta.HumanLabel, "hold:human"} {
-			t.Run(topoName+"/"+label, func(t *testing.T) {
-				got, _ := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
-					assignedOpenRow("labeled", assignedHoldTestAlias, label),
-					routedOpenRow(),
-				})
-				if len(got) != 1 || got[0].ID != "labeled" {
-					t.Fatalf("query served %+v, want the %s-labeled assignment ahead of the routed step", got, label)
-				}
+		t.Run(topoName, func(t *testing.T) {
+			got, _ := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
+				assignedOpenRow("labeled", assignedHoldTestAlias, beadmeta.HumanLabel),
+				routedOpenRow(),
 			})
-		}
+			if len(got) != 1 || got[0].ID != "labeled" {
+				t.Fatalf("query served %+v, want the human-labeled assignment ahead of the routed step", got)
+			}
+		})
+	}
+}
+
+// TestAssignedReadyNonCanonicalHoldFallsThroughToRoutedTier: the hook strips any
+// hold:<reason> label, so a query that served one would starve the routed tier
+// below it the way a canonical hold did (#8010).
+func TestAssignedReadyNonCanonicalHoldFallsThroughToRoutedTier(t *testing.T) {
+	for topoName, topo := range assignedHoldTopologies() {
+		t.Run(topoName, func(t *testing.T) {
+			got, _ := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
+				assignedOpenRow("labeled", assignedHoldTestAlias, "hold:human"),
+				routedOpenRow(),
+			})
+			if len(got) != 1 || got[0].ID != "routed" {
+				t.Fatalf("query served %+v, want the routed step behind the hold:human assignment", got)
+			}
+		})
 	}
 }
 
@@ -404,21 +419,33 @@ func TestLegacyControlAssignedReadyServesUnheldWispBehindHeldHead(t *testing.T) 
 	}
 }
 
-// TestAssignedReadyWispStaysHumanTransparent: the wisp probe drops the dispatch
-// holds and nothing else, so a wisp assigned to the seat that carries bd's
-// human label, or a non-canonical hold:human label, is still served ahead of
-// routed work.
+// TestAssignedReadyWispStaysHumanTransparent: the wisp probe drops the hold:
+// namespace and nothing else, so a wisp assigned to the seat that carries bd's
+// human label is still served ahead of routed work.
 func TestAssignedReadyWispStaysHumanTransparent(t *testing.T) {
 	for topoName, topo := range bd104WispTopologies() {
-		for _, label := range []string{beadmeta.HumanLabel, "hold:human"} {
-			t.Run(topoName+"/"+label, func(t *testing.T) {
-				got, _ := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
-					[]fakeReaderRow{routedOpenRow()},
-					[]fakeReaderRow{assignedOpenWisp("labeled", assignedHoldTestAlias, 0, label)})
-				if len(got) != 1 || got[0].ID != "labeled" {
-					t.Fatalf("query served %+v, want the %s-labeled wisp ahead of the routed step", got, label)
-				}
-			})
-		}
+		t.Run(topoName, func(t *testing.T) {
+			got, _ := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
+				[]fakeReaderRow{routedOpenRow()},
+				[]fakeReaderRow{assignedOpenWisp("labeled", assignedHoldTestAlias, 0, beadmeta.HumanLabel)})
+			if len(got) != 1 || got[0].ID != "labeled" {
+				t.Fatalf("query served %+v, want the human-labeled wisp ahead of the routed step", got)
+			}
+		})
+	}
+}
+
+// TestAssignedReadyWispNonCanonicalHoldFallsThroughToRoutedTier is the wisp
+// probe's half of TestAssignedReadyNonCanonicalHoldFallsThroughToRoutedTier.
+func TestAssignedReadyWispNonCanonicalHoldFallsThroughToRoutedTier(t *testing.T) {
+	for topoName, topo := range bd104WispTopologies() {
+		t.Run(topoName, func(t *testing.T) {
+			got, _ := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
+				[]fakeReaderRow{routedOpenRow()},
+				[]fakeReaderRow{assignedOpenWisp("labeled", assignedHoldTestAlias, 0, "hold:human")})
+			if len(got) != 1 || got[0].ID != "routed" {
+				t.Fatalf("query served %+v, want the routed step behind the hold:human wisp", got)
+			}
+		})
 	}
 }

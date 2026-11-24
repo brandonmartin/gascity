@@ -547,6 +547,7 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 		infos, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs, nil)
 	input := newAwakeInputFromSnapshot(p.cfg, p.suspends, infos, p.poolDesired, p.named.workReady,
 		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
+	input.ScaleDemandExcludes = scaleDemandExcludesByTemplate(p.merged.ScaleCheckDemand)
 	if p.index != nil {
 		input.workIndex = newAwakeWorkIndex(input.WorkBeads)
 	}

@@ -1,5 +1,26 @@
 # scripts — change guide
 
+## Lint seeds never receive a gate's writes
+
+`lint-with-cache` runs `make lint-golangci` with disposable private Go and
+lint caches under `/mnt/data1/gc-lint-cache/<uid>`. Seeds are immutable after
+atomic publication, copied with new inodes, and retained within
+`LINT_CACHE_MAX_BYTES` (16 GiB by default). Active copies are transient and
+are removed when lint exits, including handled termination signals.
+Kernel locks on directories serialize seed publication and copying against
+eviction; no PID or lockfile is a source of process state.
+
+Key changes in actual lint binary/version, effective Go environment,
+`go.mod`, `go.sum`, workspace files, resolved lint config or lint arguments
+invalidate a seed. Only audited lint versions that store module-relative
+issue positions can seed lint results across checkouts. Unknown and legacy
+versions seed Go build objects only. Never relax this to a shared writable
+lint cache: removed-checkout paths can leak suppressed findings (ga-3w9i).
+`LINT_CACHE_ROOT=off` and hosts without `/mnt/data1` retain the checkout-local
+fallback and caller-provided caches. `lint_cache_test.py` owns seed isolation,
+invalidation, status propagation, cleanup and size-budget proofs; the Go
+cache contract tests own the Makefile's fallback wiring.
+
 ## Hermetic Git test config is mirrored
 
 `Makefile`'s `TEST_ENV` and the nested `env -i` wrappers in
@@ -102,3 +123,16 @@ lines only; a new integration-only test file costs one sorted record line.
 The shard rule is `i % shard_total == shard_index - 1` in
 `scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
 restates it and runs each shard through the real script).
+
+## Unit sweeps share the bounded shard runner
+
+`make test-go` and `test-go-pkgs` call `test-local-parallel unit` with their
+package selectors. Resolve selectors with `go list` before partitioning:
+`cmd/gc` runs only in its shards, all other selected packages run in one
+core sweep, and failed or empty enumeration fails closed. Preserve the
+four-job default (`UNIT_TEST_JOBS`), shared timeout, `-count=1`,
+`GC_FAST_UNIT=1`, hermetic environment, slot and process-cleanup boundaries.
+Shard discovery includes examples and fuzz seeds as well as tests, so
+splitting a sweep cannot drop coverage. Observable JSON logs are separate
+per job. `unit_package_runner_test.py` exercises the real fan-out with a
+fake Go tool; its Bazel target is `//scripts:unit_package_runner_test`.

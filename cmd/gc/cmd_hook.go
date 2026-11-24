@@ -116,7 +116,12 @@ readback, so a custom work_query cannot bypass it. The default work query
 also drops excluded beads before it picks one to serve, so an excluded bead
 at the head of the queue never hides the work behind it. An exclusion does
 not take back a claim the session already started: with --drain-ack it is
-still the started claim the session must finish.
+still the started claim the session must finish. gc bd update --claim
+refuses the same list, matched against BEADS_ACTOR, GC_ALIAS, GC_AGENT,
+GC_SESSION_ID and GC_SESSION_NAME, and does not acquire the bead. Pool
+demand still counts the bead for the pool, but it does not wake a session
+that every ready bead excludes, and that session does not consume the
+slot, so an eligible session is still scaled.
 
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
@@ -1892,7 +1897,7 @@ func workQueryHasReadyWork(output string) bool {
 // filterUnreadyHookCandidates strips beads from work_query output that fail
 // bd ready semantics: bd's deferred status (dated or not) or a future
 // defer_until, any open blocking dep in the row's blocked_by array, the row's
-// own is_blocked / status=="blocked" marker, or a canonical dispatch hold
+// own is_blocked / status=="blocked" marker, or a hold:<reason> dispatch
 // label. The work_query is expected to gate these, but defensive filtering
 // here prevents a single broken query from cascading into agent action on a
 // bead it cannot progress.
@@ -2074,7 +2079,7 @@ func isDepBlockedHookCandidate(item map[string]any) bool {
 }
 
 // isSelfBlockedHookCandidate reports whether a candidate carries bd's own
-// is_blocked marker or an explicit status=="blocked", independent of the
+// is_blocked marker or an explicit blocked or deferred status, independent of the
 // blocked_by dependency array checked by isDepBlockedHookCandidate. An
 // absent is_blocked field is treated as NOT blocked - bd's denormalized
 // projection is not always populated, and over-filtering here would strand
@@ -2083,14 +2088,17 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 	if blocked, ok := item["is_blocked"].(bool); ok && blocked {
 		return true
 	}
-	if status, ok := item["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "blocked") {
-		return true
+	if status, ok := item["status"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(status)) {
+		case "blocked", "deferred":
+			return true
+		}
 	}
 	return false
 }
 
-// isHeldHookCandidate reports whether item carries a canonical dispatch hold
-// label (beadmeta.DispatchHoldLabels) — a bead deliberately parked because its
+// isHeldHookCandidate reports whether item carries a hold:<reason> dispatch
+// label — a bead deliberately parked because its
 // required next actor or condition is, by construction, not this session.
 //
 // Serving one as work is never right for ANY hook path: the assignee cannot
@@ -2102,10 +2110,11 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // hold dimension is filtered here, in the one seam every hook path already runs
 // through (the claim, the cross-store federation, and plain `gc hook`).
 //
-// Only the two canonical values match: each label is trimmed and compared
-// whole, case-insensitively, against the shared beadmeta constants, so
-// unrelated labels that merely look hold-ish (`mpr-human-hold`, the routing
-// label `needs-mayor`) are ordinary work and must not be stranded.
+// Every label in the reserved hold: namespace matches, with case and surrounding
+// whitespace ignored, except the released hold:cleared that `bd set-state <id>
+// hold=cleared` leaves behind (beadmeta.DispatchHoldReleasedLabels). Unrelated
+// labels (`holding-pattern`, `hold`, `mpr-human-hold`, `needs-mayor`) remain
+// ordinary work.
 //
 // An absent or null labels field means "no labels", never "unknown" — bd emits
 // labels:null for an unlabeled bead — so this fails open exactly like the

@@ -376,7 +376,7 @@ func TestRealizationNilIndexIsLegacy(t *testing.T) {
 	if got, want := strings.Join(ids, ","), "gc-2"; got != want {
 		t.Fatalf("legacy reusable rows = %s, want %s (asleep and working rows skipped)", got, want)
 	}
-	slot, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], map[int]bool{})
+	slot, err := claimFreshPoolSlotInfo(bp, &cfg.Agents[0], SessionRequest{}, map[int]bool{})
 	if err != nil || slot != 2 {
 		t.Fatalf("legacy fresh slot = %d, %v; want 2 (1 held by gc-1, 3 by gc-3, 4 by gc-2's census row)", slot, err)
 	}

@@ -23,6 +23,19 @@ policy stays in the shared query builders behind that command. Custom
 `gc hook --claim --json` owns atomic acquisition. Keep prime, startup and lint
 rendering aligned.
 
+## Dispatch holds use the reserved `hold:` namespace
+
+`hold:mayor` and `hold:external` are the only supported values, but
+route-scoped demand, hook serving, and route recovery must treat any
+`hold:<reason>` label as parked, except the released labels
+(`beadmeta.DispatchHoldReleasedLabels`: `hold:cleared`, which `bd set-state
+<id> hold=cleared` leaves behind and cannot remove). A hold added beside a
+released label still parks the bead. Keep the native predicates
+(`beadmeta.HasDispatchHold`), the generated jq filters and the serve rules'
+`ExcludeLabelPrefixExceptions` aligned;
+`TestGoPredicateAndGeneratedQueryAgreeRowByRow` pins the rendered program.
+Assigned ownership accounting remains hold-transparent.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

@@ -51,6 +51,10 @@ type Options struct {
 	// When nil, each step's compiled priority is used.
 	PriorityOverride *int
 
+	// ExclusionsFrom attaches the source bead and its live workflow root's
+	// claimant exclusions to every created step before it becomes visible.
+	ExclusionsFrom string
+
 	// PreserveRootType keeps the root bead's declared type instead of
 	// coercing legacy non-workflow roots to molecule containers. Attach uses
 	// this for executable sub-DAG roots such as retry attempts.
@@ -313,8 +317,7 @@ func Attach(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Rec
 	// as a forward pointer to that bead's own v1 attachment, never to a container
 	// of it, so nesting there would adopt an unrelated molecule (ga-crz5ege). A
 	// genuine top-level head with no container key self-roots via its own id.
-	rootBeadID := beadmeta.ResolveNestingRootID(parentBead.Metadata, attachBeadID)
-
+	//
 	// A resolved container root may point at a molecule that has since fully
 	// closed (e.g. re-attaching a content bead to a fresh formula after its
 	// prior review round-trip closed cleanly) -- a dead pointer, not a live
@@ -322,11 +325,11 @@ func Attach(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Rec
 	// anything else (closed, or no longer resolvable) falls back to self-root,
 	// exactly like the no-chain case (ga-yov1rr). A live chain
 	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
-	if rootBeadID != attachBeadID {
-		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
-			rootBeadID = attachBeadID
-		}
+	workflowRoot, err := attachWorkflowRoot(store, parentBead)
+	if err != nil {
+		return nil, err
 	}
+	rootBeadID := workflowRoot.ID
 
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
@@ -371,6 +374,9 @@ func Attach(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Rec
 	if err := ValidateRecipeRuntimeVars(recipe, Options{Title: opts.Title, Vars: opts.Vars}); err != nil {
 		return nil, fmt.Errorf("validate runtime vars: %w", err)
 	}
+	inheritExcludedClaimants(recipe.Steps, beadmeta.MergeExcludedClaimants(
+		workflowRoot.Metadata[beadmeta.ExcludeClaimantsMetadataKey],
+		parentBead.Metadata[beadmeta.ExcludeClaimantsMetadataKey]))
 
 	// Stamp every step with the parent workflow's graph metadata.
 	for i := range recipe.Steps {
@@ -876,6 +882,20 @@ func Instantiate(ctx context.Context, store beads.MoleculeTarget, recipe *formul
 		recipe = recipeWithNativeStepDependencies(recipe)
 		opts.nativeStepTopologyPrepared = true
 	}
+	if opts.ExclusionsFrom != "" {
+		source, err := store.Get(opts.ExclusionsFrom)
+		if err != nil {
+			return nil, fmt.Errorf("attach bead %s: %w", opts.ExclusionsFrom, err)
+		}
+		root, err := attachWorkflowRoot(store, source)
+		if err != nil {
+			return nil, err
+		}
+		inheritExcludedClaimants(recipe.Steps, beadmeta.MergeExcludedClaimants(
+			root.Metadata[beadmeta.ExcludeClaimantsMetadataKey],
+			source.Metadata[beadmeta.ExcludeClaimantsMetadataKey]))
+	}
+	inheritExcludedClaimants(recipe.Steps, recipe.Steps[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey])
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.As[beads.GraphApplyStore](store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
@@ -1188,12 +1208,13 @@ func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe
 		return nil, err
 	}
 	opts.nativeStepTopologyPrepared = true
+	root, err := store.Get(opts.RootID)
+	if err != nil {
+		return nil, fmt.Errorf("loading root bead %s: %w", opts.RootID, err)
+	}
+	inheritExcludedClaimants(recipe.Steps, root.Metadata[beadmeta.ExcludeClaimantsMetadataKey])
 	priorityOverride := clonePriority(opts.PriorityOverride)
 	if priorityOverride == nil {
-		root, err := store.Get(opts.RootID)
-		if err != nil {
-			return nil, fmt.Errorf("loading root bead %s: %w", opts.RootID, err)
-		}
 		priorityOverride = clonePriority(root.Priority)
 	}
 	if IsGraphApplyEnabled() {
@@ -1368,6 +1389,39 @@ func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe
 		IDMapping: idMapping,
 		Created:   len(createdIDs),
 	}, nil
+}
+
+// attachWorkflowRoot follows the parent's container keys
+// (beadmeta.ResolveNestingRootID), ignoring missing or closed roots.
+func attachWorkflowRoot(store beads.Store, parent beads.Bead) (beads.Bead, error) {
+	rootID := beadmeta.ResolveNestingRootID(parent.Metadata, parent.ID)
+	if rootID == parent.ID {
+		return parent, nil
+	}
+	root, err := store.Get(rootID)
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return beads.Bead{}, fmt.Errorf("loading workflow root %s for claimant exclusions: %w", rootID, err)
+	}
+	if err != nil || root.Status == "closed" {
+		return parent, nil
+	}
+	return root, nil
+}
+
+// inheritExcludedClaimants decorates recipes before both sequential Create and
+// batch ApplyGraphPlan so no actionable bead is born without its exclusions.
+func inheritExcludedClaimants(steps []formula.RecipeStep, inherited string) {
+	if inherited == "" {
+		return
+	}
+	for i := range steps {
+		md := cloneMetadata(steps[i].Metadata)
+		if md == nil {
+			md = make(map[string]string)
+		}
+		md[beadmeta.ExcludeClaimantsMetadataKey] = beadmeta.MergeExcludedClaimants(inherited, md[beadmeta.ExcludeClaimantsMetadataKey])
+		steps[i].Metadata = md
+	}
 }
 
 func recipeParentDeps(deps []formula.RecipeDep) map[string]string {

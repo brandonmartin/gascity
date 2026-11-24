@@ -76,7 +76,7 @@ func TestMakeCheckKeepsShellGuardsBesideBazel(t *testing.T) {
 
 func TestMakeGoTwinsRunGoTest(t *testing.T) {
 	for target, want := range map[string]string{
-		"test-go":             "scripts/go-test-observable test",
+		"test-go":             "scripts/test-local-parallel unit ./...",
 		"check-docs-go":       "go test ./test/docsync",
 		"test-acceptance-go":  "go test -tags acceptance_a",
 		"test-integration-go": "go test -tags integration",

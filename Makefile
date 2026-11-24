@@ -376,17 +376,21 @@ LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
 LINT_GOMEMLIMIT ?= 6GiB
-# golangci-lint's result cache is keyed by module-relative content, but a
+# Legacy golangci-lint's result cache is keyed by module-relative content, but a
 # cached issue keeps the absolute path of the checkout that produced it. Shared
 # across sibling or throwaway checkouts (scratch trees, extra worktrees) it
 # replays paths into a tree that may already be gone, and then the nolint and
 # generated-file processors cannot read the source: every suppressed finding
-# leaks and a clean tree lints red. Keep the cache inside the checkout; a
-# caller that wants one shared sets its own.
+# leaks and a clean tree lints red. Keep the fallback cache inside the
+# checkout; a caller that wants one shared sets its own. lint-golangci uses
+# lint-with-cache on scratch hosts: immutable versioned seeds, private copies,
+# and result reuse only for audited lint versions with module-relative issue
+# positions.
 GOLANGCI_LINT_CACHE ?= $(CURDIR)/.cache/golangci-lint
 LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)"
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
+LINT_CACHE_RUNNER := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lint-with-cache
 
 # Lint and vet run as nogo (//tools/nogo): go vet's analyzers plus the
 # linters .golangci.yml enables, validated beside every Go compile, so
@@ -458,7 +462,7 @@ lint-affected lint-full: lint
 
 ## lint-golangci: golangci-lint outside Bazel, for hosts nogo does not cover (macOS jobs: darwin-only files)
 lint-golangci: $(GOLANGCI_LINT)
-	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	$(LINT_ENV) python3 "$(LINT_CACHE_RUNNER)" "$(GOLANGCI_LINT)" run $(LINT_FLAGS) ./...
 
 ## vet-go: plain `go vet` outside Bazel, for hosts nogo does not cover (macOS jobs)
 vet-go:
@@ -569,20 +573,20 @@ test: bazel-tmpdir
 ## test-go: fast unit tests with plain go test (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and in CI by bazel.yml's integration-packages lane.
-## Bound package parallelism so subprocess-heavy packages do not starve each
-## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
-## reports actual test results instead of hanging after PASS while Go computes
-## cache input hashes over local working files.
+## Partition cmd/gc across CMD_GC_PROCESS_TOTAL shards using the shared runner,
+## bounded by UNIT_TEST_JOBS (default 4). Other packages keep one sweep; every
+## job uses -count=1 so the run reports actual results.
 ## The per-package -timeout is GO_TEST_BUDGET (below): the fan-out's number,
 ## or GO_TEST_TIMEOUT=30m make test-go on a loaded host.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
+UNIT_TEST_RUNNER = GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=$(UNIT_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_BUDGET) ./scripts/test-local-parallel unit
 test-go: test-fsys-darwin-compile
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout $(GO_TEST_BUDGET) ./...
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(UNIT_TEST_RUNNER) ./...
 
 ## test-go-pkgs: test-go over only the packages in GO_TEST_PKGS (check-affected's go test step)
 test-go-pkgs: test-fsys-darwin-compile
 	@test -n "$(strip $(GO_TEST_PKGS))" || { echo "test-go-pkgs: set GO_TEST_PKGS to the packages to test" >&2; exit 2; }
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout $(GO_TEST_BUDGET) $(GO_TEST_PKGS)
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(UNIT_TEST_RUNNER) $(GO_TEST_PKGS)
 
 ## test-bazel-targets: bazel test the targets in BAZEL_TEST_TARGETS (check-affected's step for test targets go test cannot run)
 test-bazel-targets: bazel-tmpdir
@@ -627,6 +631,9 @@ COARSE_CLOCK_RUN ?= .
 test-coarse-clock:
 	$(TEST_ENV) GC_FAST_UNIT=0 scripts/go-test-observable test-coarse-clock -- -tags gc_coarse_clock -count=1 -timeout 60m -run '$(COARSE_CLOCK_RUN)' ./internal/beads/ ./cmd/gc/
 
+# Preserve the unit sweeps' four-process ceiling while sharding cmd/gc.
+UNIT_TEST_JOBS ?= 4
+
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
 # Deliberately empty: scripts/test-local-parallel owns the default per-package
@@ -636,7 +643,7 @@ LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 # does; the sibling *-parallel targets below run without env -i and inherit an
 # override from the environment directly.
 GO_TEST_TIMEOUT ?=
-## GO_TEST_BUDGET: the -timeout the unsharded sweeps (test-go, test-mac) hand
+## GO_TEST_BUDGET: the -timeout the unit sweeps (test-go, test-mac) hand
 ## to go test: GO_TEST_TIMEOUT when set, else the fan-out's default, which
 ## scripts/go-test-budget reads out of scripts/test-local-parallel so the sweeps
 ## cannot drift onto a smaller budget than the shards. They carried their own

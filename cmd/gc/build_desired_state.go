@@ -67,6 +67,11 @@ type DesiredStateResult struct {
 	State            map[string]TemplateParams
 	BaseState        map[string]TemplateParams
 	ScaleCheckCounts map[string]int // nil when store is nil or scale_check not run
+	// ScaleCheckDemand is the per-template provenance behind ScaleCheckCounts,
+	// including each bead's gc.exclude_claimants. Nil when this pass had no
+	// bead-backed demand. The reconciler reads it so a session named by every
+	// bead is not woken for that demand and does not consume the slot.
+	ScaleCheckDemand map[string]scaleCheckDemand
 	// ScaleCheckPartialTemplates records all templates whose bead-backed demand
 	// probe failed. PoolScaleCheckPartialTemplates blocks fresh pool creates;
 	// PoolPartialRetentionTemplates preserves existing pool capacity and may also
@@ -246,6 +251,11 @@ type scaleCheckDemand struct {
 	// scale_check count places (demandTargets.nameOnlyTemplates), so a
 	// request carrying one is SessionRequest.NameOnly.
 	NameOnly bool
+	// ExcludeClaimants maps work-bead id → the raw gc.exclude_claimants
+	// value. Absent or empty means that bead excludes nobody. Pool demand
+	// still counts the bead; a session named here must not be the one woken
+	// for it and must not consume its slot.
+	ExcludeClaimants map[string]string
 }
 
 var (
@@ -892,6 +902,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	subPhaseStart = trace.demandNow()
 	namedMaterialized := 0
 	named := computeNamedSessionDemand(cityName, cityPath, cfg, store, bp.sessionBeads, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
+	named = suppressExcludedCanonicalRoutedDemand(named, scaleCheckDemandByTemplate)
 	for identity, spec := range named.specs {
 		canonicalInfo, hasCanonical := findCanonicalNamedSessionInfo(bp.sessionBeads, spec)
 		if !hasCanonical {
@@ -966,6 +977,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		State:                              desired,
 		BaseState:                          baseDesired,
 		ScaleCheckCounts:                   scaleCheckCounts,
+		ScaleCheckDemand:                   scaleCheckDemandByTemplate,
 		ScaleCheckPartialTemplates:         scaleCheckPartialTemplates,
 		PoolScaleCheckPartialTemplates:     poolScaleCheckPartialTemplates,
 		PoolPartialRetentionTemplates:      poolPartialRetentionTemplates,
@@ -1165,6 +1177,102 @@ func computeNamedSessionDemandOn(
 		workBeadID:   namedWorkBeadID,
 		routedDemand: namedRoutedDemand,
 	}
+}
+
+// suppressExcludedCanonicalRoutedDemand clears routed-demand wake for a
+// canonical singleton whose every backing-template demand bead names that
+// holder. A nil demand map leaves the signal unchanged, so a caller that
+// has not loaded bead provenance still wakes the holder. Pool-level counts
+// are not touched: another identity can still be scaled for the same beads.
+func suppressExcludedCanonicalRoutedDemand(named namedSessionDemand, demand map[string]scaleCheckDemand) namedSessionDemand {
+	if demand == nil || len(named.routedDemand) == 0 {
+		return named
+	}
+	for identity, on := range named.routedDemand {
+		if !on {
+			continue
+		}
+		spec, ok := named.specs[identity]
+		if !ok || spec.Agent == nil || !spec.Agent.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
+		entry, ok := demand[namedSessionBackingTemplate(spec)]
+		if !ok || !demandExcludesEveryBead(entry, namedHolderClaimIdentities(identity, spec)) {
+			continue
+		}
+		delete(named.routedDemand, identity)
+	}
+	return named
+}
+
+func namedHolderClaimIdentities(identity string, spec namedSessionSpec) []string {
+	identities := make([]string, 0, 2)
+	if identity = strings.TrimSpace(identity); identity != "" {
+		identities = append(identities, identity)
+	}
+	if name := strings.TrimSpace(spec.SessionName); name != "" && name != identity {
+		identities = append(identities, name)
+	}
+	return identities
+}
+
+func demandExcludesEveryBead(demand scaleCheckDemand, identities []string) bool {
+	if len(demand.WorkBeadIDs) == 0 || len(identities) == 0 {
+		return false
+	}
+	for _, id := range demand.WorkBeadIDs {
+		if !demandExcludesIdentities(demand, id, identities) {
+			return false
+		}
+	}
+	return true
+}
+
+// scaleDemandExcludesByTemplate is the awake-set view of scale-check
+// provenance: one raw gc.exclude_claimants value per demand bead, in demand
+// order, and only for templates that exclude somebody. An empty string keeps
+// its place so a bead that excludes nobody still admits every session.
+// Nil means no template recorded an exclusion.
+func scaleDemandExcludesByTemplate(demand map[string]scaleCheckDemand) map[string][]string {
+	if len(demand) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(demand))
+	for template, entry := range demand {
+		if len(entry.WorkBeadIDs) == 0 || len(entry.ExcludeClaimants) == 0 {
+			continue
+		}
+		rows := make([]string, len(entry.WorkBeadIDs))
+		hasExclude := false
+		for i, id := range entry.WorkBeadIDs {
+			rows[i] = scaleDemandExcludeClaimants(entry, id)
+			if rows[i] != "" {
+				hasExclude = true
+			}
+		}
+		if hasExclude {
+			out[template] = rows
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// scaleDemandExcludesSession reports whether any scale-check bead identified
+// by workBeadID names one of info's assignee identities.
+func scaleDemandExcludesSession(demand map[string]scaleCheckDemand, workBeadID string, info session.Info) bool {
+	if len(demand) == 0 {
+		return false
+	}
+	identities := session.AssigneeIdentities(info)
+	for _, entry := range demand {
+		if demandExcludesIdentities(entry, workBeadID, identities) {
+			return true
+		}
+	}
+	return false
 }
 
 // demandTargets is what the demand pass's agent loop builds from config: the
@@ -1891,6 +1999,7 @@ func collectAssignedWorkBeadsWithStores(
 		// it partial so every consumer retains rather than reaps.
 		return nil, nil, nil, nil, true
 	}
+	sessionAssigneeIndex := buildSessionAssigneeIndex(sessionBeads)
 
 	type storeAssignedWorkResult struct {
 		ref       string // store ref these beads came from (empty = city store)
@@ -1932,11 +2041,11 @@ func collectAssignedWorkBeadsWithStores(
 			inProgress, err := reads.Cached(source.store, beads.ListQuery{Status: "in_progress"})
 			pass.read(read("list_in_progress", demandReadTierCached), start, len(inProgress), err)
 			if err == nil {
-				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
+				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref, sessionAssigneeIndex)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))
 				if beads.IsPartialResult(err) && len(inProgress) > 0 {
-					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
+					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref, sessionAssigneeIndex)
 				}
 			}
 			// Open assigned molecule roots that count as wake demand. Whether an
@@ -1951,11 +2060,11 @@ func collectAssignedWorkBeadsWithStores(
 			openDemand, err := reads.RawOpen(source.store)
 			pass.read(read("list_open", demandReadTierLive), start, len(openDemand), err)
 			if err == nil {
-				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref, sessionAssigneeIndex)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open, live demand): %w", err))
 				if beads.IsPartialResult(err) && len(openDemand) > 0 {
-					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref)
+					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openDemand, seen, source.store, source.ref, sessionAssigneeIndex)
 				}
 			}
 			// Open pool-routed beads that still carry an assignee. These are
@@ -1993,7 +2102,30 @@ func collectAssignedWorkBeadsWithStores(
 			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
+	// The ready-by-assignee probe below needs the closed named-session index,
+	// which reads only the sessions store's closed history. Read it alongside the
+	// census legs instead of after them (ga-nj0me: 7s serial on this city). It
+	// starts after every leg is labeled so its record names the store's leg.
+	// A panic in it is re-raised here, on the caller's goroutine, as it was
+	// when the read ran inline.
+	// The index is built from the session-class store: the pass's leading
+	// store, or the one its cache names.
+	closedNamedStore := cityStore
+	if cache != nil && cache.sessions.Store != nil {
+		closedNamedStore = cache.sessions.Store
+	}
+	var closedIdx session.ClosedNamedSessionBeadIndex
+	var closedIdxPanic any
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() { closedIdxPanic = recover() }()
+		closedIdx = readyAssigneesClosedNamedIndex(cfg, closedNamedStore, pass, point, reads)
+	}()
 	wg.Wait()
+	if closedIdxPanic != nil {
+		panic(closedIdxPanic)
+	}
 
 	var result []beads.Bead
 	var resultStores []beads.Store
@@ -2026,11 +2158,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	closedNamedStore := cityStore
-	if cache != nil && cache.sessions.Store != nil {
-		closedNamedStore = cache.sessions.Store
-	}
-	assignees := readyAssignedWorkAssignees(cfg, closedNamedStore, sessionBeads, skipReadyAssignees, pass, point, reads)
+	assignees := readyAssignedWorkAssigneesFromIndex(cfg, sessionBeads, skipReadyAssignees, closedIdx)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -2071,7 +2199,7 @@ func collectAssignedWorkBeadsWithStores(
 			var readyStoreRefs []string
 			readyIDs := make(map[string]bool)
 			seen := make(map[string]struct{})
-			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref)
+			appendAssignedUnique(&readyBeads, &readyStores, &readyStoreRefs, readyIDs, ready, seen, source.store, source.ref, sessionAssigneeIndex)
 			readyResults[idx] = storeAssignedWorkResult{ref: source.ref, beads: readyBeads, stores: readyStores, storeRefs: readyStoreRefs, readyIDs: readyIDs, errs: errs}
 		}()
 	}
@@ -2155,10 +2283,48 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-// sessionsStore is the session-class store the closed named-session index is
-// built from (collectAssignedWorkBeadsWithStores: the pass's leading store,
-// or the one its cache names).
-func readyAssignedWorkAssignees(cfg *config.City, sessionsStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
+// cfgHasOnDemandNamedSession reports whether any configured named session is
+// on_demand, the only mode readyAssignedWorkAssigneesFromIndex consults closed
+// history for.
+func cfgHasOnDemandNamedSession(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].Mode == "on_demand" {
+			return true
+		}
+	}
+	return false
+}
+
+// readyAssigneesClosedNamedIndex is the one batched read every configured
+// named session's closed-phantom lookup in readyAssignedWorkAssigneesFromIndex
+// consults, instead of the store.List-per-identity loop this replaced
+// (ga-0t7qjl: 109 serial bd calls, +155s, on this city). It is read only when
+// an on_demand session actually exists to consult it: a city with zero (or
+// only always-mode) named sessions must not pay this store read at all
+// (ga-bequ8d).
+//
+// The error feeds only the trace record. A hard failure leaves the index
+// empty, so every Find reports no match and each on_demand identity is still
+// probed under its qualified name; a partial read keeps the rows it did get.
+// It reads nothing that the assigned-work census writes, so the census runs it
+// alongside its own legs rather than after them.
+func readyAssigneesClosedNamedIndex(cfg *config.City, sessionsStore beads.Store, pass *demandPassTrace, point string, reads demandReads) session.ClosedNamedSessionBeadIndex {
+	if !cfgHasOnDemandNamedSession(cfg) {
+		return session.ClosedNamedSessionBeadIndex{}
+	}
+	start := pass.now()
+	closedIdx, idxErr := demandReadsOrLegacy(reads).ClosedNamedIndex(sessionsStore)
+	pass.read(demandStoreRead{point: point, leg: pass.storeLabel(sessionsStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
+	return closedIdx
+}
+
+// readyAssignedWorkAssigneesFromIndex enumerates the assignees the assigned
+// census probes Ready for, given the closed named-session index. It reads no
+// store.
+func readyAssignedWorkAssigneesFromIndex(cfg *config.City, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, closedIdx session.ClosedNamedSessionBeadIndex) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -2187,30 +2353,6 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionsStore beads.Store, ses
 	}
 	if cfg != nil {
 		cityName := config.EffectiveCityName(cfg, "")
-		hasOnDemand := false
-		for i := range cfg.NamedSessions {
-			if cfg.NamedSessions[i].Mode == "on_demand" {
-				hasOnDemand = true
-				break
-			}
-		}
-		// One batched read for every configured named session's closed-phantom
-		// lookup below, instead of the store.List-per-identity loop this
-		// replaced (ga-0t7qjl: 109 serial bd calls, +155s, on this city).
-		// Built only when an on_demand session actually exists to consult it —
-		// a city with zero (or only always-mode) named sessions must not pay
-		// this store read at all (ga-bequ8d).
-		var closedIdx session.ClosedNamedSessionBeadIndex
-		if hasOnDemand {
-			// The error feeds only the trace record. A hard failure leaves the
-			// index empty, so every Find below reports no match and each
-			// on_demand identity is still probed under its qualified name; a
-			// partial read keeps the rows it did get.
-			start := pass.now()
-			var idxErr error
-			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(sessionsStore)
-			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(sessionsStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
-		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
@@ -2432,14 +2574,30 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// and "city" groups and would double the template's demand. With the city
 	// probe no longer cold-gated, that double-count would be a persistent
 	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
-	for _, group := range groupOrder {
-		key := group.storeKey
+	//
+	// The groups' reads are independent, so they run concurrently, at most
+	// probeConcurrency at a time, and the fold below walks them in groupOrder:
+	// the error order, the partial verdicts and the first-leg-wins dedup are
+	// what a serial pass produces (ga-nj0me: ten serial group reads cost 22s of
+	// one tick). Two groups on one store share the cache's single fetch.
+	type groupRead struct {
+		ready []beads.Bead
+		err   error
+	}
+	groupReads := make([]groupRead, len(groupOrder))
+	forEachDemandLeg(len(groupOrder), probeConcurrency(cfg), func(i int) {
+		group := groupOrder[i]
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
 		// should wake pools must create an actionable root, such as a
 		// vapor/root-only wisp. Molecule containers and formula step
 		// beads remain hidden by readyExcludeTypes.
-		ready, readyErr := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, key))
+		ready, err := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, group.storeKey))
+		groupReads[i] = groupRead{ready: ready, err: err}
+	})
+	for i, group := range groupOrder {
+		key := group.storeKey
+		ready, readyErr := groupReads[i].ready, groupReads[i].err
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -2543,6 +2701,12 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 					entry.ParentSIDs = make(map[string]string)
 				}
 				entry.ParentSIDs[b.ID] = parentSID
+			}
+			if excluded := strings.TrimSpace(b.Metadata[beadmeta.ExcludeClaimantsMetadataKey]); excluded != "" {
+				if entry.ExcludeClaimants == nil {
+					entry.ExcludeClaimants = make(map[string]string)
+				}
+				entry.ExcludeClaimants[b.ID] = excluded
 			}
 			demand[template] = entry
 		}
@@ -2801,6 +2965,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.BindingResident == nil && len(incoming.BindingResident) > 0 {
 		existing.BindingResident = make(map[string]bool, len(incoming.BindingResident))
 	}
+	if existing.ExcludeClaimants == nil && len(incoming.ExcludeClaimants) > 0 {
+		existing.ExcludeClaimants = make(map[string]string, len(incoming.ExcludeClaimants))
+	}
 	if existing.WorktreeSpecs == nil && len(incoming.WorktreeSpecs) > 0 {
 		existing.WorktreeSpecs = make(map[string]*worktree.Spec, len(incoming.WorktreeSpecs))
 	}
@@ -2830,6 +2997,11 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		if incoming.ParentSIDs != nil {
 			if sid := incoming.ParentSIDs[id]; sid != "" {
 				existing.ParentSIDs[id] = sid
+			}
+		}
+		if incoming.ExcludeClaimants != nil {
+			if excluded := strings.TrimSpace(incoming.ExcludeClaimants[id]); excluded != "" {
+				existing.ExcludeClaimants[id] = excluded
 			}
 		}
 		if incoming.WorktreeSpecs != nil {
@@ -3542,24 +3714,24 @@ func mergeNamedSessionDemand(poolDesired map[string]int, namedDemand map[string]
 	}
 }
 
-func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" && !isRecoverableUnassignedInProgressPoolWork(cfg, b) {
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, b, sessionAssigneeIndex)
 		}
 	}
 }
 
-func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, b, sessionAssigneeIndex)
 		}
 	}
 }
@@ -3570,7 +3742,7 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 // for on-demand named sessions such as the Gas Town refinery patrol — so these
 // beads contribute to readyIDs (their assigned turn is genuinely actionable),
 // unlike the open-routed orphan-release pass.
-func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	now := time.Now()
 	for _, b := range beadList {
 		if !isOpenAssignedMoleculeWork(b) {
@@ -3586,7 +3758,7 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
-			markReadyAssigned(readyIDs, b)
+			markReadyAssigned(readyIDs, b, sessionAssigneeIndex)
 		}
 	}
 }
@@ -3596,21 +3768,38 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // store-Ready()/deps, and assigned molecule roots) — never by the open-routed
 // orphan-release pass, whose beads have not passed any readiness gate.
 //
-// OPEN work parked on a dispatch hold is never marked: bd's Ready() is
-// hold-transparent, but the session's own hook refuses to serve a held row
-// (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
-// session that drain-acked no_work and was re-woken every tick. The bead stays
-// in the assigned-work snapshot — orphan release, pool accounting and crash
-// recovery still see the assignment (ga-5736js) — it just carries no wake
-// readiness. assignedOpenWorkHeld is the shared predicate.
-func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
+// OPEN work parked on a dispatch hold or excluded from its assignee is never
+// marked: bd's Ready() does not apply either gate, but the session's own hook
+// refuses to serve the row. Counting it as wake demand woke a session that
+// drain-acked no_work and was re-woken every tick. The bead stays in the
+// assigned-work snapshot — orphan release, pool accounting and crash recovery
+// still see the assignment (ga-5736js) — it just carries no wake readiness.
+// assignedOpenWorkHeld is the shared predicate.
+func markReadyAssigned(readyIDs map[string]bool, b beads.Bead, sessionAssigneeIndex map[string]sessionAssigneeMatch) {
 	if readyIDs == nil {
 		return
 	}
-	if assignedOpenWorkHeld(b) {
+	if assignedOpenWorkHeld(b, assignedWorkClaimantIdentities(b, sessionAssigneeIndex)...) {
 		return
 	}
 	readyIDs[b.ID] = true
+}
+
+// assignedWorkClaimantIdentities expands a work bead's Assignee through the
+// open-session index so an exclusion naming a session alias also matches work
+// assigned by session ID. An ambiguous identity is left as-is: only the
+// assignee itself is certain in that case.
+func assignedWorkClaimantIdentities(b beads.Bead, sessionAssigneeIndex map[string]sessionAssigneeMatch) []string {
+	assignee := strings.TrimSpace(b.Assignee)
+	identities := []string{assignee}
+	if assignee == "" || sessionAssigneeIndex == nil {
+		return identities
+	}
+	match, ok := sessionAssigneeIndex[assignee]
+	if !ok || match.ambiguous {
+		return identities
+	}
+	return append(identities, sessionBeadAssigneeIdentitiesInfo(match.info)...)
 }
 
 func isOpenAssignedMoleculeWork(b beads.Bead) bool {
@@ -4026,7 +4215,7 @@ func ensureDependencyOnlyTemplate(
 	}
 
 	if bp.beadStore == nil {
-		slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, make(map[int]bool))
+		slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, SessionRequest{}, make(map[int]bool))
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: dependency floor %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 			return
@@ -5726,7 +5915,7 @@ func planFreshPoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	if !bp.hasCompleteSessionSnapshot() {
 		return nil, errPoolSessionCreatePartial
 	}
-	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, usedSlots)
+	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, request, usedSlots)
 	if err != nil {
 		return nil, err
 	}
@@ -5927,13 +6116,27 @@ var errPoolSessionNoFreeSlot = errors.New("no free concrete slot")
 // adding them to the shared request-order usedSlots map would let an anonymous
 // request processed first block a later concrete resume of that same holder.
 // Only the newly selected slot is published to usedSlots.
-func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool) (int, error) {
+// Excluded identities stay free for other requests in the same build.
+func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, request SessionRequest, usedSlots map[int]bool) (int, error) {
 	upper, unlimited, canonical, err := freshPoolSlotUpperBound(cfgAgent)
 	if err != nil {
 		return 0, err
 	}
+	excluded := func(slot int) bool {
+		if strings.TrimSpace(request.WorkExcludeClaimants) == "" {
+			return false
+		}
+		_, identity, _ := poolDesiredRequestIdentity(cfgAgent, slot)
+		// A fresh row has no bead ID, runtime name, or alias history yet.
+		// Check its concrete identity through the same assignee predicate as
+		// reuse, before publishing any reservation for this request.
+		return sessionExcludedFromDemandRequest(session.Info{Alias: identity}, request)
+	}
 	occupancyInfos := freshPoolOccupancyInfos(bp)
 	if canonical {
+		if excluded(0) {
+			return 0, fmt.Errorf("%w: canonical pool template %q is excluded from request", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+		}
 		if usedSlots[0] {
 			return 0, fmt.Errorf("%w: canonical pool template %q is already selected", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
 		}
@@ -5951,10 +6154,28 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 	if bp != nil {
 		// The v2 realization memo counts its occupancy's slots once (A3).
 		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
-			if slot, ok := bp.realizeMemo.claimFreshSlot(held, usedSlots, upper, unlimited); ok {
+			if strings.TrimSpace(request.WorkExcludeClaimants) == "" {
+				if slot, ok := bp.realizeMemo.claimFreshSlot(held, usedSlots, upper, unlimited); ok {
+					return slot, nil
+				}
+				return 0, fmt.Errorf("%w: pool template %q has %w", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), errPoolSessionNoFreeSlot)
+			}
+			// The memo's cursor resumes past every slot it has claimed, which an
+			// excluded request's skips would break for the next request, so this
+			// request scans from the first slot on its own.
+			skippedExcluded := false
+			for slot := 1; unlimited || slot <= upper; slot++ {
+				if usedSlots[slot] || held[slot] {
+					continue
+				}
+				if excluded(slot) {
+					skippedExcluded = true
+					continue
+				}
+				usedSlots[slot] = true
 				return slot, nil
 			}
-			return 0, fmt.Errorf("%w: pool template %q has %w", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), errPoolSessionNoFreeSlot)
+			return 0, noFreshPoolSlotError(cfgAgent, skippedExcluded)
 		}
 	}
 	occupied := make(map[int]bool, len(usedSlots))
@@ -5979,14 +6200,29 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 			occupied[slot] = true
 		}
 	}
+	skippedExcluded := false
 	for slot := 1; unlimited || slot <= upper; slot++ {
 		if occupied[slot] {
+			continue
+		}
+		if excluded(slot) {
+			skippedExcluded = true
 			continue
 		}
 		usedSlots[slot] = true
 		return slot, nil
 	}
-	return 0, fmt.Errorf("%w: pool template %q has %w", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), errPoolSessionNoFreeSlot)
+	return 0, noFreshPoolSlotError(cfgAgent, skippedExcluded)
+}
+
+// noFreshPoolSlotError names why no fresh slot was claimed. A free slot whose
+// name the request excludes is not a full pool, so that case does not wrap
+// errPoolSessionNoFreeSlot and freeing a seat is not offered as the way out.
+func noFreshPoolSlotError(cfgAgent *config.Agent, skippedExcluded bool) error {
+	if skippedExcluded {
+		return fmt.Errorf("%w: pool template %q has no free concrete slot eligible for request", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+	}
+	return fmt.Errorf("%w: pool template %q has %w", errPoolSessionNameUnavailable, cfgAgent.QualifiedName(), errPoolSessionNoFreeSlot)
 }
 
 func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (map[string]string, error) {
@@ -7682,7 +7918,7 @@ func selectOrPlanDependencyPoolSessionBead(
 		slot := existingPoolSlotWithConfigInfo(bp.city, cfgAgent, info)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 			var err error
-			slot, err = claimFreshPoolSlotInfo(bp, cfgAgent, make(map[int]bool))
+			slot, err = claimFreshPoolSlotInfo(bp, cfgAgent, SessionRequest{}, make(map[int]bool))
 			if err != nil {
 				return session.Info{}, 0, nil, err
 			}
@@ -7693,7 +7929,7 @@ func selectOrPlanDependencyPoolSessionBead(
 	if !bp.hasCompleteSessionSnapshot() {
 		return session.Info{}, 0, nil, errPoolSessionCreatePartial
 	}
-	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, make(map[int]bool))
+	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, SessionRequest{}, make(map[int]bool))
 	if err != nil {
 		return session.Info{}, 0, nil, err
 	}

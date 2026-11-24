@@ -54,7 +54,7 @@ esac
 // the ready-gated tier below still runs and serves the worker's other ready
 // work, instead of the script exiting with a bead the Go filter must discard.
 func TestEphemeralInProgressProbeFallsThroughWhenHeld(t *testing.T) {
-	for _, label := range beadmeta.DispatchHoldLabels {
+	for _, label := range append(append([]string(nil), beadmeta.DispatchHoldLabels...), "hold:mayor-go") {
 		t.Run(label, func(t *testing.T) {
 			if _, err := exec.LookPath("jq"); err != nil {
 				t.Skip("jq not available; the work-query shell requires it")
@@ -95,6 +95,41 @@ esac
 	}
 	if len(rows) != 0 {
 		t.Fatalf("held ephemeral in_progress bead was re-served by the crash-recovery tier: %v", rows)
+	}
+}
+
+// TestEphemeralInProgressProbeServesReleasedHoldCandidate pins that a released
+// hold (hold:cleared, left by `bd set-state <id> hold=cleared`, ga-azdbu) does
+// not park an ephemeral candidate, while a hold added beside it still does.
+func TestEphemeralInProgressProbeServesReleasedHoldCandidate(t *testing.T) {
+	requireJQ(t)
+	cases := []struct {
+		name   string
+		labels string
+		served bool
+	}{
+		{"released", `["hold:cleared"]`, true},
+		{"released then re-held", `["hold:cleared","hold:external"]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bdScript := `#!/bin/sh
+case "$1" in
+  query) printf '%s' '[{"id":"wisp-1","status":"in_progress","assignee":"sess-1","labels":` + tc.labels + `}]' ;;
+  *) printf '[]' ;;
+esac
+`
+			script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
+			out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+
+			var rows []map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
+				t.Fatalf("tier output is not a JSON array: %v (output %q)", err, out)
+			}
+			if served := len(rows) == 1 && rows[0]["id"] == "wisp-1"; served != tc.served {
+				t.Fatalf("labels %s: served = %v, want %v (rows %v)", tc.labels, served, tc.served, rows)
+			}
+		})
 	}
 }
 

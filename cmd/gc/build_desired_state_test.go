@@ -956,6 +956,86 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 }
 
+func TestSuppressExcludedCanonicalRoutedDemand(t *testing.T) {
+	agent := &config.Agent{Name: "holder", MaxActiveSessions: intPtr(1)}
+	identity := "rig/holder"
+	spec := namedSessionSpec{Agent: agent, Identity: identity, SessionName: "rig--holder"}
+	named := namedSessionDemand{
+		specs:        map[string]namedSessionSpec{identity: spec},
+		routedDemand: map[string]bool{identity: true},
+	}
+	excluded := map[string]scaleCheckDemand{
+		"holder": {
+			WorkBeadIDs:      []string{"w1"},
+			ExcludeClaimants: map[string]string{"w1": identity},
+		},
+	}
+
+	if got := suppressExcludedCanonicalRoutedDemand(named, excluded); got.routedDemand[identity] {
+		t.Fatal("routed demand stayed set for a holder every backing bead excludes")
+	}
+	named.routedDemand[identity] = true
+	if got := suppressExcludedCanonicalRoutedDemand(named, nil); !got.routedDemand[identity] {
+		t.Fatal("a nil demand map cleared routed demand")
+	}
+	mixed := map[string]scaleCheckDemand{
+		"holder": {
+			WorkBeadIDs:      []string{"w1", "w2"},
+			ExcludeClaimants: map[string]string{"w1": identity},
+		},
+	}
+	if got := suppressExcludedCanonicalRoutedDemand(named, mixed); !got.routedDemand[identity] {
+		t.Fatal("a bead that excludes nobody cleared routed demand")
+	}
+}
+
+func TestDefaultScaleCheckDemandCarriesExcludeClaimants(t *testing.T) {
+	const template = "gascity/workflows.codex-min"
+	const excluded = "rig/excluded-seat"
+	store := beads.NewMemStore()
+	excludedBead, err := store.Create(beads.Bead{
+		Title:  "excluded from one seat",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":                       template,
+			beadmeta.ExcludeClaimantsMetadataKey: " " + excluded + " ",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create excluded bead: %v", err)
+	}
+	openBead, err := store.Create(beads.Bead{
+		Title:    "open to the pool",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": template},
+	})
+	if err != nil {
+		t.Fatalf("create open bead: %v", err)
+	}
+
+	_, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := demand[template].ExcludeClaimants[excludedBead.ID]; got != excluded {
+		t.Fatalf("ExcludeClaimants[%s] = %q, want %q", excludedBead.ID, got, excluded)
+	}
+	if _, ok := demand[template].ExcludeClaimants[openBead.ID]; ok {
+		t.Fatalf("ExcludeClaimants[%s] = %q, want no entry for a bead that excludes nobody", openBead.ID, demand[template].ExcludeClaimants[openBead.ID])
+	}
+
+	merged := mergeScaleCheckDemand(scaleCheckDemand{}, demand[template], 2)
+	if got := merged.ExcludeClaimants[excludedBead.ID]; got != excluded {
+		t.Fatalf("merged ExcludeClaimants[%s] = %q, want %q", excludedBead.ID, got, excluded)
+	}
+}
+
 // TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget
 // reproduces a writer that stamps gc.routed_to with an instance-suffixed pool
 // identity directly (e.g. `bd update --set-metadata gc.routed_to=hello-world/polecat-1`),
@@ -2448,7 +2528,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil, nil, nil, "", nil)
+	}, nil, nil, nil, "", nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2491,7 +2571,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 
 	countListCalls := func(n int) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "", nil)
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -2514,7 +2594,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
 	countListCalls := func(cfg *config.City) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
+		readyAssignedWorkAssignees(cfg, store, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -4173,6 +4253,40 @@ func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) 
 	}
 	if !strings.Contains(stderr.String(), "pool session create budget exhausted") {
 		t.Fatalf("stderr = %q, want budget exhaustion diagnostic", stderr.String())
+	}
+}
+
+func TestBuildDesiredStateFreshNamepoolSkipsExcludedClaimants(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title: "independent review", Type: "task", Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":                       "pack.worker",
+			beadmeta.ExcludeClaimantsMetadataKey: "pack.a,pack.b,pack.c,pack.d",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "worker", BindingName: "pack", StartCommand: "true",
+			NamepoolNames:     []string{"a", "b", "c", "d", "e"},
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
+		}},
+	}
+	var stderr bytes.Buffer
+	result := buildDesiredStateWithSessionBeads("test-city", t.TempDir(), time.Now().UTC(),
+		cfg, runtime.NewFake(), store, nil, &sessionBeadSnapshot{}, nil, &stderr)
+	if len(result.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1; stderr=%s", len(result.State), stderr.String())
+	}
+	for _, tp := range result.State {
+		if tp.Alias != "pack.e" || tp.Env["GC_TRIGGER_BEAD_ID"] != work.ID {
+			t.Fatalf("fresh session alias=%q trigger=%q, want pack.e serving %s; stderr=%s",
+				tp.Alias, tp.Env["GC_TRIGGER_BEAD_ID"], work.ID, stderr.String())
+		}
 	}
 }
 

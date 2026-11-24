@@ -12,7 +12,7 @@ import (
 )
 
 // Regression coverage for gas-kg6: `gc hook --claim` handed back a bead parked
-// on a canonical dispatch hold (beadmeta.DispatchHoldLabels) as action=work.
+// in the hold:<reason> namespace as action=work.
 //
 // A hold:external / hold:mayor bead is one whose required next actor is, by
 // construction, not this session. The existing/ready-assignment paths keyed off
@@ -92,7 +92,7 @@ func TestHookClaimSkipsHeldAssignmentAndClaimsReadyWork(t *testing.T) {
 	)
 	runner := func(string, string) (string, error) {
 		return `[
-			` + heldWorkQueryRow(heldID, "in_progress", holdTestIdentity, beadmeta.HoldExternalLabel) + `,
+			` + heldWorkQueryRow(heldID, "in_progress", holdTestIdentity, "hold:mayor-go") + `,
 			{"id":"` + readyID + `","status":"open","issue_type":"task","assignee":"","metadata":{"gc.routed_to":"` + holdTestIdentity + `"}}
 		]`, nil
 	}
@@ -158,6 +158,7 @@ func TestFilterUnreadyHookCandidatesDropsHeldBeads(t *testing.T) {
 	in := `[
 		{"id":"held-mayor","status":"in_progress","labels":["` + beadmeta.HoldMayorLabel + `"]},
 		{"id":"held-external","status":"in_progress","labels":["` + beadmeta.HoldExternalLabel + `"]},
+		{"id":"held-mayor-go","status":"open","labels":["hold:mayor-go"]},
 		{"id":"held-both","status":"open","labels":["` + beadmeta.HoldMayorLabel + `","` + beadmeta.HoldExternalLabel + `"]},
 		{"id":"plain","status":"open","labels":["mysql-cutover"]},
 		{"id":"nolabels","status":"open"},
@@ -180,6 +181,35 @@ func TestFilterUnreadyHookCandidatesDropsHeldBeads(t *testing.T) {
 	}
 }
 
+// TestFilterUnreadyHookCandidatesServesReleasedHold pins that hold:cleared, the
+// label `bd set-state <id> hold=cleared` leaves behind when it releases a hold
+// (ga-azdbu), is not a hold: the hook keeps serving the row. A hold added
+// beside it, on either side, still parks the row.
+func TestFilterUnreadyHookCandidatesServesReleasedHold(t *testing.T) {
+	in := `[
+		{"id":"released","status":"open","labels":["` + beadmeta.HoldClearedLabel + `"]},
+		{"id":"released-folded","status":"in_progress","labels":[" Hold:Cleared "]},
+		{"id":"reheld-after","status":"open","labels":["` + beadmeta.HoldClearedLabel + `","` + beadmeta.HoldMayorLabel + `"]},
+		{"id":"reheld-before","status":"open","labels":["` + beadmeta.HoldMayorLabel + `","` + beadmeta.HoldClearedLabel + `"]},
+		{"id":"lookalike","status":"open","labels":["hold:cleared-by-mayor"]}
+	]`
+	got := filterUnreadyHookCandidates(in, time.Now())
+
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(got), &rows); err != nil {
+		t.Fatalf("filtered output is not a JSON array: %v (output %q)", err, got)
+	}
+	want := []string{"released", "released-folded"}
+	if len(rows) != len(want) {
+		t.Fatalf("filterUnreadyHookCandidates kept %d rows, want %d: %s", len(rows), len(want), got)
+	}
+	for i, id := range want {
+		if rows[i]["id"] != id {
+			t.Fatalf("row %d id = %v, want %q (a released hold is served, a live hold is not): %s", i, rows[i]["id"], id, got)
+		}
+	}
+}
+
 // TestFilterUnreadyHookCandidatesKeepsNonHoldLabels is the load-bearing
 // negative control: an over-broad "any label starting with hold" or
 // "any label at all" filter would strand ordinary labeled work.
@@ -192,7 +222,6 @@ func TestFilterUnreadyHookCandidatesKeepsNonHoldLabels(t *testing.T) {
 		t.Fatalf("filtered output is not a JSON array: %v (output %q)", err, got)
 	}
 	if len(rows) != 1 || rows[0]["id"] != "wk-1" {
-		t.Fatalf("non-canonical hold-ish labels were filtered; only %v are holds. got %s",
-			beadmeta.DispatchHoldLabels, got)
+		t.Fatalf("labels outside the hold: namespace were filtered. got %s", got)
 	}
 }

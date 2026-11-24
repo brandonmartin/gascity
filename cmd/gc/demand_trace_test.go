@@ -470,7 +470,7 @@ func TestReadyAssignedWorkAssigneesClosedIndexFailsOpen(t *testing.T) {
 			cityDir := t.TempDir()
 			tracer, cycle := demandTraceCycle(t, cityDir, nil)
 
-			got := readyAssignedWorkAssignees(cfg, store, nil, nil, newDemandPassTrace(cycle, cfg), demandReadPointAssigned, nil)
+			got := readyAssignedWorkAssignees(cfg, store, nil, newDemandPassTrace(cycle, cfg), demandReadPointAssigned, nil)
 
 			has := func(v string) bool {
 				for _, g := range got {

@@ -1070,13 +1070,17 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // starve every tier below (#8010); filtering ahead of the limit also keeps a
 // held head from hiding an unheld assignment for the same identity. On bd-1.0.4
 // the wisp probe behind it (ephemeralAssignedReadyProbeScript) filters the same
-// way.
+// way. A row in the rest of the hold:<reason> namespace, which bd's exact
+// flags cannot name, is dropped after the read (excludeLabelPrefixesFilterScript):
+// the hook strips it too (beadmeta.HasDispatchHold), so serving it would starve
+// the tiers below the same way.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
 		` --assignee="$` + shellVar + `"` + excludeLabelArgs(beadmeta.DispatchHoldLabels) +
 		` --json --limit=1)` +
 		workQueryReadFailure(reader) + `; ` +
+		excludeLabelPrefixesFilterScript("r") +
 		excludeClaimantsFilterScript("r")
 }
 

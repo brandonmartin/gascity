@@ -3922,6 +3922,7 @@ func commitStartResultTraced(
 		Actor:     "gc",
 		Subject:   tp.DisplayName(),
 		SessionID: info.ID,
+		Payload:   sessionWokeProviderPayload(tp),
 	})
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)
 	if trace != nil {
@@ -3935,6 +3936,17 @@ func commitStartResultTraced(
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 	return startCommitSucceeded
+}
+
+func sessionWokeProviderPayload(tp TemplateParams) json.RawMessage {
+	if rp := tp.ResolvedProvider; rp != nil {
+		family, model := resolvedProviderLaunchFamily(rp), rp.EffectiveDefaults["model"]
+		if rp.Name == "" && family == "" && model == "" {
+			return nil
+		}
+		return api.SessionWokePayloadJSON(rp.Name, family, model)
+	}
+	return nil
 }
 
 // startCommitPatch is a successful start's commit patch for prepared on

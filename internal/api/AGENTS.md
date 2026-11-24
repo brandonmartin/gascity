@@ -55,6 +55,15 @@ and city.create completion after startup reconciliation. Snapshot publication
 of either barrier must remain atomic with registry lifecycle changes; tombstoned
 cities never resolve to API state.
 
+`PATCH /patches/agents` merges provider and option defaults with a mandatory
+content revision from `X-GC-Patch-Revision` (`absent` for a missing patch).
+Its scope is an exact singleton template; wildcard and multi-session targets
+are refused. Unrelated fields survive, and explicit clears restore underlying
+defaults. The write publishes config only. A committed runtime keeps its launch
+and delivery metadata until stopped; existing config-drift deferrals govern
+any restart. Named drift does not defer on assigned work: callers must wait
+for their named session's work queue to empty before editing its defaults.
+
 API config edits, validation, snapshot publication and city-config rollback
 share the controller's publication transaction with runtime reloads. A rejected
 edit must remain absent from both disk and the API's cached raw config. Preserve

@@ -1566,11 +1566,11 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 	b.CloseReason = bdCloseReason(b.Status, closeReason)
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)
 	b.UpdatedAt = parseDBTime(updatedRaw).Truncate(time.Second)
-	if strings.TrimSpace(metadataRaw) != "" {
-		if err := json.Unmarshal([]byte(metadataRaw), &b.Metadata); err != nil {
-			return b, fmt.Errorf("reading bead %s metadata: %w", b.ID, err)
-		}
+	metadata, err := parseMetadata(metadataRaw)
+	if err != nil {
+		return b, fmt.Errorf("reading bead %s metadata: %w", b.ID, err)
 	}
+	b.Metadata = metadata
 	b.Ephemeral = ephemeral != 0
 	b.NoHistory = noHistory != 0
 	if b.From == "" {
@@ -1606,6 +1606,22 @@ func parseTimeString(s string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// parseMetadata reads a stored metadata object exactly as the bd CLI does:
+// through StringMap, which coerces non-string values to their JSON text and
+// refuses a non-string gc.exclude_claimants. An empty or {} object reads as
+// nil.
+func parseMetadata(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return nil, nil
+	}
+	var decoded StringMap
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
 }
 
 func (s *DoltliteReadStore) tableExists(name string) bool {

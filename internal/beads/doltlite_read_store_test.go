@@ -2369,7 +2369,11 @@ func TestDoltliteParseMetadataIsTheBdCLIReading(t *testing.T) {
 		if err != nil {
 			t.Fatalf("MetadataReadings(%s): %v", raw, err)
 		}
-		if got := parseMetadata(raw); !maps.Equal(got, readings[0]) {
+		got, err := parseMetadata(raw)
+		if err != nil {
+			t.Fatalf("parseMetadata(%s): %v", raw, err)
+		}
+		if !maps.Equal(got, readings[0]) {
 			t.Errorf("%s: DoltLite reads %q, want the bd CLI's reading %q", raw, got, readings[0])
 		}
 	}

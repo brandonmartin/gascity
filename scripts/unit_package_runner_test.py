@@ -145,7 +145,7 @@ else:
         (self.root / 'test-fail').touch()
         run = self.run_sweep('./...')
         self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertIn('failed with exit 23', run.stderr)
+        self.assertIn('FAILED (exit 23)', run.stderr)
 
 
 if __name__ == '__main__':

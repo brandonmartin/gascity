@@ -26,7 +26,8 @@ next to that code; read the matching file before changing it.
 | `cmd/gc/` | `cmd/gc/AGENTS.md` |
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
-| Native input admission (ready/demand, hook claims, controls) | `internal/sourceworkflow/AGENTS.md` |
+| Native input admission | `internal/sourceworkflow/AGENTS.md` |
+| Orders | `internal/orders/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |

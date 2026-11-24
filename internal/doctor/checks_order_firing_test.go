@@ -730,7 +730,9 @@ func TestOrderFiringCurrent_ShortCooldownAbsorbsDispatchJitter(t *testing.T) {
 		{"1m order two cadences late is overdue", "1m", "30s", 125 * time.Second, StatusWarning},
 		{"1m order three cadences late is stale", "1m", "30s", 3 * time.Minute, StatusError},
 		{"slower patrol widens the grace", "30s", "2m", 4 * time.Minute, StatusOK},
-		{"slower patrol still goes stale", "30s", "2m", 9 * time.Minute, StatusError},
+		// The 2m patrol sets a 2m dispatch floor, so the 30s order's cadence
+		// is 2m and it reads stale at max(3*2m, 2m+4*2m) = 10m.
+		{"slower patrol still goes stale", "30s", "2m", 11 * time.Minute, StatusError},
 		{"unset patrol interval uses the 30s default", "30s", "", 80 * time.Second, StatusOK},
 	}
 	for _, tt := range tests {

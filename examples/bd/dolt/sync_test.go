@@ -2062,6 +2062,7 @@ func TestSyncFailsWhenOutcomeDeclarationCannotBeWritten(t *testing.T) {
 		t.Fatalf("last output line = %q, want %q\nout:\n%s", got, wantLast, out)
 	}
 }
+
 // writeSyncGCFixture lays out a city with one database ("app") routed from the
 // city's .beads/routes.jsonl, a fake dolt, a fake gc that reports no rigs (so
 // route discovery stays inside the temp city), and a fake bd that records

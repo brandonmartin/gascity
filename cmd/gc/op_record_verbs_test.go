@@ -1708,7 +1708,8 @@ func TestSessionWakeOpRetargetsWhenTheReopenFallsThrough(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := doSessionWake(killPokeSessionIdentity, &stdout, &stderr, true, sessionWakeDeps{
-		opKey: "move-1",
+		willNotStart: wakeWillNotStart,
+		opKey:        "move-1",
 		// Production hands doSessionWake the work store and derives the
 		// session store from it. The failing-reopen wrapper wraps the session
 		// store instead: the split-strict gate cannot see a class view
@@ -1722,7 +1723,7 @@ func TestSessionWakeOpRetargetsWhenTheReopenFallsThrough(t *testing.T) {
 		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
 		cityUsesManagedReconciler: func(string) bool { return false },
 		pokeController:            func(string, reconcilekey.Key) error { return nil },
-	})
+	}.withSessionResolver())
 	if code != 0 {
 		t.Fatalf("wake = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

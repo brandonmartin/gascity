@@ -142,9 +142,14 @@ func TestRecordResetStallIgnoresHandoffStampAfterFreshWakeDrain(t *testing.T) {
 		t.Errorf("recorded events = %#v, want none", rec.Events)
 	}
 
-	// Control: the same T0 handoff, still waiting, is a stall.
+	// Control: the same T0 handoff, still waiting, is a stall. With the
+	// runtime gone the wait counts from the first pass over the row after the
+	// commit (ga-h6z2o), so the stall reads on a pass startup_timeout later.
 	stalled := env.createSessionBead("worker-2", "worker")
 	env.setSessionMetadata(&stalled, sessionpkg.RestartRequestPatch("", t0))
+	recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, stalled), "worker", "worker-2",
+		false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, nil)
+	env.clk.Advance(env.cfg.Session.StartupTimeoutDuration() + time.Second)
 	recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, stalled), "worker", "worker-2",
 		false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, nil)
 	if len(rec.Events) != 1 || rec.Events[0].Type != events.SessionResetStalled {

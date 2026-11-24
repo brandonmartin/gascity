@@ -617,7 +617,7 @@ func TestLegacyReuseRunningSeatWithUnusableEvidenceIsSkipped(t *testing.T) {
 	if _, ok := res.desired["worker-1"]; ok {
 		t.Fatalf("seat with unusable evidence stayed desired; stderr=%s", res.stderr)
 	}
-	if !strings.Contains(res.stderr, errPoolTriggerWorktreeEvidence.Error()) || !strings.Contains(res.stderr, "(skipping)") {
+	if !strings.Contains(res.stderr, errPoolTriggerWorktreeEvidence.Error()) || !strings.Contains(res.stderr, "POOL-STARVATION-SKIP:") {
 		t.Fatalf("stderr = %q; want the worktree evidence skip", res.stderr)
 	}
 	row := res.row(t)
@@ -865,7 +865,7 @@ func TestLegacyNameOnlyBindWriteFailureSkipsTheSeat(t *testing.T) {
 			if _, ok := res.base[res.seatName]; ok {
 				t.Fatalf("the seat whose binding write failed is desired; stderr=%s", res.stderr)
 			}
-			if writes != 1 || !strings.Contains(res.stderr, "binding write failed") || !strings.Contains(res.stderr, "(skipping)") {
+			if writes != 1 || !strings.Contains(res.stderr, "binding write failed") || !strings.Contains(res.stderr, "POOL-STARVATION-SKIP:") {
 				t.Fatalf("%d writes, stderr = %q; want the one failed write, and the seat skipped", writes, res.stderr)
 			}
 			if got := strings.Contains(res.stderr, "(binding the seat unnamed)"); got != tc.unnamed {

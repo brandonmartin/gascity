@@ -1101,7 +1101,7 @@ schema = 1
 name = "polecat"
 scope = "city"
 `)
-	if _, err := runRepoCacheGit(seedDir, "init"); err != nil {
+	if _, err := runRepoCacheGit(seedDir, "init", "--initial-branch=main"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 	if _, err := runRepoCacheGit(seedDir, "add", "pack.toml"); err != nil {

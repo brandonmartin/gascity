@@ -290,6 +290,7 @@ func newCLIOpWakeFixtureOver(t *testing.T, backing beads.Store) *cliOpWakeFixtur
 		t.Fatalf("creating session bead: %v", err)
 	}
 	return &cliOpWakeFixture{rec: rec, id: b.ID, deps: sessionWakeDeps{
+		willNotStart:              wakeWillNotStart,
 		store:                     rec,
 		cfg:                       &config.City{Agents: []config.Agent{{Name: "worker"}}},
 		cityPath:                  "/city",
@@ -316,6 +317,11 @@ func (f *cliOpWakeFixture) run(t *testing.T, key string, asJSON bool) (int, stri
 	t.Helper()
 	deps := f.deps
 	deps.opKey = key
+	// Bound here, not at construction, so a test that swaps deps.store
+	// resolves against the store the wake runs on.
+	if deps.resolveSessionID == nil {
+		deps = deps.withSessionResolver()
+	}
 	var stdout, stderr bytes.Buffer
 	code := doSessionWake(f.id, &stdout, &stderr, asJSON, deps)
 	return code, stdout.String(), stderr.String()

@@ -1728,9 +1728,14 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "examples/gastown/maintenance_jsonl_signal_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "examples/gastown/maintenance_scope_test.go"
 resource = "subprocess"
-calls = 6
+calls = 7
 
 [[count]]
 path = "examples/gastown/maintenance_scripts_dolt_integration_test.go"

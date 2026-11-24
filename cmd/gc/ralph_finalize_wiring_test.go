@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 const wiringFormula = "ralph-finalize-wiring"
@@ -256,7 +257,7 @@ func runWiringWorkflow(t *testing.T, sc wiringScenario) *wiringResult {
 			if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
 				continue
 			}
-			result, err := dispatch.ProcessControl(beadstest.Graph(store), bead, dispatch.ProcessOptions{CityPath: cityPath, Work: beadstest.Work(store)})
+			result, err := dispatch.ProcessControl(beadstest.Graph(store), bead, dispatch.ProcessOptions{CityPath: cityPath, Work: beadstest.Work(store), InputStores: &sourceworkflow.InputStores{Graph: beadstest.Graph(store), Work: []beads.WorkStore{beadstest.Work(store)}}})
 			if err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					continue

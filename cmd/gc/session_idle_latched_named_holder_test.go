@@ -306,12 +306,13 @@ func TestSessionWakeOfIdleLatchedNamedHolderAgreesWithTheReconciler(t *testing.T
 	var stdout, stderr bytes.Buffer
 	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{beforeReconcile: func(_ *testing.T, cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, holder beads.Bead) {
 		code = doSessionWake(holder.ID, &stdout, &stderr, false, sessionWakeDeps{
-			store: store, cfg: cfg, cityPath: cityPath, cityResolved: true, sp: sp,
+			willNotStart: wakeWillNotStart,
+			store:        store, cfg: cfg, cityPath: cityPath, cityResolved: true, sp: sp,
 			now:                       func() time.Time { return time.Date(2026, 9, 22, 21, 52, 0, 0, time.UTC) },
 			withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
 			cityUsesManagedReconciler: func(string) bool { return true },
 			pokeController:            func(string, reconcilekey.Key) error { return nil },
-		})
+		}.withSessionResolver())
 	}}, nil)
 	if code != 0 || strings.Contains(stderr.String(), "will not start") || !strings.Contains(stdout.String(), "wake requested") {
 		t.Fatalf("gc session wake of the idle-latched holder = %d, stdout=%q stderr=%q; want the wake requested", code, stdout.String(), stderr.String())

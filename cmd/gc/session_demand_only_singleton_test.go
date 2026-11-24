@@ -131,7 +131,7 @@ func TestDoSessionWake_DemandOnlySingletonReportsItWillNotStart(t *testing.T) {
 				withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
 				cityUsesManagedReconciler: func(string) bool { return false },
 				pokeController:            func(string, reconcilekey.Key) error { return nil },
-			}
+			}.withSessionResolver()
 
 			var stdout, stderr bytes.Buffer
 			code := doSessionWake(b.ID, &stdout, &stderr, false, deps)

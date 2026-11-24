@@ -362,7 +362,7 @@ run_fan_out() {
   # Unit mode replaces the single TEST_ENV go-test process. Retain its provider
   # inputs across this second scrub; live session and Dolt variables stay out.
   extra_env=()
-  if [[ "$TEST_LOCAL_MODE" == "unit" ]]; then
+  if [[ "${TEST_LOCAL_MODE:-}" == "unit" ]]; then
     while IFS="=" read -r name _; do
       case "$name" in
         ANTHROPIC_*|CLAUDE_CODE_*|OLLAMA_API_KEY|XIAOMI_API_KEY|ZCODE_*)

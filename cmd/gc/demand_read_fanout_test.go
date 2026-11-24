@@ -442,7 +442,9 @@ func TestDefaultScaleCheckDemandFoldsInGroupOrder(t *testing.T) {
 	if got := demand["pool"].StoreRefs["dup-1"]; got != "city" {
 		t.Errorf("dup-1 store ref = %q, want the first leg %q", got, "city")
 	}
-	if got, want := demand["pool"].WorkBeadIDs, []string{"dup-1", "c-1", "p-1", "r3-1", "r6-1", "r9-1"}; !reflect.DeepEqual(got, want) {
+	// Demand is named in the canonical ready order the claim window serves
+	// (beads.SortBeadsReadyOrder); these rows tie on time, so by ID.
+	if got, want := demand["pool"].WorkBeadIDs, []string{"c-1", "dup-1", "p-1", "r3-1", "r6-1", "r9-1"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("WorkBeadIDs = %v, want %v", got, want)
 	}
 	if !partials["pool"] {

@@ -279,7 +279,7 @@ func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
 			poked = true
 			return nil
 		},
-	}
+	}.withSessionResolver()
 
 	if code := doSessionWake(sessionBead.ID, &bytes.Buffer{}, &bytes.Buffer{}, false, deps); code != 0 {
 		t.Fatalf("doSessionWake() = %d, want 0", code)
@@ -320,7 +320,7 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 		pokeController: func(string, reconcilekey.Key) error {
 			return errors.New("dial failed")
 		},
-	}
+	}.withSessionResolver()
 
 	var stderr bytes.Buffer
 	if code := doSessionWake(sessionBead.ID, &bytes.Buffer{}, &stderr, false, deps); code != 0 {
@@ -407,7 +407,7 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 					return nil
 				},
 				cityUsesManagedReconciler: func(string) bool { return false },
-			}
+			}.withSessionResolver()
 
 			var stdout, stderr bytes.Buffer
 			code := doSessionWake(b.ID, &stdout, &stderr, false, deps)
@@ -496,7 +496,7 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 			if sessionWakeHasRunnableTemplateInfo(session.Info{Template: "worker"}, cfg) {
 				t.Fatal("test setup: template \"worker\" must not be runnable under this config")
 			}
-			deps := sessionWakeDeps{willNotStart: wakeWillNotStart, store: store, cfg: cfg, cityPath: "/city", now: time.Now}
+			deps := sessionWakeDeps{willNotStart: wakeWillNotStart, store: store, cfg: cfg, cityPath: "/city", now: time.Now}.withSessionResolver()
 
 			// The wake is recorded (and a stale create healed), but no agent
 			// runs the template: the shared will-not-start predicate says so
@@ -672,7 +672,7 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 				pokeController: func(string, reconcilekey.Key) error {
 					return nil
 				},
-			}
+			}.withSessionResolver()
 
 			var stdout, stderr bytes.Buffer
 			code := doSessionWake(sessionBead.ID, &stdout, &stderr, false, deps)
@@ -984,11 +984,12 @@ func TestDoSessionWake_RefusesUnknownStateRow(t *testing.T) {
 	before := maps.Clone(b.Metadata)
 	withdrawn, pokes := 0, 0
 	deps := sessionWakeDeps{
-		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		willNotStart: wakeWillNotStart,
+		store:        store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
 		withdrawQueuedWaitNudges:  func(string, []string) error { withdrawn++; return nil },
 		cityUsesManagedReconciler: func(string) bool { return true },
 		pokeController:            func(string, reconcilekey.Key) error { pokes++; return nil },
-	}
+	}.withSessionResolver()
 	var stdout, stderr bytes.Buffer
 	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 {
 		t.Fatalf("doSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
@@ -1043,7 +1044,7 @@ func TestDoSessionWake_JudgesThePostWakeRow(t *testing.T) {
 		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
 		cityUsesManagedReconciler: func(string) bool { return false },
 		pokeController:            func(string, reconcilekey.Key) error { return nil },
-	}
+	}.withSessionResolver()
 	var stdout, stderr bytes.Buffer
 	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 || strings.Contains(stderr.String(), "drained pool seat") {
 		t.Fatalf("doSessionWake() = %d, stderr=%s; want the woken (asleep) seat not refused as drained", code, stderr.String())
@@ -1074,7 +1075,7 @@ func TestDoSessionWakeReadsTheWorkStoreOnASplitCity(t *testing.T) {
 	if code := doSessionWake(seat.ID, &bytes.Buffer{}, &stderr, false, sessionWakeDeps{
 		willNotStart: wakeWillNotStart,
 		store:        work, cfg: cfg, cityPath: cityPath, sp: sp, now: time.Now,
-	}); code != 0 || strings.Contains(stderr.String(), "will not start") {
+	}.withSessionResolver()); code != 0 || strings.Contains(stderr.String(), "will not start") {
 		t.Fatalf("doSessionWake = %d, stderr %q; want the work store's claim to override the latch", code, stderr.String())
 	}
 }
@@ -1099,11 +1100,12 @@ func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
 				t.Fatal(err)
 			}
 			deps := sessionWakeDeps{
-				store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+				willNotStart: wakeWillNotStart,
+				store:        store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
 				withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
 				cityUsesManagedReconciler: func(string) bool { return false },
 				pokeController:            func(string, reconcilekey.Key) error { return nil },
-			}
+			}.withSessionResolver()
 			var stderr bytes.Buffer
 			code := doSessionWake(b.ID, &bytes.Buffer{}, &stderr, false, deps)
 			refused := code != 0 && strings.Contains(stderr.String(), "circuit breaker is open")
@@ -1190,6 +1192,7 @@ func TestDoSessionWake_RefusedWakeWithFailedPokePromisesNoStart(t *testing.T) {
 				t.Fatalf("store.Create(): %v", err)
 			}
 			deps := sessionWakeDeps{
+				willNotStart:              wakeWillNotStart,
 				store:                     store,
 				cfg:                       tc.cfg,
 				cityPath:                  "/city",
@@ -1200,7 +1203,7 @@ func TestDoSessionWake_RefusedWakeWithFailedPokePromisesNoStart(t *testing.T) {
 				pokeController: func(string, reconcilekey.Key) error {
 					return errors.New("dial failed")
 				},
-			}
+			}.withSessionResolver()
 
 			var stdout, stderr bytes.Buffer
 			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 {
@@ -1242,6 +1245,7 @@ func TestDoSessionWake_AcceptedWakeStatesRollbackDeadline(t *testing.T) {
 		t.Fatalf("store.Create(): %v", err)
 	}
 	deps := sessionWakeDeps{
+		willNotStart:              wakeWillNotStart,
 		store:                     store,
 		cityPath:                  "/city",
 		cityResolved:              true,
@@ -1251,7 +1255,7 @@ func TestDoSessionWake_AcceptedWakeStatesRollbackDeadline(t *testing.T) {
 		pokeController: func(string, reconcilekey.Key) error {
 			return errors.New("dial failed")
 		},
-	}
+	}.withSessionResolver()
 
 	var stdout, stderr bytes.Buffer
 	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 {

@@ -59,10 +59,11 @@ type sessionWakeDeps struct {
 	cfgErr error
 	store  beads.Store
 	// resolveSessionID resolves the wake target against the session store,
-	// reopening a closed named session's row through beforeReopen; nil means
-	// resolveSessionIDMaterializingNamedBeforeReopen over the city.
+	// reopening a closed named session's row through beforeReopen. Production
+	// binds it with withSessionResolver; a wake with none wired is refused.
 	resolveSessionID func(target string, beforeReopen func(id string) error) (string, error)
-	// willNotStart is the will-not-start predicate; nil means wakeWillNotStart.
+	// willNotStart is the will-not-start predicate. Production binds
+	// wakeWillNotStart (withCLIEffects); a wake with none wired is refused.
 	willNotStart             func(session.Info, wakeVerdictDeps, time.Time) (string, bool)
 	cfg                      *config.City
 	cityPath                 string
@@ -119,7 +120,8 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 
 // withCLIEffects is deps with a CLI one-shot's production effects: the wall
 // clock, the city's wait-nudge withdrawal, the managed-reconciler probe,
-// whose failure warns on stderr, and the controller poke.
+// whose failure warns on stderr, the controller poke, the session resolver
+// (withSessionResolver) and, unless set, the wakeWillNotStart predicate.
 func (deps sessionWakeDeps) withCLIEffects(stderr io.Writer) sessionWakeDeps {
 	deps.now = time.Now
 	deps.withdrawQueuedWaitNudges = withdrawQueuedWaitNudges
@@ -131,10 +133,31 @@ func (deps sessionWakeDeps) withCLIEffects(stderr io.Writer) sessionWakeDeps {
 		return owned
 	}
 	deps.pokeController = enqueueController
+	if deps.willNotStart == nil {
+		deps.willNotStart = wakeWillNotStart
+	}
+	if deps.resolveSessionID == nil {
+		deps = deps.withSessionResolver()
+	}
+	return deps
+}
+
+// withSessionResolver is deps with resolveSessionID bound to
+// resolveSessionIDMaterializingNamedBeforeReopen over the wake's session
+// store, the store doSessionWake resolves from deps.store.
+func (deps sessionWakeDeps) withSessionResolver() sessionWakeDeps {
+	store, cfg, cityPath := deps.store, deps.cfg, deps.cityPath
+	deps.resolveSessionID = func(target string, beforeReopen func(id string) error) (string, error) {
+		return resolveSessionIDMaterializingNamedBeforeReopen(cityPath, cfg, cliSessionStore(store, cfg, cityPath), target, beforeReopen)
+	}
 	return deps
 }
 
 func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
+	if deps.resolveSessionID == nil || deps.willNotStart == nil {
+		fmt.Fprintln(stderr, "gc session wake: internal error: wake dependencies not wired (session resolver or will-not-start predicate)") //nolint:errcheck
+		return 1
+	}
 	sessStore := cliSessionStore(deps.store, deps.cfg, deps.cityPath)
 	// Resolving the target may materialize a named session's row, so under
 	// require the op store and the key are checked before it.
@@ -226,11 +249,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		if info, err := sessFront.Get(id); err == nil {
 			woken = info
 		}
-		willNotStart := deps.willNotStart
-		if willNotStart == nil {
-			willNotStart = wakeWillNotStart
-		}
-		if why, _ := willNotStart(woken, wakeVerdictDeps{
+		if why, _ := deps.willNotStart(woken, wakeVerdictDeps{
 			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, work: cityWorkLegOf(beads.WorkStore{Store: deps.store}), rigStores: rigStores,
 			runsV2: func() bool { return deps.cityResolved && cityRunsV2(deps.cityPath, deps.cfg) },
 		}, deps.now()); why != "" {
@@ -287,13 +306,7 @@ var errWakeNotAdmitted = errors.New("wake not admitted")
 // (refuseClosedWakeTarget).
 func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target string) (string, cliOpStart, error) {
 	admitted, start := "", cliOpStart(0)
-	resolve := deps.resolveSessionID
-	if resolve == nil {
-		resolve = func(target string, beforeReopen func(id string) error) (string, error) {
-			return resolveSessionIDMaterializingNamedBeforeReopen(deps.cityPath, deps.cfg, sessStore, target, beforeReopen)
-		}
-	}
-	id, err := resolve(target, func(closedID string) error {
+	id, err := deps.resolveSessionID(target, func(closedID string) error {
 		admitted, start = closedID, op.retarget(closedID)
 		if start != cliOpExecute {
 			return errWakeNotAdmitted

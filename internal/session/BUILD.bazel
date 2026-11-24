@@ -257,6 +257,7 @@ go_test(
         "submit_corpse_cache_test.go",
         "submit_family_test.go",
         "submit_poller_env_test.go",
+        "submit_poller_fds_unix_test.go",
         "submit_poller_identity_unix_test.go",
         "submit_poller_identity_windows_test.go",
         "submit_program_settle_test.go",

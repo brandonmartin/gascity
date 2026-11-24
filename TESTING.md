@@ -45,6 +45,17 @@ are run; Bazel is the runner that enforces it.
 | Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
 | Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
 
+**Hosts with no remote executor.** When
+`grep -s remote_executor ~/.bazelrc .bazelrc.local` finds nothing, Bazel
+executes on the host, and a whole-repo run can saturate a shared machine: one
+took a 96-core host to load 600. An agent there never runs the first row
+(`bazel test //...`, `make test`, `make check`). It runs named targets and
+subtrees while iterating, and
+`make check-affected AFFECTED_BASE=origin/<target branch>` as its pre-flight,
+the one sanctioned route to `go test`. The merge gate and CI run the whole
+repo. Pre-push still starts the whole-repo suite on Go changes unless the
+destination ref matches `git config gascity.prePushSkipRef`.
+
 Split-strict ratchet limit: a key names the offending function and its
 nearest caller in the package under test, and its caps count that function's
 and that caller's distinct lines. A NEW production path one level further up

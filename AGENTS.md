@@ -309,9 +309,9 @@ targets, and a green `go test` is not evidence a change passes CI.
   those exist only for files already there: `touch` each new golden first,
   or the generator writes it under `bazel-out` and the run still passes.
 
-- **Where it runs.** With no `remote_executor` in `~/.bazelrc` or
-  `.bazelrc.local`, Bazel runs locally; agents skip whole-repo runs there
-  (TESTING.md). Contributors use
+- **Where it runs.** No `remote_executor` in your rc files means local
+  Bazel: run `make check-affected`, not `make check` (TESTING.md).
+  Contributors use
   `--config=fork-cache` (anonymous read-only cache, local execution of
   misses); maintainers with an rbe-west client certificate use
   `--config=remote-exec` (ask your human before adding either to

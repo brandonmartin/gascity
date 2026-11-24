@@ -28,6 +28,7 @@ next to that code; read the matching file before changing it.
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
 | Native input admission | `internal/sourceworkflow/AGENTS.md` |
 | `internal/orders/` | `internal/orders/AGENTS.md` |
+| `internal/sling/` | `internal/sling/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
